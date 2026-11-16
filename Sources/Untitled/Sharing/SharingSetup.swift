@@ -73,14 +73,14 @@ struct SharingSetupProfile: Decodable {
         let profile = try Self.readProfile(profileURL, caches: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0])
         defer { try? FileManager.default.removeItem(at: profileURL) }
         let alert = NSAlert()
-        alert.messageText = "配置与“\(profile.peerName)”的键鼠共享？"
+        alert.messageText = "配置与“\(profile.peerName)”的外设共享？"
         alert.informativeText = "两台设备的校验码应相同：\n\(profile.fingerprint)\n\n允许后会保存本次配对密钥（如已有则替换），启动本次共享会话并检查键鼠权限。不会启动麦克风、安装驱动或设置登录启动。可随时从插件停止，⌃⌥⌘Esc 返回本机。"
         alert.addButton(withTitle: "允许并启动")
         alert.addButton(withTitle: "取消")
         NSApplication.shared.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { phase = "cancelled"; try report(); return }
         guard store.installed.contains(where: { $0.id == PeripheralSharingController.pluginID }) else {
-            throw PluginError.invalid("请先安装键鼠共享插件。")
+            throw PluginError.invalid("请先安装外设共享插件。")
         }
         try SharingPairingKey.save(profile.pairingKey)
         store.setEnabled(true, pluginID: PeripheralSharingController.pluginID)

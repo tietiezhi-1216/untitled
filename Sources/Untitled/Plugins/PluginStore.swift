@@ -392,14 +392,14 @@ final class PluginStore: ObservableObject {
     func performPeripheralAction(_ action: ActionKind, pluginID: String) throws {
         guard let plugin = installed.first(where: { $0.id == pluginID }), plugin.isEnabled,
               plugin.manifest.actions.contains(action), plugin.manifest.actions.contains(.sharePeripherals) else {
-            throw PluginError.invalid("请先启用并授权键鼠共享插件。")
+            throw PluginError.invalid("请先启用并授权外设共享插件。")
         }
         let controller = peripheralSharing(for: pluginID)
         switch action {
         case .sharePeripherals: if controller.isRunning { controller.stopUserSession() } else { try controller.startUserSession() }
         case .switchPeripheralControl: controller.toggleControl()
         case .stopPeripheralSharing: controller.stopUserSession()
-        default: throw PluginError.invalid("不支持的键鼠共享操作。")
+        default: throw PluginError.invalid("不支持的外设共享操作。")
         }
     }
 
