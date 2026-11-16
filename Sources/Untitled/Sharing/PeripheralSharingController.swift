@@ -42,7 +42,7 @@ import Network
     @Published var microphoneStatus = "麦克风共享已关闭"
     @Published var edge: SharingEdge { didSet { defaults.set(edge.rawValue, forKey: "sharing.edge"); input.edge = edge } }
     @Published var microphoneUID: String { didSet { defaults.set(microphoneUID, forKey: "sharing.microphoneUID"); stopCapture(); captureAttempted = false } }
-    var requirePermissions: (Set<HostPermissionID>) throws -> Void = { _ in throw PluginError.invalid("请先启用外设共享插件。") }
+    var requirePermissions: (Set<HostPermissionID>) throws -> Void = { _ in throw PluginError.invalid("请先启用键鼠共享插件。") }
     var isAllowed: () -> Bool = { false }
     var reportError: (Error) -> Void = { _ in }
     let transport = SharingTransport()
@@ -181,7 +181,7 @@ import Network
     func refreshDevices() { audioDevices = SharingAudioDevices.hardwareInputs(); objectWillChange.send() }
     func start(key: String? = nil, localOnly: Bool = false) throws {
         guard !isCursorDiagnostic else { throw PluginError.invalid("请先结束本机接管测试。") }
-        guard isAllowed() else { throw PluginError.invalid("请先安装并启用外设共享插件。") }
+        guard isAllowed() else { throw PluginError.invalid("请先安装并启用键鼠共享插件。") }
         guard !isRunning else { return }
         guard let key = key ?? loadPairingKey() else { throw PluginError.invalid("请先生成配对密钥，并在另一台 Mac 中粘贴同一密钥。") }
         try transport.start(key: SharingPairingKey.decode(key), name: serviceName, localOnly: localOnly)

@@ -1,0 +1,34 @@
+[
+  {
+    "key": "shortcuts-icon",
+    "prompt": "Use case: logo-brand. Asset type: original macOS app icon for a keyboard shortcut plugin. Square full-bleed 1024x1024 composition. A single beautifully sculpted ivory-white command-key four-loop symbol, symmetric and immediately recognizable, floating subtly over a rich periwinkle and violet glass tile. Soft beveled edges, polished translucent material, controlled studio highlights, premium simple 3D product design. Symbol occupies 60 percent of canvas, centered. Background fills every edge; the consuming app will round the corners. No text, no letters, no logos, no watermark, no surrounding margin, no external shadow."
+  },
+  {
+    "key": "speech-icon",
+    "prompt": "Use case: logo-brand. Asset type: original macOS app icon for a speech-to-text plugin. Square full-bleed 1024x1024 composition. Five sculpted ivory vertical sound-wave bars of different heights arranged symmetrically, with rounded ends, floating subtly over a luminous apricot-orange glass tile. Elegant minimal premium 3D product design, soft bevels, warm restrained studio highlights. The waveform occupies 60 percent of canvas and is centered. Background fills every edge; consuming app rounds corners. No words, no letters, no microphone, no brands, no watermark, no surrounding margin or external shadow."
+  },
+  {
+    "key": "capture-icon",
+    "prompt": "Use case: logo-brand. Asset type: original macOS app icon for a screenshot plugin. Square full-bleed 1024x1024 composition. Four substantial ivory-white rounded crop-viewfinder corners framing a small floating translucent cyan rectangle, centered over a luminous cobalt-blue glass tile. Precise simple geometry, elegant premium 3D product design, subtle studio highlights and restrained depth. Mark occupies 60 percent of canvas. Background fills every edge; consuming app rounds corners. No text, letters, brands, watermark, surrounding margin or external shadow."
+  },
+  {
+    "key": "sharing-icon",
+    "prompt": "Use case: logo-brand. Asset type: original macOS app icon for sharing a keyboard and mouse between two Macs. Square full-bleed 1024x1024 composition. Two small elegant ivory desktop displays side by side, connected by one smooth curved mint bridge ending in a tiny cursor arrow. Recognizable at small scale, simplified bold geometry, premium sculpted 3D icon, teal and emerald glass background, soft studio highlights. Mark centered and occupies 65 percent of canvas. Background fills every edge; app rounds corners. No text, brands, watermark, surrounding margin or external shadow."
+  },
+  {
+    "key": "shortcuts-preview",
+    "prompt": "Use case: ads-marketing. Asset type: landscape editorial promotional artwork for a native macOS keyboard-shortcut plugin in an App Store style gallery. Wide landscape 3:2 composition. Dreamy pale-lavender studio background, subtle purple gradient. On the RIGHT TWO THIRDS, a delightful premium 3D still life: ivory ceramic keyboard keycaps bearing simple command and arrow symbols, an elegant violet shortcut loop linking them, small translucent frosted panes. All objects thoughtfully arranged, coherent lighting, large clean silhouettes, tasteful editorial technology art. LEFT THIRD stays calm and empty lavender for UI text overlay, no objects across upper-left copy area. Soft shadows and tactile materials, no words, no invented application screenshot, no ratings, no logos, no watermark."
+  },
+  {
+    "key": "speech-preview",
+    "prompt": "Use case: ads-marketing. Asset type: landscape editorial promotional artwork for a speech-to-text plugin in a native macOS App Store style gallery. Wide landscape 3:2 composition. Warm cream and pale-peach studio setting. On the RIGHT TWO THIRDS, a flowing sculpted apricot and coral audio waveform ribbon elegantly transforms into tidy ivory horizontal text-like bars floating on translucent frosted cards. A few small light particles, sophisticated tactile 3D materials, gentle depth and soft natural shadows. LEFT THIRD remains clean empty warm cream for text overlay, upper-left fully uncluttered. Premium friendly productivity product campaign. No actual words, no letters, no brands, no application screenshots, no ratings, no watermark."
+  },
+  {
+    "key": "capture-preview",
+    "prompt": "Use case: ads-marketing. Asset type: landscape editorial promotional artwork for a screenshot, pinning and OCR plugin in a native macOS App Store style gallery. Wide landscape 3:2 composition. Pale ice-blue and off-white studio backdrop. On the RIGHT TWO THIRDS, premium 3D composition of layered translucent glass picture frames with abstract blue landscape shapes, four cobalt crop corners surrounding a floating image, and a small rounded pencil beside a pinned frosted note represented only by simple lines. Refined geometric shapes, luminous acrylic and ceramic textures, soft studio shadows, beautiful restraint. LEFT THIRD stays quiet and empty pale blue for native text overlay; no objects in upper-left. No words, no brands, no ratings, no watermark, no real interface screenshots."
+  },
+  {
+    "key": "sharing-preview",
+    "prompt": "Use case: ads-marketing. Asset type: landscape editorial promotional artwork for a native macOS plugin that shares one keyboard and mouse across two computers. Wide landscape 3:2 composition. Pale mint and warm-white studio environment. On the RIGHT TWO THIRDS, two elegant miniature ivory desktop monitors with abstract teal screen gradients are linked by a smooth mint ribbon carrying a single small cursor arrow; one beautifully simplified white keyboard and mouse rests in front. Coordinated premium tactile 3D product illustration, glass and soft ceramic materials, balanced soft shadows. LEFT THIRD remains calm empty pale mint for native text overlay, upper-left uncluttered. No words, logos, ratings, watermark or real interface screenshots."
+  }
+]

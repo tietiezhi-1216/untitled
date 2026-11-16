@@ -5,9 +5,11 @@
 
 ### 原生界面与 Liquid Glass
 
-主窗口采用 `hiddenTitleBar` 与全尺寸内容，不显示独立的标题条或工具栏，保留原生红黄绿按钮。左侧顶部预留 64 pt 窗口按钮区域，按钮距左侧 20 pt、顶部 26 pt，导航从其下方开始；原生按钮宿主仅覆盖左侧，避免挡住正文控件。顶部空白区和页面头部可拖动窗口。
+主窗口采用 `hiddenTitleBar` 与全尺寸内容，不显示独立的标题条或工具栏，保留原生红黄绿按钮。左侧顶部预留 60 pt 窗口按钮区域，按钮距左侧与顶部各 18 pt，按钮间距 8 pt，搜索框从预留区下方开始；原生按钮宿主仅覆盖左侧，避免挡住正文控件。按钮保留 AppKit 原生对象及激活状态：未激活窗口显示灰色，激活后由系统显示红黄绿，不用自绘圆点模拟。顶部空白区和页面头部可拖动窗口。
 
 侧边栏固定为 224 pt，始终显示且不可拖动调整；主窗口仍支持正常调整尺寸。右侧内容统一使用 28 pt 水平边距。安装、搜索、添加操作等控件在各页面上方保持可见。
+
+插件商店采用 App Store 风格的左侧搜索与分类导航，右侧为两列展示区。页面上方显示标题、蓝色「商店 / 已安装」分段切换和筛选菜单，下方每个插件用图标、名称、分类、作者和胶囊形获取按钮组成条目头部，再展示 1.6:1 宣传大图。列间距 26 pt，行间距 34 pt，窗口变宽仍保持两列；最小 880 pt 主窗口下也保留双列。图片与文案声明来自通用注册数据，界面不按插件 ID 编排。宣传图全部通过 Codex 内置图像工具生成，来源与提示词见 Resources/StoreArtwork/README.md。
 
 窗口采用低透色的中性材质：深色模式以石墨黑为底，浅色模式使用对应的浅灰色，侧栏与正文只有轻微明暗差。原生 `underWindowBackground` 背景保留少量桌面层次，避免壁纸颜色大幅染色。玻璃效果集中在搜索与操作控件；Xcode 26+（或包含 macOS 26+ SDK 的命令行工具）构建时使用官方 `glassEffect`、`.glass` / `.glassProminent`，配合收敛的圆角、选中态细边缘和蓝色重点操作。开启系统“减少透明度”或增加对比度时提高背景遮罩的不透明度。macOS 14–15 或旧 SDK 构建保留兼容样式。
 
@@ -18,8 +20,9 @@
 ```bash
 swift build
 swift test --no-parallel
+python3 scripts/prepare-plugin-resources.py --check
 ./scripts/build-app.sh release
-python3 scripts/package-plugins.py --tag v0.10.0
+python3 scripts/package-plugins.py --tag v0.12.0
 # 仅在 Release 资产实际发布后，追加 --write-catalog 更新在线商店
 ```
 
@@ -32,6 +35,8 @@ swift test --no-parallel \
 ```
 
 构建结果位于 `dist/debug/Untitled.app` 或 `dist/release/Untitled.app`，使用当前 Mac 的架构。命令行与 Xcode 均不启用 App Sandbox，保留系统隐私授权。图标由 `scripts/build-icon.sh` 从选定的裂变原图生成，随应用打包。
+
+内置插件展示信息来自 `Sources/Untitled/Resources/BundledPlugins.json`，Swift Package、命令行应用包与 Xcode 都包含同一资源。修改插件清单后运行 `python3 scripts/prepare-plugin-resources.py`；图像生成与内嵌方式见 [插件协议](../Plugins/README.md#商店展示图标与文档0120)。构建脚本与 CI 会检查资源是否同步。这份资源不安装插件、不改变已发布 ZIP、商店版本与 SHA-256。
 
 公式贴图使用随应用打包的 [KaTeX](../Resources/KaTeX/LICENSE)。静态 WebP 与 WebP 动图编码使用 [libwebp](../Tools/WebPEncoder/LICENSE)：`build-app.sh` 会构建并签名随包的 `img2webp`，首次构建下载固定版本源包并验证 SHA-256，用户运行发行版无需安装 Homebrew 或编码工具。相关许可保留在资源与工具目录。仅运行 Swift Package 可开发基本能力；完整发行功能应使用 `build-app.sh` 生成应用包。
 
@@ -93,6 +98,10 @@ scripts/         # 本地构建与插件打包
 ## 验证范围
 
 每个插件都按 [性能规范](PERFORMANCE.md) 检查资源消耗。高开销路径记录正常、上限、持续运行、取消和反复启停下的基线、峰值与回收，使用对应分析工具定位问题；不以功能测试代替性能测量。
+
+0.12.0 图文商店在 Mac18,5 / 16 GiB / macOS 27.2 的 Release 应用上记录了 3 次空闲样本，间隔 3 秒：RSS 均为 80,064 KiB（约 78.2 MiB），`ps` CPU 报告值均为 0.0%，累计 CPU 时间保持 0:00.49。图片加载、分类、搜索、最小宽度双列与深浅色布局采用原生视图渲染验证；宣传图缓存通过 24 次不同键的真实 JPEG 解码检查，始终不超过 12 MiB / 16 项，预取消请求不解码。页面在消失时清空持有的图片，解码由单一 actor 串行完成。相关协议、兼容、权限和布局共 52 项检查完成（其中联网安装默认跳过，随后单独开启并通过）。本机更新后，原有三个插件的操作、快捷键、启停状态与初始化标识的指纹一致。上述快照不代表进程峰值、GPU / I/O 峰值或多轮真实窗口启闭后的长期回收；这些指标未测，完整 Xcode 构建仍未在本机执行。高分辨率生成原图只保留在仓库，不随应用加载，素材与完整提示词见 [StoreArtwork](../Resources/StoreArtwork/README.md)。
+
+0.11.0 商店初版网格布局在 Mac18,5 / arm64 / 16 GiB / macOS 27.2 上使用 Release 构建做了空闲快照：商店加载完成后按 3 秒间隔取得 3 次 `ps` 样本，RSS 均为 74,016 KiB（约 72.3 MiB），CPU 报告值均为 0.0%，累计 CPU 时间保持 0:00.49。该快照是整应用的短时观察，不能归因到单个插件或代表峰值与长时趋势。深浅色 655 / 815 / 1055 pt 内容区、长作者名称截断、两列以上布局及 README 阅读采用实际 NSHostingView 渲染验证；后续单列版在相同三种内容区宽度完成布局检查，确认顶部控件同排、插件一行一个及长作者截断；单列版性能指标未重测。旧配置的操作与启停指纹在本机更新后保持一致。商店公开目录的联网下载与隔离安装检查通过。未测项：十轮真实详情启闭的 Release 回收趋势、GPU 与 I/O 峰值，以及录音、录屏和双 Mac 键鼠业务路径的本次性能回归。完整 Xcode target 编译在本机缺少 Xcode，新增源码与资源已同步 target 并通过工程 plist 检查。
 
 没有完整 Xcode 的机器可以执行 Swift Package 构建、测试、ICNS 与 plist 检查，但不能声称已通过 Xcode target 编译。双 Mac 键鼠、驱动、录音和真实媒体质量按相应插件说明验收，不以单机自动测试替代。
 

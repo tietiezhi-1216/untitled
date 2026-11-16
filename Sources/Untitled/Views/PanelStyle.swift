@@ -1,9 +1,9 @@
 import SwiftUI
 
 enum PanelLayout {
-    static let windowControlsHeight: CGFloat = 64
-    static let windowControlsLeading: CGFloat = 20
-    static let windowControlsTop: CGFloat = 26
+    static let windowControlsHeight: CGFloat = 60
+    static let windowControlsLeading: CGFloat = 18
+    static let windowControlsTop: CGFloat = 18
     static let coordinateSpace = "panel.content"
     static let sidebarWidth: CGFloat = 224
     static let contentInset: CGFloat = 28
@@ -21,6 +21,10 @@ enum PanelPalette {
 
     static func content(_ scheme: ColorScheme) -> Color {
         scheme == .dark ? Color(red: 0.105, green: 0.105, blue: 0.115) : Color(red: 0.985, green: 0.985, blue: 0.99)
+    }
+
+    static func store(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color(red: 0.125, green: 0.112, blue: 0.15) : Color(red: 0.985, green: 0.985, blue: 0.995)
     }
 
     static func sidebar(_ scheme: ColorScheme) -> Color {
@@ -125,6 +129,7 @@ private struct PanelNavigationSurface: ViewModifier {
 
 struct PanelSearchField: View {
     @Binding var text: String
+    var compact = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -142,23 +147,25 @@ struct PanelSearchField: View {
             }
         }
         .padding(.horizontal, 12)
-        .frame(height: 36)
-        .modifier(PanelSearchSurface())
+        .font(.system(size: compact ? 12 : 13))
+        .frame(height: compact ? 30 : 36)
+        .modifier(PanelSearchSurface(compact: compact))
     }
 }
 
 private struct PanelSearchSurface: ViewModifier {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    var compact: Bool
 
     func body(content: Content) -> some View {
         #if compiler(>=6.2)
         if !reduceTransparency, #available(macOS 26, *) {
-            content.glassEffect(.regular, in: .rect(cornerRadius: 10))
+            content.glassEffect(.regular, in: .rect(cornerRadius: compact ? 15 : 10))
         } else {
-            content.background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+            content.background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: compact ? 15 : 10))
         }
         #else
-        content.background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
+        content.background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: compact ? 15 : 10))
         #endif
     }
 }

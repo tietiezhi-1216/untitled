@@ -2,7 +2,7 @@ import Foundation
 
 enum HostInfo {
     static let name = "Untitled"
-    static let version = "0.10.5"
+    static let version = "0.12.0"
     static let bundleIdentifier = "com.untitled.app"
     static let repository = URL(string: "https://github.com/tietiezhi-1216/untitled")!
     static let catalog = URL(string: "https://raw.githubusercontent.com/tietiezhi-1216/untitled/main/Plugins/catalog.json")!
@@ -56,8 +56,12 @@ struct PluginManifest: Codable, Equatable, Sendable, Identifiable {
     let templates: [CommandTemplate]
     var ui: PluginInterface?
     var permissions: [PluginPermissionDeclaration]?
+    var icon: PluginIcon? = nil
+    var storefront: PluginStorefront? = nil
 
     func validate() throws {
+        try icon?.validate()
+        try storefront?.validate()
         guard schemaVersion == 1 || schemaVersion == 2 else { throw PluginError.invalid("不支持这个插件格式，请更新主程序。") }
         if schemaVersion == 2 {
             guard let ui, let minimum = Version(minimumHostVersion), minimum >= Version("0.4.0")! else {
@@ -86,6 +90,9 @@ struct PluginManifest: Codable, Equatable, Sendable, Identifiable {
         guard GitHubPluginSource.isRepository(repository) else {
             throw PluginError.invalid("插件源码地址必须是 HTTPS GitHub 仓库地址。")
         }
+        if storefront != nil, minimum < Version("0.12.0")! {
+            throw PluginError.invalid("商店宣传图需要 0.12.0 或更高版本宿主。")
+        }
         guard !actions.isEmpty, Set(actions).count == actions.count,
               templates.count <= 100, Set(templates.map(\.id)).count == templates.count,
               templates.allSatisfy({ !$0.id.isEmpty && !$0.title.isEmpty && $0.title.count <= 100 && actions.contains($0.action) }) else {
@@ -93,7 +100,7 @@ struct PluginManifest: Codable, Equatable, Sendable, Identifiable {
         }
         if actions.contains(where: { [.toggleDoubaoDictation, .holdDoubaoDictation, .cancelDoubaoDictation].contains($0) }),
            minimum < Version("0.9.8")! {
-            throw PluginError.invalid("豆包语音输入需要 0.9.8 或更高版本宿主。")
+            throw PluginError.invalid("语音输入需要 0.9.8 或更高版本宿主。")
         }
         if templates.contains(where: { $0.defaultHotKey != nil || $0.installByDefault != nil }) {
             guard minimum >= Version("0.6.0")! else { throw PluginError.invalid("默认动作声明需要 0.6.0 或更高版本宿主。") }
@@ -152,9 +159,9 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
         case .openURL: "打开网址"
         case .runShortcut: "运行快捷指令"
         case .showMainWindow: "显示主面板"
-        case .sharePeripherals: "启动或停止外设共享"
+        case .sharePeripherals: "启动或停止键鼠共享"
         case .switchPeripheralControl: "切换键鼠控制目标"
-        case .stopPeripheralSharing: "停止全部外设共享"
+        case .stopPeripheralSharing: "停止全部键鼠共享"
         case .toggleDoubaoDictation: "开始或结束豆包听写"
         case .holdDoubaoDictation: "按住说话（豆包）"
         case .cancelDoubaoDictation: "取消豆包听写"
@@ -290,6 +297,7 @@ struct InstalledPlugin: Codable, Equatable, Sendable, Identifiable {
     var commands: [PluginCommand]
     var installedAt = Date()
     var initializedDefaultTemplateIDs: [String]? = nil
+    var readme: String? = nil
     var id: String { manifest.id }
 
     /// Upgrade defaults once; user edits, cleared bindings and deleted defaults survive later upgrades.
@@ -350,8 +358,12 @@ struct CatalogEntry: Codable, Identifiable, Sendable {
     let author: String
     let downloadURL: URL
     let sha256: String
+    var icon: PluginIcon? = nil
+    var storefront: PluginStorefront? = nil
 
     func validate() throws {
+        try icon?.validate()
+        try storefront?.validate()
         guard GitHubPluginSource.isReleaseArchive(downloadURL),
               sha256.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil,
               Version(version) != nil, !id.isEmpty, !name.isEmpty else {

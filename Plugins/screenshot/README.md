@@ -1,6 +1,6 @@
 # 截图
 
-v1.5.0 需要 Untitled 0.9.0+；录屏和系统翻译需要 macOS 15+。
+v1.6.1 需要 Untitled 0.12.0+；录屏和系统翻译需要 macOS 15+。
 首次安装自动配置 [PixPin macOS 默认快捷键](https://pixpin.cn/docs/settings/shortcuts-actions)：
 
 | 动作 | 默认快捷键 |

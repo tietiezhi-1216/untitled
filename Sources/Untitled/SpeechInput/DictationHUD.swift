@@ -49,7 +49,7 @@ private struct DictationHUDView: View {
         .background(Color(white: 0.08), in: Capsule())
         .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 1))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("豆信语音输入，" + controller.phase.title)
+        .accessibilityLabel("语音输入，" + controller.phase.title)
         .accessibilityHint("使用听写快捷键结束，或取消快捷键取消")
         .environment(\.colorScheme, .dark)
     }

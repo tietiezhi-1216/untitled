@@ -40,7 +40,7 @@ final class PluginStore: ObservableObject {
     func performDictationAction(_ action: ActionKind, pluginID: String, holdCommandID: UUID? = nil) throws {
         guard let plugin = installed.first(where: { $0.id == pluginID }), plugin.isEnabled,
               plugin.manifest.actions.contains(action), plugin.manifest.actions.contains(.toggleDoubaoDictation) else {
-            throw PluginError.invalid("请先启用并授权豆信语音输入插件。")
+            throw PluginError.invalid("请先启用并授权语音输入插件。")
         }
         let controller = doubaoDictation(for: pluginID)
         switch action {
@@ -118,12 +118,16 @@ final class PluginStore: ObservableObject {
     }
 
     private let directory: URL
+    let presentations: PluginPresentationIndex
+    private var documentationCache: [(key: String, text: String)] = []
     private let startupError: String?
     private let hotKeys = HotKeyManager()
     private var recordingObserver: AnyCancellable?
 
     init(directory: URL? = nil, captureDirectory: URL? = nil, startupError: String? = nil, uiRegistry: PluginUIRegistry? = nil, permissions: HostPermissionCenter? = nil, sharingDefaults: UserDefaults? = nil,
+         presentations: PluginPresentationIndex = .bundled,
          dictationFactory: @escaping (URL) -> DoubaoDictationController = { DoubaoDictationController(preferencesURL: $0) }) {
+        self.presentations = presentations
         self.dictationFactory = dictationFactory
         self.startupError = startupError
         if let sharingDefaults { self.sharingDefaults = sharingDefaults; isolatedSharingDomain = nil }
@@ -171,7 +175,7 @@ final class PluginStore: ObservableObject {
         catalogError = nil
         defer { isRefreshing = false }
         do {
-            let data = try await Self.fetch(HostInfo.catalog, maximumBytes: 512 * 1024)
+            let data = try await Self.fetch(HostInfo.catalog, maximumBytes: 2 * 1024 * 1024)
             let catalog = try JSONDecoder().decode(PluginCatalog.self, from: data)
             try catalog.validate()
             let entries = catalog.plugins.map(IdentityMigration.catalogEntry)
@@ -190,14 +194,14 @@ final class PluginStore: ObservableObject {
             let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".zip")
             defer { try? FileManager.default.removeItem(at: temporary) }
             try data.write(to: temporary, options: .atomic)
-            let original = try await Task.detached {
-                try PluginArchive.read(temporary, expectedSHA256: entry.sha256)
+            let contents = try await Task.detached {
+                try PluginArchive.readContents(temporary, expectedSHA256: entry.sha256)
             }.value
-            let manifest = IdentityMigration.manifest(original)
+            let manifest = IdentityMigration.manifest(contents.manifest)
             guard manifest.id == IdentityMigration.catalogEntry(entry).id, manifest.version == entry.version else {
                 throw PluginError.invalid("插件包与商店记录不一致。")
             }
-            try installManifest(manifest)
+            try installManifest(manifest, readme: contents.readme)
         } catch { errorMessage = "安装失败：\(error.localizedDescription)" }
     }
 
@@ -210,14 +214,17 @@ final class PluginStore: ObservableObject {
             if scoped { url.stopAccessingSecurityScopedResource() }
         }
         do {
-            let original = try await Task.detached { try PluginArchive.read(url) }.value
-            let manifest = IdentityMigration.manifest(original)
-            try installManifest(manifest)
+            let contents = try await Task.detached { try PluginArchive.readContents(url) }.value
+            let manifest = IdentityMigration.manifest(contents.manifest)
+            try installManifest(manifest, readme: contents.readme)
             requestedPluginID = manifest.id
         } catch { errorMessage = "安装失败：\(error.localizedDescription)" }
     }
 
-    func installManifest(_ source: PluginManifest) throws {
+    func installManifest(_ source: PluginManifest, readme: String? = nil) throws {
+        guard readme.map({ $0.utf8.count <= PluginArchive.maximumReadmeSize }) ?? true else {
+            throw PluginError.invalid("插件说明超过 128 KiB 限制。")
+        }
         let manifest = IdentityMigration.manifest(source)
         try manifest.validate()
         try uiRegistry.validate(manifest)
@@ -232,6 +239,7 @@ final class PluginStore: ObservableObject {
             dictationControllers[manifest.id]?.cancel(message: "插件正在更新，听写已停止。")
             let resumeSharing = sharingControllers[manifest.id]?.isRunning == true && sharingDefaults.bool(forKey: "sharing.sessionEnabled")
             sharingControllers[manifest.id]?.stop(reason: "正在更新插件。")
+            if manifest.version != record.manifest.version || readme != nil { record.readme = readme }
             record.manifest = manifest
             let conflicts = record.initializeDefaultCommands(occupiedHotKeys: occupiedHotKeys(excluding: manifest.id))
             try save(record)
@@ -239,10 +247,57 @@ final class PluginStore: ObservableObject {
             if resumeSharing { do { try sharingControllers[manifest.id]?.restoreUserSessionIfRequested() } catch { handleExecutionError(error) } }
         } else {
             var record = InstalledPlugin(manifest: manifest, commands: [])
+            record.readme = readme
             let conflicts = record.initializeDefaultCommands(occupiedHotKeys: occupiedHotKeys(excluding: manifest.id))
             try save(record)
             reportDefaultConflicts(conflicts)
         }
+    }
+
+    func presentation(for manifest: PluginManifest) -> PluginPresentation {
+        let bundled = presentations.appearance(id: manifest.id, repository: manifest.repository, version: manifest.version)
+        return PluginPresentation(id: manifest.id, repository: manifest.repository, version: manifest.version,
+            name: bundled?.name ?? manifest.name, summary: bundled?.summary ?? manifest.summary,
+            icon: bundled?.icon ?? manifest.icon ?? PluginIcon(symbol: uiRegistry.interface(for: manifest).icon ?? "puzzlepiece.extension", tint: "#5875E7"), readmeURL: bundled?.readmeURL,
+            storefront: bundled?.storefront ?? manifest.storefront)
+    }
+
+    func presentation(for entry: CatalogEntry) -> PluginPresentation {
+        let repository = URL(string: "https://github.com/" + entry.downloadURL.pathComponents.dropFirst().prefix(2).joined(separator: "/"))!
+        let bundled = presentations.appearance(id: entry.id, repository: repository, version: entry.version)
+        return PluginPresentation(id: entry.id, repository: repository, version: entry.version,
+            name: bundled?.name ?? entry.name, summary: bundled?.summary ?? entry.summary, icon: bundled?.icon ?? entry.icon,
+            readmeURL: bundled?.readmeURL, storefront: bundled?.storefront ?? entry.storefront)
+    }
+
+    func documentation(for entry: CatalogEntry) async throws -> String? {
+        if let plugin = installed.first(where: { $0.id == entry.id && $0.manifest.version == entry.version }), let readme = plugin.readme {
+            return readme
+        }
+        let key = entry.id + ":" + entry.version + ":" + entry.sha256
+        if let cached = documentationCache.first(where: { $0.key == key }) { return cached.text }
+        try entry.validate()
+        let data = try await Self.fetch(entry.downloadURL, maximumBytes: PluginArchive.maximumPackageSize)
+        try Task.checkCancellation()
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".zip")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        try data.write(to: temporary, options: .atomic)
+        let contents = try await Task.detached { try PluginArchive.readContents(temporary, expectedSHA256: entry.sha256) }.value
+        try Task.checkCancellation()
+        let manifest = IdentityMigration.manifest(contents.manifest)
+        guard manifest.id == entry.id, manifest.version == entry.version else {
+            throw PluginError.invalid("插件说明与商店记录不一致。")
+        }
+        if let text = contents.readme {
+            documentationCache.removeAll { $0.key == key }
+            documentationCache.append((key, text))
+            if documentationCache.count > 8 { documentationCache.removeFirst() }
+            if var record = installed.first(where: { $0.id == entry.id && $0.manifest.version == entry.version }) {
+                record.readme = text
+                try save(record, reloadBindings: false)
+            }
+        }
+        return contents.readme
     }
 
     func restoreDefaultCommands(pluginID: String) throws {
@@ -337,14 +392,14 @@ final class PluginStore: ObservableObject {
     func performPeripheralAction(_ action: ActionKind, pluginID: String) throws {
         guard let plugin = installed.first(where: { $0.id == pluginID }), plugin.isEnabled,
               plugin.manifest.actions.contains(action), plugin.manifest.actions.contains(.sharePeripherals) else {
-            throw PluginError.invalid("请先启用并授权外设共享插件。")
+            throw PluginError.invalid("请先启用并授权键鼠共享插件。")
         }
         let controller = peripheralSharing(for: pluginID)
         switch action {
         case .sharePeripherals: if controller.isRunning { controller.stopUserSession() } else { try controller.startUserSession() }
         case .switchPeripheralControl: controller.toggleControl()
         case .stopPeripheralSharing: controller.stopUserSession()
-        default: throw PluginError.invalid("不支持的外设共享操作。")
+        default: throw PluginError.invalid("不支持的键鼠共享操作。")
         }
     }
 
@@ -383,15 +438,15 @@ final class PluginStore: ObservableObject {
         showMainWindow()
     }
 
-    private func save(_ record: InstalledPlugin) throws {
+    private func save(_ record: InstalledPlugin, reloadBindings: Bool = true) throws {
         if let startupError { throw PluginError.invalid(startupError) }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(record).write(to: directory.appendingPathComponent(record.id + ".json"), options: .atomic)
         if let index = installed.firstIndex(where: { $0.id == record.id }) { installed[index] = record }
         else { installed.append(record) }
-        installed.sort { $0.manifest.name.localizedStandardCompare($1.manifest.name) == .orderedAscending }
-        reloadHotKeys()
+        installed.sort { presentation(for: $0.manifest).name.localizedStandardCompare(presentation(for: $1.manifest).name) == .orderedAscending }
+        if reloadBindings { reloadHotKeys() }
     }
 
     private func reloadHotKeys() {

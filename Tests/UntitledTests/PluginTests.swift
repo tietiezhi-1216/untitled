@@ -284,6 +284,8 @@ struct PluginTests {
                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false
             )
             window.isReleasedWhenClosed = false
+            let originalWindowButtons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton]
+                .compactMap { window.standardWindowButton($0) }
             window.contentView = host
             defer { window.close() }
 
@@ -311,6 +313,7 @@ struct PluginTests {
                     #expect(abs(bounds.height - host.bounds.height) < 1)
                     #expect(abs(sidebar.width - 224) < 1)
                     #expect(controls.maxY <= navigation.minY)
+                    #expect(abs(controls.height - 60) < 1)
                     #expect(header.minX >= sidebar.maxX)
                     #expect(header.contains(heading))
                     #expect(heading.contains(title))
@@ -341,13 +344,15 @@ struct PluginTests {
                     #expect(window.toolbar == nil)
                     #expect(!window.isOpaque)
                     #expect(window.isMovableByWindowBackground)
-                    var expectedX: CGFloat = 20
-                    for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+                    var expectedX: CGFloat = 18
+                    for (index, kind) in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].enumerated() {
                         let button = try #require(window.standardWindowButton(kind))
+                        #expect(button === originalWindowButtons[index])
+                        #expect(button.window === window)
                         let buttonFrame = host.convert(button.bounds, from: button)
                         #expect(controls.contains(buttonFrame))
                         #expect(abs(buttonFrame.minX - expectedX) < 1)
-                        #expect(abs(buttonFrame.minY - 26) < 1)
+                        #expect(abs(buttonFrame.minY - 18) < 1)
                         #expect(!header.intersects(buttonFrame))
                         #expect(!navigation.intersects(buttonFrame))
                         expectedX = buttonFrame.maxX + 8

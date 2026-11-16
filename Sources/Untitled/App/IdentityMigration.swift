@@ -34,14 +34,14 @@ enum IdentityMigration {
         return PluginManifest(schemaVersion: value.schemaVersion, id: id, name: value.name, version: value.version,
                               summary: value.summary, author: value.author, repository: value.repository,
                               minimumHostVersion: value.minimumHostVersion, actions: value.actions,
-                              templates: value.templates, ui: value.ui, permissions: value.permissions)
+                              templates: value.templates, ui: value.ui, permissions: value.permissions, icon: value.icon, storefront: value.storefront)
     }
 
     /// Keep published URLs, versions and SHA-256 intact; only the installed identity changes.
     static func catalogEntry(_ value: CatalogEntry) -> CatalogEntry {
         guard let id = pluginIDs[value.id], isPublishedSource(value.downloadURL) else { return value }
         return CatalogEntry(id: id, name: value.name, version: value.version, summary: value.summary,
-                            author: value.author, downloadURL: value.downloadURL, sha256: value.sha256)
+                            author: value.author, downloadURL: value.downloadURL, sha256: value.sha256, icon: value.icon, storefront: value.storefront)
     }
 
     @MainActor static func prepare() throws {

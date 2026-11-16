@@ -6,6 +6,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		BE6C0A4EB2149B0B44ADEEBF /* BundledPlugins.json in Resources */ = {isa = PBXBuildFile; fileRef = A776FB06792C15F83B5BCB95; };
+		5947A7D367A6E0B42B64EF25 /* PluginReadmeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4C328F96B949EE3B6AF0E63 /* PluginReadmeView.swift */; };
+		E3CFF62A8B09FB1D6B45F309 /* PluginStoreDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8030D9C6C9C25A98E4A33F43 /* PluginStoreDetailView.swift */; };
+		3F5EBAF66A624359CC1CE48C /* PluginAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = E32FD11CE96AFE9F55774254 /* PluginAppearance.swift */; };
 		A91701000000000000000000 /* IdentityMigration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91702000000000000000000 /* IdentityMigration.swift */; };
 		A91701000000000000000001 /* AppCredentials.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91702000000000000000001 /* AppCredentials.swift */; };
 		F10000000000000000000001 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000002 /* AppIcon.icns */; };
@@ -99,6 +103,10 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		A776FB06792C15F83B5BCB95 /* BundledPlugins.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = Sources/Untitled/Resources/BundledPlugins.json; sourceTree = SOURCE_ROOT; };
+		D4C328F96B949EE3B6AF0E63 /* PluginReadmeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginReadmeView.swift; sourceTree = "<group>"; };
+		8030D9C6C9C25A98E4A33F43 /* PluginStoreDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginStoreDetailView.swift; sourceTree = "<group>"; };
+		E32FD11CE96AFE9F55774254 /* PluginAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginAppearance.swift; sourceTree = "<group>"; };
 		A91702000000000000000000 /* IdentityMigration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityMigration.swift; sourceTree = "<group>"; };
 		A91702000000000000000001 /* AppCredentials.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppCredentials.swift; sourceTree = "<group>"; };
 		F10000000000000000000002 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
@@ -219,7 +227,7 @@
 		};
 		A40000000000000000000006 /* Resources */ = {
 			isa = PBXGroup;
-			children = (F10000000000000000000002 /* AppIcon.icns */, CA8000000000000000000001 /* KaTeX */, A20000000000000000000006 /* Info.plist */, A20000000000000000000010 /* Untitled.entitlements */);
+			children = (A776FB06792C15F83B5BCB95 /* BundledPlugins.json */, F10000000000000000000002 /* AppIcon.icns */, CA8000000000000000000001 /* KaTeX */, A20000000000000000000006 /* Info.plist */, A20000000000000000000010 /* Untitled.entitlements */);
 			path = Resources;
 			sourceTree = "<group>";
 		};
@@ -265,6 +273,7 @@
 		546B09B18166645FBEDD2DC6 /* Plugins */ = {
 			isa = PBXGroup;
 			children = (
+				E32FD11CE96AFE9F55774254 /* PluginAppearance.swift */,
 				A4E1953DE9DEFF6E08A8E83A /* HostPluginUIProvider.swift */,
 				A999C90C261432CB19270FC9 /* PluginUIRegistry.swift */,
 				A615EE31B37A10F80E91FBA0 /* PluginInterface.swift */,
@@ -291,6 +300,8 @@
 		9C2A3F0DB1E6F7465E998255 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				D4C328F96B949EE3B6AF0E63 /* PluginReadmeView.swift */,
+				8030D9C6C9C25A98E4A33F43 /* PluginStoreDetailView.swift */,
 				AEDD6FFE3AE433322C3BFC94 /* PluginWorkspaceView.swift */,
 				B00000000000000000000004 /* PanelWindowChrome.swift */,
 				B00000000000000000000002 /* PanelStyle.swift */,
@@ -433,7 +444,7 @@
 		A60000000000000000000002 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
-			files = (CA8000000000000000000002 /* KaTeX in Resources */, F10000000000000000000001 /* AppIcon.icns in Resources */);
+			files = (BE6C0A4EB2149B0B44ADEEBF /* BundledPlugins.json in Resources */, CA8000000000000000000002 /* KaTeX in Resources */, F10000000000000000000001 /* AppIcon.icns in Resources */);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
@@ -443,6 +454,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5947A7D367A6E0B42B64EF25 /* PluginReadmeView.swift in Sources */,
+				E3CFF62A8B09FB1D6B45F309 /* PluginStoreDetailView.swift in Sources */,
+				3F5EBAF66A624359CC1CE48C /* PluginAppearance.swift in Sources */,
 				A91701000000000000000000 /* IdentityMigration.swift in Sources */,
 				A91701000000000000000001 /* AppCredentials.swift in Sources */,
 				A91601000000000000000000 /* DoubaoASRProtocol.swift in Sources */,

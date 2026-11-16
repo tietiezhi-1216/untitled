@@ -9,7 +9,7 @@ let package = Package(
         .executable(name: "Untitled", targets: ["Untitled"])
     ],
     targets: [
-        .executableTarget(name: "Untitled"),
+        .executableTarget(name: "Untitled", resources: [.process("Resources")]),
         .testTarget(name: "UntitledTests", dependencies: ["Untitled"])
     ]
 )

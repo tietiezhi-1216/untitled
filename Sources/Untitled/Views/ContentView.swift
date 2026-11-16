@@ -10,9 +10,11 @@ struct ContentView: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.colorSchemeContrast) private var contrast
     @ViewState private var selection: String
+    @StateObject private var marketplace = PluginMarketplaceNavigation()
 
-    init(initialSelection: String = "__store__") {
+    init(initialSelection: String = "__store__", initialStoreScope: PluginStoreScope = .store) {
         _selection = ViewState(wrappedValue: initialSelection)
+        _marketplace = StateObject(wrappedValue: PluginMarketplaceNavigation(scope: initialStoreScope))
     }
 
     private var selectedPlugin: InstalledPlugin? {
@@ -29,14 +31,11 @@ struct ContentView: View {
                 if let plugin = selectedPlugin {
                     PluginWorkspaceView(pluginID: plugin.id).id(plugin.id)
                 } else {
-                    VStack(spacing: 0) {
-                        pageHeader
-                        PluginStoreView { selection = $0 }
-                    }
+                    PluginStoreView(navigation: marketplace) { selection = $0 }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(PanelPalette.content(scheme).opacity(contentBackgroundOpacity))
+            .background((selectedPlugin == nil ? PanelPalette.store(scheme) : PanelPalette.content(scheme)).opacity(contentBackgroundOpacity))
         }
         .frame(minWidth: 880, minHeight: 580)
         .background {
@@ -73,6 +72,7 @@ struct ContentView: View {
         .onChange(of: store.requestedPluginID) { _, id in
             if let id { selection = id; store.requestedPluginID = nil }
         }
+        .onChange(of: marketplace.search) { _, _ in selection = "__store__" }
         .alert("操作未完成", isPresented: Binding(
             get: { store.errorMessage != nil },
             set: { if !$0 { store.errorMessage = nil } }
@@ -90,10 +90,22 @@ struct ContentView: View {
                 .contentShape(Rectangle())
                 .panelWindowDragArea()
                 .panelRegion("panel.windowControls")
+            PanelSearchField(text: $marketplace.search, compact: true)
+                .padding(.horizontal, 16).padding(.bottom, 20)
+                .panelRegion("store.sidebar.search")
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
-                    navigationItem("插件商店", symbol: "square.grid.2x2", id: "__store__")
-                    Text("已安装")
+                    navigationItem("探索", symbol: "star", id: "__store__")
+                    navigationItem("已安装", symbol: "square.stack.3d.up", id: "__installed__")
+                    if !categories.isEmpty {
+                        Text("分类").font(.caption.weight(.medium)).foregroundStyle(.tertiary)
+                            .padding(.horizontal, 12).padding(.top, 18).padding(.bottom, 4)
+                            .accessibilityAddTraits(.isHeader)
+                        ForEach(categories, id: \.title) { category in
+                            navigationItem(category.title, symbol: category.symbol, id: "__category__." + category.title)
+                        }
+                    }
+                    Text("我的插件")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 12)
@@ -102,9 +114,10 @@ struct ContentView: View {
                         .accessibilityAddTraits(.isHeader)
                     ForEach(store.installed) { plugin in
                         navigationItem(
-                            plugin.manifest.name,
-                            symbol: plugin.isEnabled ? store.uiRegistry.interface(for: plugin.manifest).icon ?? "puzzlepiece.extension" : "pause.circle",
-                            id: plugin.id
+                            store.presentation(for: plugin.manifest).name,
+                            symbol: "puzzlepiece.extension",
+                            id: plugin.id, icon: store.presentation(for: plugin.manifest).icon,
+                            enabled: plugin.isEnabled
                         )
                     }
                     if store.installed.isEmpty {
@@ -130,53 +143,76 @@ struct ContentView: View {
             .panelRegion("panel.settings")
         }
         .frame(maxHeight: .infinity)
+        .background {
+            LinearGradient(colors: [Color.indigo.opacity(scheme == .dark ? 0.16 : 0.07), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)
+        }
         .panelNavigationSurface()
         .accessibilityElement(children: .contain)
         .panelRegion("panel.sidebar")
     }
 
-    private func navigationItem(_ title: String, symbol: String, id: String) -> some View {
-        Button { selection = id } label: {
+    private var categories: [(title: String, symbol: String)] {
+        let presentations = store.presentations.plugins + store.catalog.map { store.presentation(for: $0) } +
+            store.installed.map { store.presentation(for: $0.manifest) }
+        var values: [String: String] = [:]
+        for presentation in presentations {
+            if let storefront = presentation.storefront { values[storefront.category] = storefront.categorySymbol }
+            else if values[presentation.category] == nil { values[presentation.category] = "square.grid.2x2" }
+        }
+        return values.map { (title: $0.key, symbol: $0.value) }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+
+    private func isSelected(_ id: String) -> Bool {
+        if id == "__store__" { return selectedPlugin == nil && marketplace.scope == .store && marketplace.category == nil }
+        if id == "__installed__" { return selectedPlugin == nil && marketplace.scope == .installed && marketplace.category == nil }
+        if id.hasPrefix("__category__.") { return selectedPlugin == nil && marketplace.category == String(id.dropFirst("__category__.".count)) }
+        return selection == id
+    }
+
+    private func navigationItem(_ title: String, symbol: String, id: String, icon: PluginIcon? = nil, enabled: Bool = true) -> some View {
+        let active = isSelected(id)
+        return Button {
+            if id == "__store__" || id == "__installed__" {
+                marketplace.search = ""
+                marketplace.category = nil
+                marketplace.scope = id == "__store__" ? .store : .installed
+                selection = "__store__"
+            } else if id.hasPrefix("__category__.") {
+                marketplace.search = ""
+                marketplace.category = String(id.dropFirst("__category__.".count))
+                marketplace.scope = .store
+                selection = "__store__"
+            } else { selection = id }
+        } label: {
             HStack(spacing: 10) {
-                Image(systemName: symbol)
-                    .foregroundStyle(selection == id ? Color.accentColor : Color.secondary)
-                    .frame(width: 16)
+                if let icon {
+                    PluginIconView(icon: icon, size: 22).opacity(enabled ? 1 : 0.4)
+                } else {
+                    Image(systemName: symbol)
+                        .foregroundStyle(Color.accentColor).frame(width: 22)
+                }
                 Text(title)
             }
-                .font(.system(size: 13, weight: selection == id ? .semibold : .regular))
+                .font(.system(size: 13, weight: active ? .semibold : .medium))
                 .lineLimit(1)
-                .foregroundStyle(selection == id ? Color.primary : Color.secondary)
+                .foregroundStyle(Color.primary.opacity(active ? 1 : 0.85))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 12)
                 .frame(height: 40)
                 .contentShape(Rectangle())
                 .background(
-                    selection == id ? Color.primary.opacity(0.065) : Color.clear,
+                    active ? Color.accentColor.opacity(0.13) : Color.clear,
                     in: RoundedRectangle(cornerRadius: 9)
                 )
                 .overlay {
                     RoundedRectangle(cornerRadius: 9)
-                        .strokeBorder(Color.primary.opacity(selection == id ? 0.06 : 0), lineWidth: 1 / displayScale)
+                        .strokeBorder(Color.primary.opacity(active ? 0.04 : 0), lineWidth: 1 / displayScale)
                 }
         }
         .buttonStyle(.plain)
         .help(title)
-        .accessibilityAddTraits(selection == id ? .isSelected : [])
+        .accessibilityAddTraits(active ? .isSelected : [])
         .panelRegion("navigation.\(id)")
-    }
-
-    private var pageHeader: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("插件商店").font(.system(size: 22, weight: .semibold))
-            Text("发现并安装你的常用工具").font(.callout).foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle()).panelWindowDragArea()
-        .panelRegion("panel.title")
-        .padding(.horizontal, PanelLayout.contentInset)
-        .padding(.vertical, 24)
-        .frame(minHeight: 96)
-        .panelRegion("panel.header")
     }
 
     private var contentBackgroundOpacity: Double {

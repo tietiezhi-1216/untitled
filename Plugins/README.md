@@ -21,6 +21,7 @@
 | `templates` | 用户添加操作时的模板，包含 `id`、`title`、`action` |
 | `permissions` | 0.5.0+ 插件显式声明所需权限；无需权限时为 `[]` |
 | `ui` | 界面协议：`version: 1`、可选 SF Symbol `icon`、`slots` 和 `panels` |
+| `icon` | 0.11.0+ 商店、侧栏和页头共用的图标：`symbol`、`tint` 与可选内嵌 PNG |
 
 支持动作：`openApplication`、`openURL`、`runShortcut`、`showMainWindow`、`captureRegion`、`captureWindow`、`captureScreen`、`captureScrolling`、`captureRecording`、`pinClipboard`、`togglePins`、`captureHistory`。安装、注册界面或加载清单不会执行这些动作；显式声明的默认操作会在安装时注册快捷键。
 
@@ -29,6 +30,35 @@
 0.9.8+ 支持原生[豆包语音输入](doubao-speech-input/README.md)：`toggleDoubaoDictation`、`holdDoubaoDictation`、`cancelDoubaoDictation`，以及 `doubao.dictation` / `doubao.preferences` 组件、`doubao.toggle` / `doubao.cancel` 命令。清单使用最低宿主 0.9.8；切换与按住两种操作各自使用通用默认模板，按住动作由 Carbon 的按下 / 松开事件驱动，重绑、停用会结束未松开的动作。安装或渲染界面不录音、不联网；实际采集与实时输入通过绑定插件身份的麦克风 / 辅助功能权限客户端检查。禁用、升级、卸载和退出停止本插件的设备、连接、任务与黑白非激活浮条。ZIP 不携带动态原生代码。
 
 0.10.0 部署构建对语音实时上屏设置生产默认关闭的 readiness gate。0.10.1 的豆信 1.1.1 自测版保留 `realtimeInputVerified: false`，另提供用户明确 opt-in 的私有 `experimentalRealtimeInput` 偏好，旧 JSON 默认 false；安装 / 升级不自动开启。未 opt-in 的实时热键仍在权限 / 录音 / 联网前拒绝，显式试音仅预览仍可用。开启自测只是允许用户尝试，不代表端到端已验收，不改原绑定或增加权限；不能把 fake 输入测试或其他插件测试当作实时上屏验收。
+
+## 商店展示、图标与文档（0.12.0+）
+
+商店采用 App Store 风格：左侧搜索、探索、已安装与声明式分类，右侧为两列图文卡片。每张卡片上方显示图标、名称、分类、作者和「获取 / 打开 / 更新」按钮，下方展示宣传图。点击图标、名称或宣传图打开 README 与信息详情；没有评分与下载量来源时不显示虚构数值。筛选菜单提供排序、仅未安装、刷新与 ZIP 导入，安装和打开不自动采集或申请系统权限。
+
+名称直接表达用途，完整能力、权限、兼容限制和使用步骤写入 README。内置名称为「快捷键」「语音输入」「截图」「键鼠共享」；插件 ID、操作 ID 与用户配置保持稳定。
+
+```json
+"icon": {"symbol": "waveform", "tint": "#D77A36", "png": "<base64 PNG>"},
+"storefront": {
+  "category": "语音与文本",
+  "categorySymbol": "waveform",
+  "headline": "说出来，\n就成文字",
+  "caption": "快捷键听写；实验性实时输入需开启",
+  "jpeg": "<base64 JPEG>"
+}
+```
+
+`icon` 的 `symbol` 为 1–80 字的 SF Symbol 名称，`tint` 为 `#RRGGBB`；`png` 可省略以使用运行时符号回退。图标图片必须为 32–256 像素的正方形静态 PNG，文件不超过 64 KiB；清单整体不超过 256 KiB。`ui.icon` 继续作为旧版符号回退。
+
+`storefront` 为可选展示声明，需要最低宿主 0.12.0。`category` 为 1–24 字的分类，分类不预设固定用途；`categorySymbol` 是相应的 SF Symbol。`headline` 为 1–60 字，`caption` 最多 120 字，由原生界面绘制。可选 `jpeg` 为内嵌的静态横向 JPEG，最大 96 KiB，宽 400–1200、高 256–800 像素、总像素不超过 960,000。目录可携带同样的 `icon` 与 `storefront`；整个目录下载上限为 2 MiB。未声明宣传图时用图标和中性底色回退，不进行远程图片请求。
+
+当前四个内置插件的图片全部使用 Codex 内置图像工具生成，原图、实际提示词和缩略流程见 [StoreArtwork](../Resources/StoreArtwork/README.md)。更新图片时先生成并保存选中原图，再制作缩略资源；不以代码绘制图片替代生成图片。运行 `python3 scripts/prepare-plugin-resources.py --embed-artwork` 将 `Icon.png`、`Preview.jpg` 内嵌到清单，再运行 `--check` 检查同步。ZIP 根目录仍只包含 `manifest.json`、`README.md`、`LICENSE`。独立插件使用同样声明，无需中央仓库或特定插件 ID。
+
+README 使用 UTF-8 Markdown，最大 128 KiB，包含用途、步骤、权限、网络与数据、兼容边界和许可证。原生阅读器支持标题、段落、列表、代码块、表格和链接；超大表格以等宽文本完整显示。它不执行 HTML、脚本或自动加载远程图片。安装时原子保存该包的 README，可离线阅读；未安装或旧配置缺少说明时，从相应目录包下载、校验并补读。独立插件建议使用完整 HTTPS 链接。
+
+`Sources/Untitled/Resources/BundledPlugins.json` 从清单生成，提供内置插件的名称、简介和图片兼容展示，不安装插件或改写版本、动作、授权、热键及启停状态。它只匹配相同 ID、源码仓库及不高于宿主声明版本的插件；实际 README 始终来自被查看的包。
+
+资源预算：图标缓存最多 64 项、成本预算 4 MiB；宣传图由独立 actor 串行解码，最长边 832 像素，显式 FIFO 缓存最多 16 项且总成本不超过 12 MiB。可见卡片按需读取，离开可视区域取消加载并清空页面图片；缓存以外同一时刻仅解码一张图。最多缓存 8 份 README、每份不超过 128 KiB。高分辨率生成原图不进入应用包，不创建空闲轮询或图片动画时钟。缓存边界与取消检查不等同于整应用的总内存或长期 GPU 验收，实测及未测范围见开发说明。
 
 ## 通用槽位
 
