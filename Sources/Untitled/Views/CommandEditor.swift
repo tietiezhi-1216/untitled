@@ -55,7 +55,7 @@ struct CommandEditor: View {
                     Text("将主面板带到前台；窗口已关闭时会重新打开。")
                         .font(.callout).foregroundStyle(.secondary)
                 case .sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing:
-                    Text("使用键鼠共享插件中已配对的设备。切换控制需要两端明确开启键鼠共享；停止操作始终释放键鼠和麦克风。")
+                    Text("使用外设共享插件中已配对的设备。切换控制需要两端明确开启键鼠共享；停止操作始终释放键鼠和麦克风。")
                         .font(.callout).foregroundStyle(.secondary)
                 default:
                     Text("绑定后可在任意应用中执行此截图操作。首次截屏或录屏时需要允许屏幕录制权限。")
