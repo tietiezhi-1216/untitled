@@ -33,12 +33,14 @@ Untitled 是由用户通过 agents 持续定制的原生 macOS 软件。功能�
 
 ## 分支、自动 PR 与合并
 
-- 默认源码交付是 **提交 → 推送 → 自动 PR → 必需 CI → 自动 Squash 合入 `main`**，无需用户逐次要求提交或合并。用户明确要求“只改本地 / 不推送”、Draft 或暂停自动合并时遵循该要求。
-- 每项任务使用独立 `agent/<task>` 分支，兼容已有 `codex/<task>`。从最新 `origin/main` 开始；当前工作区有其他改动时用独立 worktree，不暂存或提交其他任务的文件。不得直接推送 `main`、force-push、关闭保护或使用管理员绕过。
-- 完成必要验证并提交本任务改动后，执行 `python3 scripts/submit-agent-pr.py --body-file <PR说明.md>`。说明实际行为、验证及未验收项；脚本使用本机已有 `gh` 登录，幂等推送、创建 PR、登记受保护的自动合并，不上传个人凭据到 CI。
+- 默认开发规范是完整的五步闭环：**① 从 GitHub 拉取最新代码并创建独立 worktree → ② 只在该 worktree 开发与验证 → ③ 提交 PR 自动合并 → ④ 验证确已合并 → ⑤ 清理本任务 worktree 并同步本地 main**。无需用户逐次要求提交、合并或清理；用户明确要求“只改本地 / 不推送”、Draft 或暂停时例外，此时保留工作现场。
+- 每项任务先 `git fetch origin`，再从最新 `origin/main` 创建独立 worktree 和 `agent/<task>` 分支，兼容已有 `codex/<task>`；无论主工作区是否干净，都不直接在主工作区开发。记录本任务 worktree 路径、分支及 main 工作区位置。不暂存或提交其他任务文件，不直接推送 main、force-push、关闭保护或使用管理员绕过。
+- 完成必要验证并提交本任务改动后，执行 `python3 scripts/submit-agent-pr.py --body-file <PR说明.md>`。说明实际行为、验证及未验收项；脚本使用本机已有 `gh` 登录，幂等推送、创建 PR、登记受保护的自动合并，不上传个人凭据到 CI。该脚本只完成提交与登记，后续仍必须确认合并、清理和同步。
 - GitHub 对同仓库、有写权限作者的 Agent 分支提供自动 PR 兜底；只处理已登记的 PR，不接管旧 PR 或 fork。CI 只读运行；有写权限的编排工作流只运行受保护 `main` 的代码，不检出或执行 PR 代码。
 - `verify` 等必需检查通过且无冲突才会合并；基线落后时正常合入 `main` 后重跑检查。失败不伪造成功，冲突不强合。需要暂停时设为 Draft 或添加 `no-automerge` 标签。
-- 收尾核对 PR 是否真正 `MERGED`；仅推送、排队或 CI 通过不能报告“已合入 main”。无法合并时报告 PR 链接、失败检查或冲突并保留待办。自动源码合并不等于发布、安装、真机验收或性能合格。
+- 自动合并后核对 PR 确为 `MERGED`、目标为 main，记录合并提交并确认它已进入最新 `origin/main`。仅推送、排队或 CI 通过不能报告“已合并”；Squash 后也不能仅凭原功能提交是否为 main 祖先判断交付。失败或冲突时保留 worktree，报告阻塞，不进入清理。
+- 确认已合并后，先检查本任务 worktree 无未提交 / 未跟踪内容，并将需要保留的构建产物、验收记录等移至安全位置；再从 worktree 外执行普通 `git worktree remove <本任务路径>`。只清理本任务创建的 worktree，不删除主工作区、main 工作区或其他任务目录，不使用 `--force`、`reset`、`clean` 或全局 prune 掩盖脏状态。
+- 清理后在干净、确实检出 main 的工作区执行 `git pull --ff-only origin main`，核对本地 main 与最新 `origin/main` 一致。main 已在其他 worktree 检出时在该处同步；原主目录有并行改动时不切换或覆盖它。清理 / 同步受阻要保留现场并报告，不能提前宣称五步交付已完成。自动源码合并不等于发布、安装、真机验收或性能合格。
 - 配置、权限、事件安全边界和恢复流程见 [Agent 自动交付](docs/AGENT-WORKFLOW.md)。
 
 ## 验证与发布

@@ -53,7 +53,9 @@ python3 scripts/package-plugins.py --tag v1.0.0 \
 
 ## Agent 源码交付
 
-仓库内的 Agent 任务默认使用独立 `agent/<task>` 分支（兼容 `codex/<task>`），完成验证后执行 `python3 scripts/submit-agent-pr.py --body-file <PR说明.md>`：推送、创建 PR、登记自动 Squash 合并。保留 `main` 的 PR / `verify` 保护，失败或冲突不强合；设为 Draft 或添加 `no-automerge` 可暂停。fork 贡献仍通过普通 PR 审查，不自动批准或合并。明确只改本地时不推送。事件安全边界、基线更新与恢复见 [Agent 自动交付](docs/AGENT-WORKFLOW.md)。
+仓库内的 Agent 任务默认遵循五步：**从 GitHub 拉取最新代码并创建独立 worktree → 在该 worktree 开发 → 提交 PR 自动合并 → 验证已合并 → 清理本任务 worktree 并同步本地 main**。无论主目录是否干净，都先 fetch 最新 `origin/main`，创建唯一 `agent/<task>` 分支和独立 worktree（兼容 `codex/<task>`）。验证并提交后执行 `python3 scripts/submit-agent-pr.py --body-file <PR说明.md>`；这只完成推送 / PR / 登记，不代表收尾完成。确认 PR 真正 `MERGED` 后，从目录外安全移除本任务 worktree，并在干净 main 工作区 `git pull --ff-only origin main`、核对最新；不删除主目录、main 工作区或其他任务目录。
+
+保留 `main` 的 PR / `verify` 保护，失败或冲突不强合；设为 Draft 或添加 `no-automerge` 可暂停。明确只改本地时不推送并保留现场；有未提交内容或 main 分叉时不强制清理 / 覆盖。fork 贡献仍通过普通 PR 审查，不自动批准或合并。安全边界与完整操作见 [Agent 自动交付](docs/AGENT-WORKFLOW.md)。
 
 ## PR 说明
 

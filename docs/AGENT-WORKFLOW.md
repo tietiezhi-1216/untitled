@@ -1,21 +1,54 @@
 # Agent 自动 PR 与合并
 
-默认交付：**Agent 验证并提交 → 推送功能分支 → 创建 PR → 必需检查 → 自动 Squash 合入 main**。用户明确要求只改本地、不推送、Draft 或暂停自动合并时例外。
+默认开发规范是五步闭环：**从 GitHub 拉取最新代码并创建 worktree → 在该 worktree 开发 → 提交 PR 自动合并 → 验证已合并 → 清理本任务 worktree 并同步本地 main**。用户明确要求只改本地、不推送、Draft 或暂停自动合并时例外，此时保留 worktree 与工作现场。
 
 这只是源码交付，不自动发布 Release、覆盖已发布资产、安装应用 / 驱动或执行真实输入、录音等验收。
 
-## Agent 收尾
+## 五步开发与交付
 
-1. 从最新 `origin/main` 创建独立 `agent/<task>` 分支，兼容已有 `codex/<task>`；有其他工作时使用独立 worktree。只提交本任务文件，不 reset、clean、force-push 或顺带提交用户修改。
-2. 完成相应验证，准备 Markdown PR 说明：需求、行为、真实检查结果、风险和未验收项，不含个人路径或凭据。
-3. 提交后在干净 worktree 运行：
+1. **拉取最新代码并创建 worktree。** 开始前先检查主目录状态，保留已有工作；执行 `git fetch origin`，以最新 `origin/main` 创建本任务唯一的 `agent/<task>` 分支和独立 worktree，兼容已有 `codex/<task>`。无论主目录是否干净都使用独立 worktree，不在主目录直接开发。记录本任务路径 / 分支、起始提交和 main 工作区位置。示例变量需换为本任务唯一值：
+
+   ```bash
+   set -e
+   git fetch origin
+   REPO_ROOT="$(git rev-parse --show-toplevel)"
+   TASK_BRANCH='agent/my-task'
+   TASK_WORKTREE="$(dirname "$REPO_ROOT")/untitled-my-task"
+   git worktree add -b "$TASK_BRANCH" "$TASK_WORKTREE" origin/main
+   ```
+
+2. **只在本任务 worktree 开发。** 在其中修改、构建和运行必要验证；只提交本任务文件。准备 Markdown PR 说明，记录需求、行为、真实检查结果、风险和未验收项，不含个人路径或凭据。不要暂存主目录 / 其他任务的修改，也不 reset、clean 或 force-push。
+
+3. **提交 PR 并登记自动合并。** 提交后在干净的任务 worktree 运行：
 
    ```bash
    python3 scripts/submit-agent-pr.py --body-file /path/to/pr-description.md
    ```
 
-   脚本使用本机已有 GitHub CLI 登录，核对 origin，推送当前分支，幂等创建 / 复用 PR，加 `agent-automerge` 标签，并用当前 head SHA 登记 `--auto --squash`。不会自动 commit、直接推 main、批准 review、复制凭据到 CI 或绕过检查。若 GitHub 兜底刚好建了同一个 PR，会复用它。
-4. 等待并查询实际结果，例如 `gh pr view <URL> --json state,mergedAt,statusCheckRollup,mergeStateStatus`。必须真正 `MERGED` 才报告已合并；检查失败或冲突时修复自己的分支并正常推送，不能只凭排队状态结束交付。
+   脚本使用本机已有 GitHub CLI 登录，核对 origin，推送当前分支，幂等创建 / 复用 PR，加 `agent-automerge` 标签，并用当前 head SHA 登记 `--auto --squash`。不会自动 commit、直接推 main、批准 review、复制凭据到 CI 或绕过检查。若 GitHub 兜底刚好建了同一个 PR，会复用它。**脚本退出成功只完成本步，不代表后两步完成。**
+
+4. **验证确已合并。** 等待并查询实际结果，例如 `gh pr view <URL> --json state,mergedAt,mergeCommit,baseRefName,headRefName,statusCheckRollup`。确认正确仓库 / 任务分支的 PR 为 `MERGED`、目标为 main，记录 `mergedAt` 和合并提交；再 `git fetch origin`，确认合并提交是 `origin/main` 的祖先。仅推送、排队或 CI 通过不能报告“已合并”；Squash 后原功能提交不一定是 main 祖先，不能以此误判。检查失败或冲突时修复自己的分支并正常推送，保留 worktree，不提前清理。
+
+5. **清理本任务 worktree，并拉取最新 main。** 只有第 4 步成功才进入本步。从 `git worktree list --porcelain` 核对待清理路径 / 分支确属本任务；检查无未提交和未跟踪文件，并确认被忽略的产物、验收记录等没有需要保留的内容，重要内容先移至安全位置。从任务 worktree 外执行普通删除，然后在干净、确实检出 main 的工作区同步：
+
+   ```bash
+   set -e
+   # 四个变量均来自本任务记录；MAIN_WORKTREE 不是任意主目录。
+   : "${REPO_ROOT:?}" "${TASK_WORKTREE:?}" "${TASK_BRANCH:?}" "${MAIN_WORKTREE:?}"
+   cd "$REPO_ROOT"
+   test "$TASK_WORKTREE" != "$REPO_ROOT"
+   test "$TASK_WORKTREE" != "$MAIN_WORKTREE"
+   test "$TASK_BRANCH" != main
+   test "$(git -C "$TASK_WORKTREE" branch --show-current)" = "$TASK_BRANCH"
+   test -z "$(git -C "$TASK_WORKTREE" status --porcelain)"
+   test "$(git -C "$MAIN_WORKTREE" branch --show-current)" = main
+   test -z "$(git -C "$MAIN_WORKTREE" status --porcelain)"
+   git worktree remove "$TASK_WORKTREE"
+   git -C "$MAIN_WORKTREE" pull --ff-only origin main
+   git -C "$MAIN_WORKTREE" rev-parse HEAD origin/main
+   ```
+
+   最后确认任务目录已移除、worktree 列表中已无该项，且本地 main 与最新 `origin/main` 一致。main 已在其他 worktree 检出时在该处同步；没有可用 main 工作区时可独立创建，不为此切换有并行改动的原主目录。主目录、main 工作区、其他任务的 worktree 不属于清理对象；不使用 `--force`、`reset`、`clean`、全局 prune 或强制删分支来处理脏状态。清理失败、main 有改动或分叉时保留现场并报告阻塞，不宣称五步闭环完成。清理 worktree 不要求强制删除 Squash 后仍不满足 `git branch -d` 判定的功能分支。
 
 ## GitHub 兜底
 
