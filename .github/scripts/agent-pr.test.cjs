@@ -10,7 +10,7 @@ const ciRun = overrides => ({ id: 100, workflow_id: 7, path: '.github/workflows/
   status: 'completed', conclusion: 'success', ...overrides });
 const pull = overrides => ({ number: 1, node_id: 'PR_1', state: 'open', draft: false, labels: [{ name: 'agent-automerge' }],
   head: { ref: 'agent/task', sha: SHA, repo: { id: 42 } }, base: { ref: 'main', repo: { id: 42 } },
-  user: { login: 'writer', type: 'User' }, mergeable: true, mergeable_state: 'clean', auto_merge: null, ...overrides });
+  user: { login: 'writer', type: 'User' }, mergeable: true, mergeable_state: 'blocked', auto_merge: null, ...overrides });
 
 function setup(options = {}) {
   const state = { prs: options.prs || [], runs: options.runs || [ciRun()], sha: SHA,
@@ -45,6 +45,7 @@ function setup(options = {}) {
         state.prs.push(pr); return { data: pr };
       },
       updateBranch: async args => { record('update-branch', args); state.sha = NEXT; },
+      merge: async args => { record('protected-merge', args); return { data: { merged: true } }; },
     },
   }, paginate: async (method, args) => (await method(args)).data,
   graphql: async (query, args) => {
@@ -162,6 +163,26 @@ test('only approval-required CI from this repository and exact current head is a
 test('missing CI requests explicit dispatch, never invents a success status', async () => {
   const s = setup({ event: 'schedule', prs: [pull()], runs: [] }); await s.go();
   assert.equal(s.count('dispatch-ci'), 1);
+});
+
+test('ready PR completion uses protected squash API with the exact head SHA', async () => {
+  const s = setup({ event: 'schedule', prs: [pull({ mergeable_state: 'clean', auto_merge: {} })] }); await s.go();
+  assert.equal(s.count('protected-merge'), 1);
+  const args = s.state.calls.find(([n]) => n === 'protected-merge')[1];
+  assert.equal(args.sha, SHA); assert.equal(args.merge_method, 'squash');
+  assert.equal(s.count('enable-auto'), 0);
+});
+
+test('a ready-looking PR never merges while CI is pending, failing, or absent', async () => {
+  for (const runs of [[], [ciRun({ conclusion: 'failure' })], [ciRun(), ciRun({ status: 'in_progress', conclusion: null })]]) {
+    const s = setup({ event: 'schedule', prs: [pull({ mergeable_state: 'clean' })], runs }); await s.go();
+    assert.equal(s.count('protected-merge'), 0);
+  }
+});
+
+test('read-scoped repo metadata may omit optional merge settings without granting admin', async () => {
+  const s = setup({ repository: { allow_auto_merge: undefined, allow_squash_merge: undefined } }); await s.go();
+  assert.equal(s.count('create-pr'), 1);
 });
 
 test('repository settings fail closed, and an independent fork never operates upstream', async () => {

@@ -13,7 +13,10 @@ async function automate({ github, context, core, mode = 'all' }) {
   const repo = context.repo;
   const { data: repository } = await github.rest.repos.get(repo);
   if (repository.fork || repository.default_branch !== 'main') return;
-  if (!repository.allow_auto_merge || !repository.allow_squash_merge) {
+  // Read-scoped installation tokens omit these optional admin-visible fields.
+  // Do not mistake absence for false or expand registration to admin permissions;
+  // the merge/auto-merge APIs still enforce the actual repository settings.
+  if (repository.allow_auto_merge === false || repository.allow_squash_merge === false) {
     throw new Error('Repository must allow auto-merge and squash merging; branch protection must remain enabled.');
   }
   const { data: ci } = await github.rest.actions.getWorkflow({ ...repo, workflow_id: 'ci.yml' });
@@ -131,13 +134,22 @@ async function automate({ github, context, core, mode = 'all' }) {
     if (!currentRuns.length) {
       await github.rest.actions.createWorkflowDispatch({ ...repo, workflow_id: ci.id, ref: pr.head.ref });
     }
+    if (pr.mergeable_state === 'clean' && comparison.behind_by === 0 && green && !inFlight && !hasFailure) {
+      // A queued auto-merge can remain pending after checks finish. This is the
+      // ordinary protected merge endpoint, not admin bypass: GitHub rechecks all
+      // branch rules, and sha makes a racing head change fail rather than merge.
+      const { data: result } = await github.rest.pulls.merge({ ...repo, pull_number: pr.number, sha: pr.head.sha, merge_method: 'squash' });
+      if (!result.merged) throw new Error(`Protected merge of PR #${pr.number} was not completed.`);
+      core.info(`Completed protected squash merge for PR #${pr.number}.`);
+      continue;
+    }
     if (pr.mergeable === null) {
       core.info(`PR #${pr.number} mergeability is still being calculated; retry on the next event.`);
       continue;
     }
     if (!pr.auto_merge) {
-      // Let GitHub enforce the actual protected-branch rules. Never call the
-      // direct merge API, approve a PR review, forge a status, or use admin bypass.
+      // Queue blocked PRs with GitHub's own protection rules. Never approve a
+      // PR review, forge a status, force a merge, or use admin bypass.
       await github.graphql('mutation($id:ID!){enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:SQUASH}){pullRequest{id}}}', { id: pr.node_id });
       core.info(`Queued protected squash auto-merge for PR #${pr.number}.`);
     }
