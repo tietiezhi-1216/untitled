@@ -105,10 +105,19 @@ async function automate({ github, context, core, mode = 'all' }) {
       // The expected head protects against racing a new push; this is a regular
       // merge of main into the feature branch, not a force-push or reset.
       await github.rest.pulls.updateBranch({ ...repo, pull_number: pr.number, expected_head_sha: pr.head.sha });
-      // Token-generated pushes do not trigger push CI. Explicit dispatch is a
-      // documented exception; CI stays read-only and is attached to the new SHA.
-      await github.rest.actions.createWorkflowDispatch({ ...repo, workflow_id: ci.id, ref: pr.head.ref });
-      core.info(`Updated PR #${pr.number} from main and requested fresh CI.`);
+      // update-branch is asynchronous (202). Never dispatch against its old
+      // head; if it is still pending, the next reconciliation will find missing CI.
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const { data: updated } = await github.rest.repos.getBranch({ ...repo, branch: pr.head.ref });
+        if (updated.commit.sha !== pr.head.sha) {
+          // Token pushes do not trigger push CI. Explicit dispatch is a supported
+          // exception and the CI job still has only read permissions.
+          await github.rest.actions.createWorkflowDispatch({ ...repo, workflow_id: ci.id, ref: pr.head.ref });
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      core.info(`Requested protected base update for PR #${pr.number}; fresh-head CI will be reconciled.`);
       continue;
     }
     if (pr.mergeable === false || pr.mergeable_state === 'dirty') {
