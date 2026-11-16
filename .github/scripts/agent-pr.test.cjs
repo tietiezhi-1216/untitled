@@ -87,6 +87,11 @@ test('late CI after a squash merge does not reopen the delivered head', async ()
   assert.equal(s.count('create-pr'), 0); assert.equal(s.count('enable-auto'), 0);
 });
 
+test('late CI respects an explicitly closed PR at the same head', async () => {
+  const s = setup({ prs: [pull({ state: 'closed', merged_at: null })] }); await s.go();
+  assert.equal(s.count('create-pr'), 0);
+});
+
 test('draft and no-automerge PRs are never registered by the fallback', async () => {
   for (const pr of [pull({ draft: true, labels: [] }), pull({ labels: [{ name: 'no-automerge' }] })]) {
     const s = setup({ prs: [pr] }); await s.go();

@@ -52,9 +52,9 @@ async function automate({ github, context, core, mode = 'all' }) {
     if (branch.commit.sha === run.head_sha) {
       const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({ ...repo, basehead: `main...${run.head_branch}` });
       const closed = await github.paginate(github.rest.pulls.list, { ...repo, state: 'closed', base: 'main', head: `${repo.owner}:${run.head_branch}`, per_page: 100 });
-      // Squash merges leave the old branch divergent. A late CI completion must
-      // not reopen its already delivered head as a second PR.
-      const delivered = closed.some(pr => pr.merged_at && pr.head.sha === run.head_sha);
+      // Squash leaves the old branch divergent; explicit closure also pauses
+      // this head. Late CI must not recreate either PR without a new push SHA.
+      const delivered = closed.some(pr => pr.head.sha === run.head_sha);
       if (comparison.ahead_by > 0 && !delivered) {
         const query = { ...repo, state: 'open', base: 'main', head: `${repo.owner}:${run.head_branch}` };
         let { data: existing } = await github.rest.pulls.list(query);
