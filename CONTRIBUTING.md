@@ -51,6 +51,10 @@ python3 scripts/package-plugins.py --tag v1.0.0 \
 
 所有插件都遵循 [性能开发与排查](docs/PERFORMANCE.md)。轻量插件确认空闲和停用后没有持续工作；图像、模型、音视频、设备共享与大批量处理等高开销插件明确输入、并发和缓存上限，并提供可复现的测量。先用宿主基线与单插件对照定位，再用 Allocations / Memory Graph、Time Profiler、GPU / I/O 工具找到代码原因。修改后在同样负载下复测；不能用“无崩溃”或“0 leaks”替代性能证据。
 
+## Agent 源码交付
+
+仓库内的 Agent 任务默认使用独立 `agent/<task>` 分支（兼容 `codex/<task>`），完成验证后执行 `python3 scripts/submit-agent-pr.py --body-file <PR说明.md>`：推送、创建 PR、登记自动 Squash 合并。保留 `main` 的 PR / `verify` 保护，失败或冲突不强合；设为 Draft 或添加 `no-automerge` 可暂停。fork 贡献仍通过普通 PR 审查，不自动批准或合并。明确只改本地时不推送。事件安全边界、基线更新与恢复见 [Agent 自动交付](docs/AGENT-WORKFLOW.md)。
+
 ## PR 说明
 
 描述需求、操作后的行为、插件 ID / 版本、协议变化和验证结果。新增权限或网络服务说明触发时机、目的地和停止方式；资源密集路径或性能变更给出测量环境、前后数据和未测项。小改动简短说明即可，文档不强求测试。避免混入个人配置或无关的大型产物。
