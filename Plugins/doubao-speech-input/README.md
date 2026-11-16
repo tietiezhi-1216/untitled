@@ -1,6 +1,6 @@
-# 豆信语音输入
+# 语音输入
 
-macOS 14+、Untitled **0.10.5+** 的原生语音听写插件。Swift 自行实现豆包网页游客初始化、VoiceGenie WebSocket 与 protobuf 消息，不运行 Python 桥接器、不注入微信或豆包客户端。
+v1.1.5，macOS 14+、Untitled **0.12.0+** 的原生语音听写插件。Swift 自行实现豆包网页游客初始化、VoiceGenie WebSocket 与 protobuf 消息，不运行 Python 桥接器、不注入微信或豆包客户端。
 
 ## 当前开放范围
 

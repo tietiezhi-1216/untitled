@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import re
 import zipfile
+import base64
+import struct
 
 DEFAULT_REPOSITORY = "tietiezhi-1216/untitled"
 
@@ -34,6 +36,30 @@ def read_plugin(directory, root):
         "README.md": (directory / "README.md").read_bytes(),
         "LICENSE": license_file.read_bytes(),
     }
+    if len(contents["README.md"]) > 128 * 1024:
+        raise ValueError(f"README exceeds 128 KiB: {directory}")
+    contents["README.md"].decode("utf-8")
+    if icon := manifest.get("icon"):
+        if not re.fullmatch(r"[a-zA-Z0-9.]{1,80}", icon["symbol"]) or not re.fullmatch(r"#[0-9A-Fa-f]{6}", icon["tint"]):
+            raise ValueError(f"invalid icon symbol or tint: {source}")
+        if "png" in icon:
+            png = base64.b64decode(icon["png"], validate=True)
+            if len(png) < 24 or len(png) > 64 * 1024 or not png.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise ValueError(f"invalid PNG artwork: {source}")
+            width, height = struct.unpack(">II", png[16:24])
+            if width != height or not 32 <= width <= 256:
+                raise ValueError(f"PNG must be square and 32–256 pixels: {source}")
+    if storefront := manifest.get("storefront"):
+        if tuple(map(int, manifest["minimumHostVersion"].split("."))) < (0, 12, 0):
+            raise ValueError(f"storefront requires host 0.12.0+: {source}")
+        if not 1 <= len(storefront["category"]) <= 24 or not 1 <= len(storefront["headline"]) <= 60 or len(storefront["caption"]) > 120:
+            raise ValueError(f"invalid storefront copy: {source}")
+        if not re.fullmatch(r"[a-zA-Z0-9.]{1,80}", storefront["categorySymbol"]):
+            raise ValueError(f"invalid category symbol: {source}")
+        if "jpeg" in storefront:
+            jpeg = base64.b64decode(storefront["jpeg"], validate=True)
+            if len(jpeg) > 96 * 1024 or not jpeg.startswith(b"\xff\xd8\xff"):
+                raise ValueError(f"storefront must be a JPEG at most 96 KiB: {source}")
     return manifest, contents
 
 
@@ -86,12 +112,17 @@ def main():
             archive.unlink()
             parser.error(f"plugin exceeds 2 MiB: {name}")
         checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
-        entries.append({
+        entry = {
             key: manifest[key] for key in ("id", "name", "version", "summary", "author")
         } | {
             "downloadURL": f"https://github.com/{args.repository}/releases/download/{args.tag}/{name}",
             "sha256": checksum,
-        })
+        }
+        if "icon" in manifest:
+            entry["icon"] = manifest["icon"]
+        if "storefront" in manifest:
+            entry["storefront"] = manifest["storefront"]
+        entries.append(entry)
         print(f"{checksum}  {archive}")
     catalog = {"schemaVersion": 1, "plugins": entries}
     text = json.dumps(catalog, ensure_ascii=False, indent=2) + "\n"

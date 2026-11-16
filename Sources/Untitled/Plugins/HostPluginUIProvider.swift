@@ -4,7 +4,9 @@ struct HostPluginUIProvider: PluginUIProvider {
     func register(in registry: PluginUIRegistry) {
         registry.component("host.icon") { context in
             AnyView(
-                PanelIcon(symbol: context.interface?.icon ?? "puzzlepiece.extension").panelRegion("plugin.header.icon"))
+                PluginIconView(icon: context.plugin.map { context.store.presentation(for: $0.manifest).icon } ?? nil,
+                               fallbackSymbol: context.interface?.icon ?? "puzzlepiece.extension", size: PanelLayout.iconSize)
+                    .panelRegion("plugin.header.icon"))
         }
         registry.component("host.identity") { context in
             AnyView(PluginIdentityView(context: context))
@@ -36,11 +38,11 @@ private struct PluginIdentityView: View {
     let context: PluginUIContext
     private var plugin: InstalledPlugin? { store.installed.first { $0.id == context.pluginID } }
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(plugin?.manifest.name ?? "")
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(plugin.map { store.presentation(for: $0.manifest).name } ?? "")
                 .font(.system(size: 22, weight: .semibold)).lineLimit(1)
-            Text(plugin.map { "\($0.manifest.author) · 版本 \($0.manifest.version)" } ?? "")
-                .font(.callout).foregroundStyle(.secondary).lineLimit(1)
+            Text(plugin?.manifest.author ?? "")
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle()).panelWindowDragArea().panelRegion("panel.title")

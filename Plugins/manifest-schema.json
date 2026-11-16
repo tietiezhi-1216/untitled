@@ -203,6 +203,73 @@
           }
         }
       }
+    },
+    "icon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "symbol",
+        "tint"
+      ],
+      "properties": {
+        "symbol": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z0-9.]+$"
+        },
+        "tint": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        },
+        "png": {
+          "type": "string",
+          "maxLength": 87384,
+          "contentEncoding": "base64",
+          "contentMediaType": "image/png",
+          "description": "Optional static square PNG, 32–256 pixels, at most 64 KiB decoded."
+        }
+      }
+    },
+    "storefront": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "categorySymbol",
+        "headline",
+        "caption"
+      ],
+      "description": "Store gallery metadata; requires minimumHostVersion 0.12.0 or newer.",
+      "properties": {
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 24
+        },
+        "categorySymbol": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z0-9.]+$"
+        },
+        "headline": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "caption": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "jpeg": {
+          "type": "string",
+          "maxLength": 131072,
+          "contentEncoding": "base64",
+          "contentMediaType": "image/jpeg",
+          "description": "Static landscape JPEG; decoded size at most 96 KiB, width 400–1200, height 256–800, at most 960,000 pixels."
+        }
+      }
     }
   },
   "$defs": {

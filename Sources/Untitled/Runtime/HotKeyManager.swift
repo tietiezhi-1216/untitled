@@ -54,7 +54,7 @@ final class HotKeyManager {
 
     func register(_ hotKey: HotKey, onRelease: (() -> Void)? = nil, action: @escaping () -> Void) throws {
         try hotKey.validate()
-        guard setupStatus == noErr else { throw PluginError.invalid("无法监听全局快捷键（\(setupStatus)）。") }
+        guard setupStatus == noErr else { throw PluginError.invalid("无法监听快捷键（\(setupStatus)）。") }
         nextIdentifier &+= 1
         if nextIdentifier == 0 { nextIdentifier = 1 }
         let identifier = nextIdentifier

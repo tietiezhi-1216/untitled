@@ -124,7 +124,7 @@ private struct PluginMenuContributions: View {
     let plugin: InstalledPlugin
     var body: some View {
         let context = PluginUIContext(pluginID: plugin.id, store: store, navigation: navigation)
-        Menu(plugin.manifest.name) {
+        Menu(store.presentation(for: plugin.manifest).name) {
             ForEach(store.uiRegistry.interface(for: plugin.manifest).items(in: .menuBar)) { item in
                 PluginSlotItemView(item: item, context: context, menuItem: true)
             }

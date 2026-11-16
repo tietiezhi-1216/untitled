@@ -12,7 +12,7 @@ struct ShortcutRecorder: NSViewRepresentable {
         button.bezelStyle = .rounded
         button.target = button
         button.action = #selector(RecorderButton.startRecording)
-        button.setAccessibilityLabel(allowsUnmodified ? "录制窗口内快捷键" : "录制全局快捷键")
+        button.setAccessibilityLabel(allowsUnmodified ? "录制窗口内快捷键" : "录制快捷键")
         return button
     }
 

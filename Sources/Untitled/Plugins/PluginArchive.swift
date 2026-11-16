@@ -3,8 +3,18 @@ import Foundation
 
 enum PluginArchive {
     static let maximumPackageSize = 2 * 1024 * 1024
+    static let maximumReadmeSize = 128 * 1024
+
+    struct Contents: Sendable {
+        let manifest: PluginManifest
+        let readme: String?
+    }
 
     static func read(_ url: URL, expectedSHA256: String? = nil) throws -> PluginManifest {
+        try readContents(url, expectedSHA256: expectedSHA256).manifest
+    }
+
+    static func readContents(_ url: URL, expectedSHA256: String? = nil) throws -> Contents {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         guard (attributes[.size] as? NSNumber)?.intValue ?? Int.max <= maximumPackageSize else {
             throw PluginError.invalid("插件包超过 2 MB 限制。")
@@ -24,7 +34,15 @@ enum PluginArchive {
         let manifestData = try output(arguments: ["-p", url.path, "manifest.json"], limit: 256 * 1024)
         let manifest = try JSONDecoder().decode(PluginManifest.self, from: manifestData)
         try manifest.validate()
-        return manifest
+        var readme: String?
+        if names.contains("README.md") {
+            let data = try output(arguments: ["-p", url.path, "README.md"], limit: maximumReadmeSize)
+            guard let text = String(data: data, encoding: .utf8) else {
+                throw PluginError.invalid("插件 README.md 必须使用 UTF-8 编码。")
+            }
+            readme = text
+        }
+        return Contents(manifest: manifest, readme: readme)
     }
 
     private static func output(arguments: [String], limit: Int) throws -> Data {

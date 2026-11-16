@@ -80,7 +80,7 @@ struct SharingSetupProfile: Decodable {
         NSApplication.shared.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { phase = "cancelled"; try report(); return }
         guard store.installed.contains(where: { $0.id == PeripheralSharingController.pluginID }) else {
-            throw PluginError.invalid("请先安装外设共享插件。")
+            throw PluginError.invalid("请先安装键鼠共享插件。")
         }
         try SharingPairingKey.save(profile.pairingKey)
         store.setEnabled(true, pluginID: PeripheralSharingController.pluginID)

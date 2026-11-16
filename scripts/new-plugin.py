@@ -32,7 +32,8 @@ def main():
     manifest = {
         "schemaVersion": 2, "id": args.id, "name": args.name, "version": "1.0.0",
         "summary": "打开 Untitled 主面板；可在此基础上开发自己的功能。", "author": args.author,
-        "repository": args.repository, "minimumHostVersion": "0.9.0",
+        "repository": args.repository, "minimumHostVersion": "0.12.0",
+        "icon": {"symbol": "puzzlepiece.extension", "tint": "#5875E7"},
         "actions": ["showMainWindow"],
         "templates": [{"id": "main-panel", "title": "打开主面板", "action": "showMainWindow"}],
         "permissions": [],
@@ -50,7 +51,7 @@ def main():
     (target / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     (target / "README.md").write_text(
         f"# {args.name}\n\n"
-        f"插件 `{args.id}`，版本 1.0.0，最低宿主 Untitled 0.9.0，macOS 14+。\n\n"
+        f"插件 `{args.id}`，版本 1.0.0，最低宿主 Untitled 0.12.0，macOS 14+。\n\n"
         "当前示例提供“打开主面板”操作，可在插件页面添加并执行。\n\n"
         "系统权限：无。网络请求：无。密钥与额外数据：无。卸载删除本插件操作配置。\n\n"
         "开发时根据实际功能更新动作、界面、权限、平台要求和验证说明。"

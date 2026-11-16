@@ -92,7 +92,7 @@ struct PluginDetailView: View {
         case .showMainWindow:
             "将工具箱主窗口带到前台"
         case .sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing:
-            "已配对 Mac 的外设共享操作"
+            "已配对 Mac 的键鼠共享操作"
         default:
             "全局截图操作"
         }
@@ -152,40 +152,26 @@ struct PluginHeaderControlView: View {
                         .frame(width: 18, height: 18)
                 }
                 .panelGlassButton(circular: true)
-                .help("查看插件简介")
-                .accessibilityLabel("插件简介")
+                .help("查看插件说明与信息")
+                .accessibilityLabel("插件详情")
                 .panelRegion("plugin.header.info")
-                .popover(isPresented: $showingInfo, arrowEdge: .top) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text(plugin.manifest.name)
-                            .font(.headline)
-                        ViewThatFits(in: .vertical) {
-                            summaryText
-                            ScrollView { summaryText }
-                        }
-                        .frame(maxHeight: 280)
+                .sheet(isPresented: $showingInfo) {
+                    PluginStoreDetailView(item: .installed(plugin, store: store), goBack: { showingInfo = false }) { id in
+                        showingInfo = false
+                        store.requestedPluginID = id
                     }
-                    .padding(20)
-                    .frame(width: 340)
-                    .accessibilityElement(children: .contain)
-                    .accessibilityLabel("插件简介")
+                    .environmentObject(store).frame(width: 760, height: 660)
                 }
             }
         }
         .fixedSize()
-        .confirmationDialog("卸载「\(plugin.manifest.name)」？", isPresented: $confirmUninstall) {
+        .confirmationDialog("卸载「\(store.presentation(for: plugin.manifest).name)」？", isPresented: $confirmUninstall) {
             Button("卸载", role: .destructive) { store.uninstall(plugin.id) }
         } message: {
             Text("将移除该插件的本地配置，并释放全部快捷键。")
         }
     }
 
-    private var summaryText: some View {
-        Text(plugin.manifest.summary)
-            .font(.callout).foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
 }
 
 struct PluginAddCommandView: View {

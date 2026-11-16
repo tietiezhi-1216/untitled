@@ -54,6 +54,7 @@ import Testing
         let data = try Data(contentsOf: URL(fileURLWithPath: "Plugins/screenshot/manifest.json"))
         var json = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         json["schemaVersion"] = 1; json["minimumHostVersion"] = "0.3.0"; json.removeValue(forKey: "ui"); json.removeValue(forKey: "permissions")
+        json.removeValue(forKey: "storefront")
         json["templates"] = (json["templates"] as? [[String: Any]])?.map { template in
             var old = template; old.removeValue(forKey: "defaultHotKey"); old.removeValue(forKey: "installByDefault"); return old
         }

@@ -17,7 +17,9 @@ jobs:
       - name: Build and test
         run: swift test --no-parallel
       - name: Validate plugin packages
-        run: python3 scripts/package-plugins.py --tag v0.10.0
+        run: |
+          python3 scripts/prepare-plugin-resources.py --check
+          python3 scripts/package-plugins.py --tag v0.12.0
       - name: Build app
         run: ./scripts/build-app.sh release
       - name: Build Xcode target

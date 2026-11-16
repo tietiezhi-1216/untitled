@@ -34,6 +34,7 @@ if [[ "$signing_identity" != "-" ]]; then
 fi
 
 cd "$project_root"
+python3 scripts/prepare-plugin-resources.py --check
 swift build --configuration "$configuration" --product Untitled
 binary_directory="$(swift build --configuration "$configuration" --show-bin-path)"
 output_directory="$project_root/dist/$configuration"
@@ -46,6 +47,7 @@ staged_bundle="$staging_directory/Untitled.app"
 mkdir -p "$staged_bundle/Contents/MacOS" "$staged_bundle/Contents/Resources"
 cp "$binary_directory/Untitled" "$staged_bundle/Contents/MacOS/Untitled"
 cp "$project_root/Resources/Info.plist" "$staged_bundle/Contents/Info.plist"
+cp "$project_root/Sources/Untitled/Resources/BundledPlugins.json" "$staged_bundle/Contents/Resources/BundledPlugins.json"
 "$project_root/scripts/build-icon.sh" "$staged_bundle/Contents/Resources/AppIcon.icns"
 
 if [[ -d "$project_root/Resources/KaTeX" ]]; then

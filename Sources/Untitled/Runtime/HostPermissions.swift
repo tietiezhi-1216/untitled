@@ -122,7 +122,9 @@ enum HostPermissionError: LocalizedError {
         refresh(ids)
         let missing = ids.filter { status($0) != .authorized }
         guard !missing.isEmpty else { return }
-        pendingRequest = .init(pluginID: plugin.id, pluginName: plugin.manifest.name, permissions: Set(missing))
+        let name = PluginPresentationIndex.bundled.appearance(id: plugin.id, repository: plugin.manifest.repository,
+                                                              version: plugin.manifest.version)?.name ?? plugin.manifest.name
+        pendingRequest = .init(pluginID: plugin.id, pluginName: name, permissions: Set(missing))
         reveal()
         throw HostPermissionError.missing
     }

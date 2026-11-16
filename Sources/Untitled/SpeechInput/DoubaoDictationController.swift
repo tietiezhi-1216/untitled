@@ -131,7 +131,7 @@ enum DictationPhase: String { case idle, connecting, listening, finishing
     }
 
     private func start(_ gesture: DictationGesture, previewOnly: Bool = false) throws {
-        guard isAllowed() else { throw PluginError.invalid("请先启用豆信语音输入插件。") }
+        guard isAllowed() else { throw PluginError.invalid("请先启用语音输入插件。") }
         let liveInput = preferences.liveInput && !previewOnly
         guard !liveInput || realtimeInputAvailable else {
             notice = Self.realtimeInputUnavailable

@@ -248,7 +248,7 @@ struct SharingAcceptanceRequest: Decodable {
     override func mouseUp(with event: NSEvent) { if isTest(event) { mouseUps += 1 } }
     override func draw(_ dirtyRect: NSRect) {
         NSColor.windowBackgroundColor.setFill(); bounds.fill()
-        let message = "外设共享自动验收窗口\n仅统计带验收标记的固定按键和点击\n按键：\(keyDownCodes.count)   点击：\(mouseDowns)\n不记录普通用户输入，不保存声音"
+        let message = "键鼠共享自动验收窗口\n仅统计带验收标记的固定按键和点击\n按键：\(keyDownCodes.count)   点击：\(mouseDowns)\n不记录普通用户输入，不保存声音"
         (message as NSString).draw(in: bounds.insetBy(dx: 24, dy: 40), withAttributes: [.font: NSFont.systemFont(ofSize: 15), .foregroundColor: NSColor.labelColor])
     }
 }
