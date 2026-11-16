@@ -5,7 +5,7 @@ const OPT_OUT = 'no-automerge';
 const CI_PATH = '.github/workflows/ci.yml';
 const isAgentBranch = branch => /^(agent|codex)\/.+/.test(branch || '');
 const labels = pr => (pr.labels || []).map(label => label.name);
-const sameRepository = (pr, id) => pr.head?.repo?.id === id && pr.base?.repo?.id === id;
+const sameRepository = (pr, id) => pr.head?.repo?.id === id && pr.base?.repo?.id === id && pr.base.ref === 'main';
 const blocked = pr => pr.draft || labels(pr).includes(OPT_OUT);
 const failed = run => run.status === 'completed' && !['success', 'neutral', 'skipped', 'action_required'].includes(run.conclusion);
 

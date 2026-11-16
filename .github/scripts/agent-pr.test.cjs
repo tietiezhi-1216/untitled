@@ -55,7 +55,7 @@ function setup(options = {}) {
   const core = { info: () => {}, warning: text => record('warning', text) };
   const context = { repo: { owner: 'owner', repo: 'repo' }, eventName: options.event || 'workflow_run',
     payload: { workflow_run: options.run || ciRun() } };
-  return { state, go: () => automate({ github, context, core }), count: name => state.calls.filter(([n]) => n === name).length };
+  return { state, go: () => automate({ github, context, core, mode: options.mode }), count: name => state.calls.filter(([n]) => n === name).length };
 }
 
 test('only standard agent branch namespaces qualify', () => {
@@ -94,6 +94,18 @@ test('draft and explicit opt-out cancel a previously queued auto-merge', async (
     const s = setup({ event: 'pull_request_target', prs: [pull({ ...extra, auto_merge: {} })] }); await s.go();
     assert.equal(s.count('disable-auto'), 1); assert.equal(s.count('enable-auto'), 0);
   }
+});
+
+test('registration does not need merge/update permissions; reconciliation never creates PRs', async () => {
+  const registration = setup({ mode: 'register' }); await registration.go();
+  assert.equal(registration.count('create-pr'), 1); assert.equal(registration.count('enable-auto'), 0);
+  const reconciliation = setup({ mode: 'reconcile' }); await reconciliation.go();
+  assert.equal(reconciliation.count('create-pr'), 0);
+});
+
+test('a PR that changes its base cannot be auto-merged into another branch', async () => {
+  const s = setup({ event: 'schedule', prs: [pull({ base: { ref: 'release', repo: { id: 42 } } })] }); await s.go();
+  assert.deepEqual(s.state.calls, []);
 });
 
 test('a timer does not enroll unrelated legacy PRs', async () => {
