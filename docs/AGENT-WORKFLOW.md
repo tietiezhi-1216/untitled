@@ -30,11 +30,11 @@
 
 定时和 PR 元数据事件只协调已登记 `agent-automerge` 的 PR，不批量接管历史 PR、普通人工分支或 fork。不同事件被串行协调，重复事件不重复创建 PR。GitHub 并发事件可能合并等待队列；Agent 收尾脚本是主路径，定时协调补偿已登记 PR。
 
-编排只请求 GitHub 的 auto-merge，最终由受保护 main 判定，仍要求 `verify`、分支最新、无冲突及所有其他配置的规则。检查失败不自动重跑来掩盖；冲突原样保留。落后基线且本 head 的 CI 已成功、没有仍运行或失败检查时，使用带 `expected_head_sha` 的正常 update-branch 合入 main，再检查新 SHA；不 force-push 或丢弃本分支提交。新 head 会重新接受完整 CI。
+编排为等待中的 PR 登记 GitHub auto-merge；当当前 SHA 的既定 CI 全绿、无在途 / 失败检查、基线最新且 GitHub 判定 clean 时，用带精确 SHA 的普通 Squash 合并接口完成落地，避免只排队不合并。此接口仍由受保护 main 判定，要求 `verify`、分支最新、无冲突及所有其他配置的规则；不使用管理员或强制绕过。检查失败不自动重跑来掩盖；冲突原样保留。落后基线且本 head 的 CI 已成功、没有仍运行或失败检查时，使用带 `expected_head_sha` 的正常 update-branch 合入 main，再检查新 SHA；不 force-push 或丢弃本分支提交。新 head 会重新接受完整 CI。
 
 ## Token 与事件边界
 
-- 编排使用短期 `GITHUB_TOKEN`，不新增 PAT、复制本机 OAuth token 或读取发布 / 签名秘密。
+- 编排使用短期 `GITHUB_TOKEN`，不新增 PAT、复制本机 OAuth token 或读取发布 / 签名秘密。read-scoped token 的仓库元数据可能省略管理级合并设置，不能把字段缺失误判为关闭，也不为此扩大到管理员权限；实际登记 / 合并 API 始终按服务端设置和保护规则判定。
 - 编排的 write 权限只在独立 job。`workflow_run` / `pull_request_target` **只检出受保护 main 的 `.github/scripts`**；不检出 head / merge ref，不执行提交消息或分支字符串，不下载 PR 产物 / 缓存，不运行 PR 的脚本。
 - 测试 CI 仍只有 `contents: read`。测试、打包和 Xcode 构建不会获得编排的 write token。
 - GitHub 当前对 token 创建的 PR 可能将 CI 置于 approval-required。编排只批准已登记、受信任同仓库 PR 的准确 head 上、本仓库既定 CI workflow 的 `action_required` run；不批准 fork、部署 environment 或 PR review，不伪造检查。
