@@ -42,4 +42,6 @@ AppKit 焦点测试串行运行。TestingMacros 兼容命令及 Xcode 构建见 
 
 独立发布可指定 `--repository alice/my-plugin`；`--plugin` 也接受仓库外插件目录，这时必须附带自己的 LICENSE。默认只生成本地 ZIP 和目录，不更新在线商店。对应 Release 资产确已发布并可下载后才使用 `--write-catalog`；已发布同版本资产保持不变。
 
-交付说明写明文件、构建产物、验证及仍需真机验收的部分。除非任务包含发布，不自动上传 Release、推送代码或安装系统驱动。
+源码默认按 [Agent 自动交付](../../../docs/AGENT-WORKFLOW.md) 提交：独立 `agent/<task>` 分支，必要验证后提交本任务改动，执行 `python3 scripts/submit-agent-pr.py --body-file <PR说明.md>` 自动推送、建 PR 并登记受保护的自动合并；明确只改本地时不推送。收尾确认 PR 真正合并，检查失败或冲突时报告阻塞，不把排队当完成。
+
+交付说明写明文件、构建产物、验证及仍需真机验收的部分。自动合并源码不等于发布或部署；除非任务明确包含发布 / 安装，不自动上传 Release、替换运行中的应用或安装系统驱动。
