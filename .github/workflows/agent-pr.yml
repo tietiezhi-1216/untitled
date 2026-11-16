@@ -1,0 +1,67 @@
+name: Agent PR automation
+
+on:
+  workflow_run:
+    workflows: [macOS CI]
+    types: [requested, completed]
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft, labeled, unlabeled]
+  workflow_dispatch:
+  schedule:
+    - cron: '*/10 * * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  register:
+    if: ${{ !github.event.repository.fork && github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Do not coalesce pushes from distinct agents and lose their PR creation.
+    concurrency:
+      group: agent-register-${{ github.repository }}-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+    steps:
+      # Privileged events execute ONLY protected main code, never a head / merge
+      # ref, an artifact, or an untrusted cache. No pushed strings enter a shell.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const automate = require('./.github/scripts/agent-pr.cjs');
+            await automate({ github, context, core, mode: 'register' });
+
+  reconcile:
+    needs: register
+    if: ${{ always() && !cancelled() && !github.event.repository.fork && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Coalescing here is safe: every run scans all registered PRs, not just the
+    # triggering branch. Expected-head guards also protect against human pushes.
+    concurrency:
+      group: agent-reconcile-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const automate = require('./.github/scripts/agent-pr.cjs');
+            await automate({ github, context, core, mode: 'reconcile' });
