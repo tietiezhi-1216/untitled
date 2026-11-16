@@ -37,7 +37,7 @@ function setup(options = {}) {
       },
     },
     pulls: {
-      list: async () => ({ data: state.prs }),
+      list: async (args = {}) => ({ data: state.prs.filter(pr => !args.state || args.state === 'all' || pr.state === args.state) }),
       get: async args => ({ data: state.prs.find(p => p.number === args.pull_number) }),
       create: async args => {
         record('create-pr', args);
@@ -46,7 +46,7 @@ function setup(options = {}) {
       },
       updateBranch: async args => { record('update-branch', args); state.sha = NEXT; },
     },
-  }, paginate: async method => (await method()).data,
+  }, paginate: async (method, args) => (await method(args)).data,
   graphql: async (query, args) => {
     const disabled = query.includes('disablePullRequest');
     record(disabled ? 'disable-auto' : 'enable-auto', args);
@@ -79,6 +79,11 @@ for (const [name, run, options] of [
   ['stale SHA', ciRun({ head_sha: 'c'.repeat(40) }), {}],
 ]) test(`does not create or register a PR from ${name}`, async () => {
   const s = setup({ run, ...options }); await s.go();
+  assert.equal(s.count('create-pr'), 0); assert.equal(s.count('enable-auto'), 0);
+});
+
+test('late CI after a squash merge does not reopen the delivered head', async () => {
+  const s = setup({ prs: [pull({ state: 'closed', merged_at: '2026-01-01T00:00:00Z' })] }); await s.go();
   assert.equal(s.count('create-pr'), 0); assert.equal(s.count('enable-auto'), 0);
 });
 
