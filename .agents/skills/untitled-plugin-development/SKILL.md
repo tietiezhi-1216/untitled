@@ -5,7 +5,7 @@ description: Create, modify, debug, and package plugins for the Untitled macOS a
 
 # Untitled Plugin Development
 
-工作目录是 Untitled 仓库根目录。先读 [AGENTS.md](../../../AGENTS.md)；协议以 [Plugins/README.md](../../../Plugins/README.md) 和实际 Swift 校验器为准，贡献规则见 [CONTRIBUTING.md](../../../CONTRIBUTING.md)。仅开发 macOS。
+工作目录是本任务独立 git worktree 内的 Untitled 仓库根目录。先读 [AGENTS.md](../../../AGENTS.md)；协议以 [Plugins/README.md](../../../Plugins/README.md) 和实际 Swift 校验器为准，贡献规则见 [CONTRIBUTING.md](../../../CONTRIBUTING.md)。仅开发 macOS。
 
 ## 选择实现方式
 
@@ -15,7 +15,7 @@ description: Create, modify, debug, and package plugins for the Untitled macOS a
 
 ## 开发
 
-1. 检查 `git status --short`，保留用户现有改动。读相关清单，以及 `Plugins/PluginManifest.swift`、`Plugins/PluginUIRegistry.swift`、`Runtime/HostPermissions.swift` 中涉及的接口；这些 Swift 路径均相对 `Sources/Untitled/`。
+1. 检查 `git status --short`，保留用户现有改动；先 `git fetch origin`，再从最新 `origin/main` 创建本任务独立 worktree / `agent/<task>` 分支，始终在其中开发，而非只在主目录有改动时才隔离。读相关清单，以及 `Plugins/PluginManifest.swift`、`Plugins/PluginUIRegistry.swift`、`Runtime/HostPermissions.swift` 中涉及的接口；这些 Swift 路径均相对 `Sources/Untitled/`。
 2. 新插件可运行脚手架；它生成可安装、可打开主面板的示例，随后按需求替换业务内容：
 
    ```bash
@@ -42,6 +42,6 @@ AppKit 焦点测试串行运行。TestingMacros 兼容命令及 Xcode 构建见 
 
 独立发布可指定 `--repository alice/my-plugin`；`--plugin` 也接受仓库外插件目录，这时必须附带自己的 LICENSE。默认只生成本地 ZIP 和目录，不更新在线商店。对应 Release 资产确已发布并可下载后才使用 `--write-catalog`；已发布同版本资产保持不变。
 
-源码默认按 [Agent 自动交付](../../../docs/AGENT-WORKFLOW.md) 提交：独立 `agent/<task>` 分支，必要验证后提交本任务改动，执行 `python3 scripts/submit-agent-pr.py --body-file <PR说明.md>` 自动推送、建 PR 并登记受保护的自动合并；明确只改本地时不推送。收尾确认 PR 真正合并，检查失败或冲突时报告阻塞，不把排队当完成。
+源码默认按 [五步开发与自动交付](../../../docs/AGENT-WORKFLOW.md) 完成：拉取最新代码并创建独立 worktree → 在该 worktree 开发与验证 → 提交 PR 自动合并 → 验证确为 `MERGED` 且合并提交已进入 `origin/main` → 从目录外安全移除本任务 worktree，并在干净 main 工作区 `git pull --ff-only origin main`、确认最新。提交阶段执行 `python3 scripts/submit-agent-pr.py --body-file <PR说明.md>`，但该脚本成功不替代后续验证 / 清理 / 同步。明确只改本地时不推送并保留现场；检查失败、冲突、脏状态或 main 分叉时报告阻塞，不强制清理或覆盖其他任务。
 
 交付说明写明文件、构建产物、验证及仍需真机验收的部分。自动合并源码不等于发布或部署；除非任务明确包含发布 / 安装，不自动上传 Release、替换运行中的应用或安装系统驱动。
