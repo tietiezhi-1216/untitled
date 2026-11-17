@@ -2,6 +2,17 @@ import AppKit
 import Combine
 @preconcurrency import ApplicationServices
 
+/// At most three listener repairs in any minute. No unbounded retry/task queue.
+struct SharingTapRecoveryBudget {
+    private var attempts: [TimeInterval] = []
+    mutating func allow(at now: TimeInterval) -> Bool {
+        guard now.isFinite, now >= 0, attempts.last.map({ now >= $0 }) ?? true else { return false }
+        attempts.removeAll { now - $0 >= 60 }
+        guard attempts.count < 3 else { return false }
+        attempts.append(now); return true
+    }
+}
+
 @MainActor final class SharingInput {
     enum Mode { case local, preparingCapture, staged, controlling, receiving, parked }
     static let replayMarker: Int64 = 0x554E544C534852
@@ -15,6 +26,9 @@ import Combine
     var localResumed: () -> Void = {}
     var physicalStateChanged: () -> Void = {}
     var failure: (String) -> Void = { _ in }
+    // The controller revokes the old handoff without destroying a repairable tap.
+    var interruptForTapRecovery: () -> Bool = { false }
+    var tapRecovered: () -> Void = {}
     var edge: SharingEdge = .right
     var workspace: SharingDisplayLayout?
     var canSwitch = false
@@ -34,6 +48,17 @@ import Combine
     private let handoffClock: () -> TimeInterval
     private let cursor: SharingCursorCapture
     private let tapReadyOverride: (() -> Bool)?
+    private let enableTapOverride: (() -> Bool)?
+    private let samplePhysicalOverride: (() -> SharingHeldInputState)?
+    private var listenerStarted = false
+    private var tapRecovering = false
+    private var tapRecoveryTask: Task<Void, Never>?
+    private var tapRecoveryGeneration: UInt64 = 0
+    private var tapRecoveryBudget = SharingTapRecoveryBudget()
+    private var tapTimeouts = 0, tapUserDisables = 0, tapRecoveries = 0, parkingFocusReleases = 0
+    private var lastTapDisable: String?
+    private var lastTapDisableMode: String?
+    private var lastFailureMode: String?
     private let receiverWarp: (CGPoint) -> CGError
     private var resignObserver: AnyCancellable?
     private(set) var physicalMouseMovements = 0
@@ -55,15 +80,19 @@ import Combine
     private var preparedReceiver: (edge: SharingEdge, fraction: Double, epoch: UInt64)?
     private let eventPoster: (CGEvent) -> Void
     init(cursor: SharingCursorCapture = SharingCursorCapture(), tapReadyOverride: (() -> Bool)? = nil,
+         enableTapOverride: (() -> Bool)? = nil, samplePhysicalOverride: (() -> SharingHeldInputState)? = nil,
          receiverWarp: @escaping (CGPoint) -> CGError = { CGWarpMouseCursorPosition($0) },
          eventPoster: @escaping (CGEvent) -> Void = { $0.post(tap: .cghidEventTap) },
          handoffClock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.handoffClock = handoffClock
         self.cursor = cursor; self.tapReadyOverride = tapReadyOverride; self.receiverWarp = receiverWarp; self.eventPoster = eventPoster
+        self.enableTapOverride = enableTapOverride; self.samplePhysicalOverride = samplePhysicalOverride
         resignObserver = NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
             .receive(on: DispatchQueue.main).sink { [weak self] _ in
                 MainActor.assumeIsolated {
-                    if let self, self.mode == .controlling || self.mode == .staged, !self.cursor.isCaptured { self.failCapture("应用失去前台，已停止向远端转发并归还控制。") }
+                    guard let self else { return }
+                    if self.mode == .parked, !self.cursor.isForeground { self.releaseParkingAfterFocusLoss(); return }
+                    if self.mode == .controlling || self.mode == .staged, !self.cursor.isCaptured { self.failCapture("应用失去前台，已停止向远端转发并归还控制。") }
                 }
             }
     }
@@ -71,13 +100,19 @@ import Combine
         if let tapReadyOverride { return tapReadyOverride() }
         return tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false
     }
-    var needsRecovery: Bool { cursor.needsRecovery }
+    var needsRecovery: Bool { cursor.needsRecovery || tapRecovering }
     var isCapturing: Bool { mode == .controlling && cursor.isCaptured && tapReady }
     var isStaged: Bool { mode == .staged && cursor.isCaptured && tapReady }
     var isParked: Bool { mode == .parked && cursor.isCaptured && tapReady }
     var safetyDiagnostics: [String: Any] {
         var value = cursor.snapshot
         value["mode"] = String(describing: mode); value["tapReady"] = tapReady
+        value["tapRecovering"] = tapRecovering; value["tapTimeouts"] = tapTimeouts
+        value["tapUserDisables"] = tapUserDisables; value["tapRecoveries"] = tapRecoveries
+        value["parkingFocusReleases"] = parkingFocusReleases
+        if let lastTapDisable { value["lastTapDisable"] = lastTapDisable }
+        if let lastTapDisableMode { value["lastTapDisableMode"] = lastTapDisableMode }
+        if let lastFailureMode { value["lastFailureMode"] = lastFailureMode }
         value["queuedLocalEvents"] = localEvents.count
         value["queuedReceiverEvents"] = pendingReceiverReplay.count
         value["queuedReleaseEvents"] = pendingReleaseReplay.count
@@ -94,8 +129,19 @@ import Combine
     }
     func maintainCapture() {
         guard mode == .controlling || mode == .staged || mode == .parked else { return }
+        if mode == .parked, !cursor.isForeground { releaseParkingAfterFocusLoss(); return }
         do { try cursor.validate(tapReady: tapReady); cursor.heartbeat() }
         catch { failCapture(error.localizedDescription) }
+    }
+    private func releaseParkingAfterFocusLoss() {
+        // Parking never authorizes forwarding. Losing focus here is a normal
+        // return to local use, not grounds to disable a healthy listener forever.
+        let errors = reset(); canSwitch = false
+        guard errors.isEmpty, !cursor.needsRecovery, tapReady else {
+            failCapture("停放光标恢复未完成，已暂停共享。"); return
+        }
+        parkingFocusReleases = min(parkingFocusReleases + 1, 1_000_000_000)
+        localResumed()
     }
     #if DEBUG
     private(set) var appliedPacketCount = 0
@@ -118,6 +164,8 @@ import Combine
         // In-process dependency injection for ordinary tests: never create a real OS tap.
         if tapReadyOverride != nil {
             guard tapReady else { throw PluginError.invalid("测试事件通道未就绪。") }
+            if !listenerStarted { tapRecoveryBudget = SharingTapRecoveryBudget() }
+            listenerStarted = true
             return
         }
         guard tap == nil else { return }
@@ -134,12 +182,14 @@ import Combine
         }, userInfo: Unmanaged.passUnretained(self).toOpaque()), let source = CFMachPortCreateRunLoopSource(nil, tap, 0) else {
             throw PluginError.invalid("无法启动键鼠共享，请在应用权限管理中检查辅助功能和输入监控。")
         }
-        self.tap = tap; self.source = source
+        self.tap = tap; self.source = source; listenerStarted = true
+        tapRecoveryBudget = SharingTapRecoveryBudget()
         resamplePhysical()
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
     }
     func stop() {
+        cancelTapRecovery(); listenerStarted = false
         reset()
         if let tap { CGEvent.tapEnable(tap: tap, enable: false); CFMachPortInvalidate(tap) }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
@@ -147,7 +197,7 @@ import Combine
         pendingReceiverReplay.removeAll(); pendingReleaseReplay.removeAll(); pendingLocalReplay.removeAll()
     }
     func capture(maximumDuration: TimeInterval? = nil, deferForwarding: Bool = false) async throws {
-        guard mode == .local || mode == .parked, isNeutral, localResumeTask == nil else { throw PluginError.invalid("仍有按键或控制会话未释放，已取消接管。") }
+        guard mode == .local || mode == .parked, isNeutral, localResumeTask == nil, !tapRecovering else { throw PluginError.invalid("仍有按键或控制会话未释放，已取消接管。") }
         reset(); physicalMouseMovements = 0; externalInputEvents = 0; lastSafetyFailure = nil
         let epoch = receiverEpoch
         try await drainReplay()
@@ -191,6 +241,7 @@ import Combine
         mode = .parked; canSwitch = false
     }
     func prepareReceiving(edge: SharingEdge, fraction: Double, deferPointer: Bool = false) async throws {
+        guard !tapRecovering else { throw PluginError.invalid("键鼠监听正在恢复，请稍后重试。") }
         let epoch = physicalEpoch
         await localResumeTask?.value
         reset()
@@ -208,6 +259,7 @@ import Combine
         try receive(edge: preparedReceiver.edge, fraction: preparedReceiver.fraction)
     }
     func receive(edge: SharingEdge, fraction: Double) throws {
+        guard !tapRecovering else { throw PluginError.invalid("键鼠监听正在恢复，请稍后重试。") }
         let errors = reset()
         guard errors.isEmpty, !needsRecovery, pendingReleaseReplay.isEmpty else { throw PluginError.invalid("本机光标或按键释放尚未完成，已拒绝对端接管。") }
         let entry = edge.opposite
@@ -245,11 +297,44 @@ import Combine
         return recoveryErrors
     }
     private func failCapture(_ message: String) {
-        lastSafetyFailure = message
+        lastFailureMode = String(describing: mode)
+        cancelTapRecovery(); lastSafetyFailure = message
         let errors = reset(); canSwitch = false
         failure(errors.isEmpty ? message : message + "（" + errors.joined(separator: "；") + "）")
     }
+    private func cancelTapRecovery() {
+        tapRecoveryGeneration &+= 1; tapRecoveryTask?.cancel(); tapRecoveryTask = nil; tapRecovering = false
+    }
+    private func recoverTimedOutTap() -> Bool {
+        cancelTapRecovery()
+        guard listenerStarted, tapRecoveryBudget.allow(at: handoffClock()) else { return false }
+        let errors = reset(); canSwitch = false
+        guard errors.isEmpty, !cursor.needsRecovery, interruptForTapRecovery(), listenerStarted else { return false }
+        let enabled: Bool
+        if let enableTapOverride { enabled = enableTapOverride() }
+        else if let tap { CGEvent.tapEnable(tap: tap, enable: true); enabled = CGEvent.tapIsEnabled(tap: tap) }
+        else { enabled = false }
+        guard enabled, tapReady else { return false }
+        canSwitch = false; tapRecovering = true
+        let generation = tapRecoveryGeneration
+        tapRecoveryTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+            guard let self, generation == self.tapRecoveryGeneration, self.listenerStarted else { return }
+            self.tapRecoveryTask = nil; self.tapRecovering = false
+            guard self.tapReady, !self.cursor.needsRecovery else {
+                self.failCapture("键鼠监听恢复失败，请重新开启共享。"); return
+            }
+            // Never restore the old handoff, motion, focus lease, or remote held
+            // input. Only a fresh physical action can request another handoff.
+            self.resamplePhysical(); self.lastSafetyFailure = nil
+            self.tapRecoveries = min(self.tapRecoveries + 1, 1_000_000_000)
+            self.tapRecovered()
+        }
+        return true
+    }
     private func resamplePhysical() {
+        if let samplePhysicalOverride { physical = samplePhysicalOverride(); return }
+        if tapReadyOverride != nil { physical = SharingHeldInputState(); return }
         physical = SharingHeldInputState()
         for code in 0...127 where code != 57 && CGEventSource.keyState(.hidSystemState, key: CGKeyCode(code)) {
             physical.observe(.init(kind: .keyDown, code: code))
@@ -259,14 +344,14 @@ import Combine
         }
     }
     func handle(_ type: CGEventType, _ event: CGEvent) -> Bool {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            failCapture("键鼠监听已被系统停用，已归还本机控制。")
-            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
-            // A release may have been missed while disabled; sample again after posted cleanup.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                guard let self, self.tap != nil else { return }
-                self.resamplePhysical(); self.physicalStateChanged()
-            }
+        if type == .tapDisabledByTimeout {
+            tapTimeouts = min(tapTimeouts + 1, 1_000_000_000); lastTapDisable = "timeout"; lastTapDisableMode = String(describing: mode)
+            if !recoverTimedOutTap() { failCapture("键鼠监听超时且未能安全恢复，已归还控制；请重新开启共享。") }
+            return false
+        }
+        if type == .tapDisabledByUserInput {
+            tapUserDisables = min(tapUserDisables + 1, 1_000_000_000); lastTapDisable = "user-input"; lastTapDisableMode = String(describing: mode)
+            failCapture("键鼠监听被系统用户输入停用，已归还控制；请确认系统状态后重新开启共享。")
             return false
         }
         let marker = event.getIntegerValueField(.eventSourceUserData)

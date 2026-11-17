@@ -22,7 +22,7 @@ swift build
 swift test --no-parallel
 python3 scripts/prepare-plugin-resources.py --check
 ./scripts/build-app.sh release
-python3 scripts/package-plugins.py --tag v0.12.0
+python3 scripts/package-plugins.py --tag v0.12.5
 # 仅在 Release 资产实际发布后，追加 --write-catalog 更新在线商店
 ```
 

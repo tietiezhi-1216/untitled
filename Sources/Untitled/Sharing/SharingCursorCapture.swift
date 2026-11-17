@@ -385,6 +385,7 @@ extension SharingCursorFocus {
         guard let resourceToken else { return false }
         return anchor != nil && resources.isActive(token: resourceToken) && focus.isForeground
     }
+    var isForeground: Bool { focus.isForeground }
     func heartbeat() { if let resourceToken { resources.heartbeat(token: resourceToken) } }
     func awaitFocusRestoration() async -> Bool { await focus.awaitRestoration() }
     var localReplayAllowed: Bool { focus.localReplayAllowed }
