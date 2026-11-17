@@ -770,6 +770,161 @@ import Testing
         #expect(await wait { a.control == .controlling && b.control == .receiving })
         #expect(sb.calls.filter { $0 == "hide" }.count == sb.calls.filter { $0 == "show" }.count)
     }
+    @Test func tapRepairBudgetIsBoundedMonotonicAndRolling() {
+        var budget = SharingTapRecoveryBudget()
+        #expect(budget.allow(at: 0) && budget.allow(at: 1) && budget.allow(at: 2))
+        #expect(!budget.allow(at: 3) && !budget.allow(at: .nan) && !budget.allow(at: -1))
+        #expect(budget.allow(at: 60) && !budget.allow(at: 60.5))
+        #expect(budget.allow(at: 61) && !budget.allow(at: 59))
+    }
+    @Test @MainActor func timedOutTapRevokesOldLeaseBeforeRepairAndNeverResumesForwarding() async throws {
+        let system = CursorSystem(), focus = CursorFocus(), resources = system.resources()
+        var tap = true, repairs = 0, recovered = 0, interrupted = 0, frames = 0
+        let input = SharingInput(cursor: SharingCursorCapture(resources: resources, focus: focus), tapReadyOverride: { tap },
+            enableTapOverride: { repairs += 1; tap = true; return true }, receiverWarp: { _ in .success }, eventPoster: { _ in })
+        try input.start(); input.send = { _ in frames += 1 }
+        input.interruptForTapRecovery = { interrupted += 1; return input.mode == .local && !resources.isActive }
+        input.tapRecovered = { recovered += 1 }
+        try await input.capture(); tap = false
+        #expect(!input.handle(.tapDisabledByTimeout, try motion()))
+        #expect(interrupted == 1 && repairs == 1 && input.mode == .local && input.needsRecovery)
+        #expect(!input.isCapturing && !resources.isActive && system.calls.contains("show") && system.calls.contains("reattach"))
+        await #expect(throws: PluginError.self) { try await input.capture() }
+        #expect(await wait { recovered == 1 })
+        #expect(!input.needsRecovery && !input.isCapturing && frames == 0)
+        #expect(system.calls.filter { $0 == "detach" }.count == 1)
+        #expect(input.safetyDiagnostics["lastTapDisable"] as? String == "timeout")
+        #expect(input.safetyDiagnostics["lastTapDisableMode"] as? String == "controlling")
+        input.interruptForTapRecovery = { false }; input.stop()
+    }
+    @Test @MainActor func tapUserDisableNeverAutoRepairsAndStopCancelsPendingRepair() async throws {
+        for userDisable in [true, false] {
+            let system = CursorSystem(), focus = CursorFocus(); var repairs = 0, recovered = 0, failed = 0
+            let input = SharingInput(cursor: SharingCursorCapture(resources: system.resources(), focus: focus), tapReadyOverride: { true },
+                enableTapOverride: { repairs += 1; return true }, receiverWarp: { _ in .success }, eventPoster: { _ in })
+            try input.start(); input.interruptForTapRecovery = { true }; input.tapRecovered = { recovered += 1 }
+            input.failure = { [weak input] _ in failed += 1; input?.stop() }
+            _ = input.handle(userDisable ? .tapDisabledByUserInput : .tapDisabledByTimeout, try motion())
+            input.stop(); try await Task.sleep(for: .milliseconds(140))
+            #expect(recovered == 0 && !input.needsRecovery)
+            #expect(repairs == (userDisable ? 0 : 1) && failed == (userDisable ? 1 : 0))
+        }
+    }
+    @Test @MainActor func repeatedTimeoutsAndRejectedRecoveryFailClosedWithoutLooping() throws {
+        for permitted in [true, false] {
+            let system = CursorSystem(), focus = CursorFocus(); var repairs = 0, failed = 0
+            let input = SharingInput(cursor: SharingCursorCapture(resources: system.resources(), focus: focus), tapReadyOverride: { true },
+                enableTapOverride: { repairs += 1; return true }, receiverWarp: { _ in .success }, eventPoster: { _ in }, handoffClock: { 1 })
+            try input.start(); input.interruptForTapRecovery = { permitted }
+            input.failure = { [weak input] _ in failed += 1; input?.stop() }
+            for _ in 0..<(permitted ? 4 : 1) { _ = input.handle(.tapDisabledByTimeout, try motion()) }
+            #expect(repairs == (permitted ? 3 : 0) && failed == 1 && input.mode == .local && !input.needsRecovery)
+            input.stop()
+        }
+    }
+    @Test @MainActor func failedTapReenableAndRevokedPermissionNeverBecomeHealthy() async throws {
+        let system = CursorSystem(), focus = CursorFocus(); var failed = 0, recovered = 0
+        let input = SharingInput(cursor: SharingCursorCapture(resources: system.resources(), focus: focus), tapReadyOverride: { true },
+            enableTapOverride: { false }, receiverWarp: { _ in .success }, eventPoster: { _ in })
+        try input.start(); input.interruptForTapRecovery = { true }; input.tapRecovered = { recovered += 1 }
+        input.failure = { [weak input] _ in failed += 1; input?.stop() }
+        _ = input.handle(.tapDisabledByTimeout, try motion())
+        #expect(failed == 1 && recovered == 0 && !input.needsRecovery)
+        let suite = "tap-permission-\(UUID().uuidString)", defaults = UserDefaults(suiteName: suite)!
+        var allowed = true
+        let repaired = SharingInput(cursor: SharingCursorCapture(resources: system.resources(), focus: focus), tapReadyOverride: { true },
+            enableTapOverride: { true }, receiverWarp: { _ in .success }, eventPoster: { _ in })
+        let controller = PeripheralSharingController(defaults: defaults, input: repaired, inputAccessAvailable: { allowed }, automaticallyPoll: false)
+        controller.isAllowed = { true }; controller.requirePermissions = { _ in }
+        defer { controller.stop(); defaults.removePersistentDomain(forName: suite) }
+        try controller.start(key: SharingPairingKey.generate(), localOnly: true); try controller.setKeyboardMouse(true)
+        _ = repaired.handle(.tapDisabledByTimeout, try motion()); allowed = false
+        #expect(await wait { !controller.keyboardMouseEnabled })
+        #expect(controller.inputStatus?.contains("权限") == true && !repaired.isCapturing)
+    }
+    @Test @MainActor func parkedFocusLossReleasesParkingButActiveFocusLossStillFailsClosed() async throws {
+        for parked in [true, false] {
+            let system = CursorSystem(), focus = CursorFocus(), resources = system.resources(); var failed = 0, resumed = 0
+            let input = SharingInput(cursor: SharingCursorCapture(resources: resources, focus: focus), tapReadyOverride: { true }, receiverWarp: { _ in .success }, eventPoster: { _ in })
+            input.failure = { _ in failed += 1 }; input.localResumed = { resumed += 1 }
+            if parked { try input.receive(edge: .left, fraction: 0.5); try await input.parkAfterReturn() }
+            else { try await input.capture() }
+            focus.isForeground = false; input.maintainCapture()
+            #expect(input.mode == .local && !resources.isActive && !resources.needsRecovery)
+            #expect(failed == (parked ? 0 : 1) && resumed == (parked ? 1 : 0))
+            #expect(system.calls.contains("show") && system.calls.contains("reattach"))
+            input.stop()
+        }
+    }
+    @Test @MainActor func parkingCleanupFailureCannotBeReportedAsAHealthyResume() async throws {
+        let system = CursorSystem(), focus = CursorFocus(), resources = system.resources(); var resumed = 0, failed = 0
+        let input = SharingInput(cursor: SharingCursorCapture(resources: resources, focus: focus), tapReadyOverride: { true }, receiverWarp: { _ in .success }, eventPoster: { _ in })
+        input.localResumed = { resumed += 1 }; input.failure = { _ in failed += 1 }
+        try input.receive(edge: .left, fraction: 0.5); try await input.parkAfterReturn()
+        system.set("show", .failure); focus.isForeground = false; input.maintainCapture()
+        #expect(resumed == 0 && failed == 1 && resources.needsRecovery)
+        system.set("show", .success); resources.expireIfStalled(); input.stop()
+    }
+    @Test @MainActor func controllerTapRepairEndsBothHandoffsWithoutDisconnectOrAutomaticRecapture() async throws {
+        let one = "tap-repair-a-\(UUID().uuidString)", two = "tap-repair-b-\(UUID().uuidString)"
+        let da = UserDefaults(suiteName: one)!, db = UserDefaults(suiteName: two)!
+        let sa = CursorSystem(), sb = CursorSystem(), fa = CursorFocus(), fb = CursorFocus(); var tap = true, repairs = 0
+        let ia = SharingInput(cursor: SharingCursorCapture(resources: sa.resources(), focus: fa), tapReadyOverride: { tap },
+            enableTapOverride: { tap = true; repairs += 1; return true }, receiverWarp: { _ in .success }, eventPoster: { _ in })
+        let ib = SharingInput(cursor: SharingCursorCapture(resources: sb.resources(), focus: fb), tapReadyOverride: { true }, receiverWarp: { _ in .success }, eventPoster: { _ in })
+        let a = PeripheralSharingController(defaults: da, input: ia, inputAccessAvailable: { true })
+        let b = PeripheralSharingController(defaults: db, input: ib, inputAccessAvailable: { true })
+        for c in [a,b] { c.isAllowed = { true }; c.requirePermissions = { _ in } }
+        defer { a.stop(); b.stop(); da.removePersistentDomain(forName: one); db.removePersistentDomain(forName: two) }
+        let key = try SharingPairingKey.generate()
+        try a.start(key: key, localOnly: true); try b.start(key: key, localOnly: true)
+        #expect(await wait { a.transport.port != nil && b.transport.port != nil })
+        try a.connect(host: "127.0.0.1", port: String(try #require(b.transport.port).rawValue))
+        #expect(await wait { a.layoutReady && b.layoutReady })
+        try a.setKeyboardMouse(true); try b.setKeyboardMouse(true)
+        #expect(await wait { a.peerKeyboardMouseEnabled == true && b.peerKeyboardMouseEnabled == true })
+        a.toggleControl(); #expect(await wait { a.control == .controlling && b.control == .receiving })
+        tap = false; _ = ia.handle(.tapDisabledByTimeout, try motion())
+        #expect(await wait { a.control == .local && b.control == .local && !ia.needsRecovery })
+        #expect(a.peerName != nil && b.peerName != nil && a.keyboardMouseEnabled && b.keyboardMouseEnabled && repairs == 1)
+        #expect(!ia.isCapturing && !ib.isCapturing && sa.calls.filter { $0 == "detach" }.count == 1)
+        #expect(a.sentInputPackets == 0 && b.receivedInputPackets == 0)
+    }
+    @Test @MainActor func transportRecoveryIsOneSidedBoundedAndDoesNotEnablePausedInput() async throws {
+        let one = "retry-a-\(UUID().uuidString)", two = "retry-b-\(UUID().uuidString)"
+        let da = UserDefaults(suiteName: one)!, db = UserDefaults(suiteName: two)!
+        let sa = CursorSystem(), sb = CursorSystem(), fa = CursorFocus(), fb = CursorFocus(); var now: UInt64 = 1
+        let ia = SharingInput(cursor: SharingCursorCapture(resources: sa.resources(), focus: fa), tapReadyOverride: { true }, receiverWarp: { _ in .success }, eventPoster: { _ in })
+        let ib = SharingInput(cursor: SharingCursorCapture(resources: sb.resources(), focus: fb), tapReadyOverride: { true }, receiverWarp: { _ in .success }, eventPoster: { _ in })
+        let key = try SharingPairingKey.generate()
+        let b = PeripheralSharingController(defaults: db, input: ib, loadPairingKey: { key }, inputAccessAvailable: { true }, automaticallyPoll: false)
+        b.isAllowed = { true }; b.requirePermissions = { _ in }; try b.startUserSession(localOnly: true)
+        #expect(await wait { b.transport.port != nil })
+        da.set("127.0.0.1", forKey: "sharing.lastPeerHost"); da.set(String(try #require(b.transport.port).rawValue), forKey: "sharing.lastPeerPort")
+        let a = PeripheralSharingController(defaults: da, input: ia, loadPairingKey: { key }, inputAccessAvailable: { true }, connectionClock: { now }, automaticallyPoll: false)
+        a.isAllowed = { true }; a.requirePermissions = { _ in }
+        defer { a.stop(); b.stop(); da.removePersistentDomain(forName: one); db.removePersistentDomain(forName: two) }
+        try a.startUserSession(localOnly: true)
+        #expect(await wait { a.layoutReady && b.layoutReady })
+        _ = ia.handle(.tapDisabledByUserInput, try motion())
+        #expect(!a.keyboardMouseEnabled && da.bool(forKey: "sharing.inputDesired"))
+        now += 8_000_000_000; a.pollConnection()
+        #expect(await wait { a.peerName == nil && b.peerName == nil })
+        #expect(a.connectionDiagnostics["retryArmed"] as? Bool == true)
+        #expect(b.connectionDiagnostics["retryArmed"] as? Bool == false)
+        a.pollConnection(); #expect(await wait { a.layoutReady && b.layoutReady })
+        #expect(!a.keyboardMouseEnabled && b.peerKeyboardMouseEnabled == false)
+        #expect(!a.microphoneOffered && !a.wantsRemoteMicrophone && a.control == .local && b.control == .local)
+        #expect(sa.calls.isEmpty && sb.calls.isEmpty)
+        // A second loss exhausts its own finite wait rather than retrying forever.
+        now += 8_000_000_000; a.pollConnection(); #expect(await wait { a.peerName == nil && b.peerName == nil })
+        now += 121_000_000_000; a.pollConnection()
+        #expect(a.peerName == nil && a.connectionDiagnostics["retryArmed"] as? Bool == false)
+        // Explicit manual disconnect and stop also clear any future dial plan.
+        a.disconnect(); now += 1_000_000_000; a.pollConnection(); #expect(a.peerName == nil)
+        a.stopUserSession(); #expect(!da.bool(forKey: "sharing.sessionEnabled"))
+        now += 1_000_000_000; a.pollConnection(); #expect(!a.isRunning && a.peerName == nil)
+    }
     @MainActor private func wait(_ condition: () -> Bool) async -> Bool {
         for _ in 0..<500 { if condition() { return true }; try? await Task.sleep(for: .milliseconds(5)) }
         return condition()
