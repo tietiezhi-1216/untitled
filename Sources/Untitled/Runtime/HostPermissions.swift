@@ -50,7 +50,7 @@ struct HostPermissionDescriptor: Identifiable {
     let openSettings: () -> Void
 }
 
-enum HostSettingsPage: String, CaseIterable { case general, permissions }
+enum HostSettingsPage: String, CaseIterable { case general, softwareUpdate, permissions }
 
 struct HostPermissionRequest: Identifiable, Equatable {
     let pluginID: String

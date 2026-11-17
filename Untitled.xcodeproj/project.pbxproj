@@ -6,6 +6,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A91801000000000000000001 /* HostSoftwareUpdate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91802000000000000000001 /* HostSoftwareUpdate.swift */; };
+		A91801000000000000000002 /* HostSoftwareUpdateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91802000000000000000002 /* HostSoftwareUpdateView.swift */; };
 		BE6C0A4EB2149B0B44ADEEBF /* BundledPlugins.json in Resources */ = {isa = PBXBuildFile; fileRef = A776FB06792C15F83B5BCB95; };
 		5947A7D367A6E0B42B64EF25 /* PluginReadmeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4C328F96B949EE3B6AF0E63 /* PluginReadmeView.swift */; };
 		E3CFF62A8B09FB1D6B45F309 /* PluginStoreDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8030D9C6C9C25A98E4A33F43 /* PluginStoreDetailView.swift */; };
@@ -103,6 +105,8 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		A91802000000000000000001 /* HostSoftwareUpdate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSoftwareUpdate.swift; sourceTree = "<group>"; };
+		A91802000000000000000002 /* HostSoftwareUpdateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSoftwareUpdateView.swift; sourceTree = "<group>"; };
 		A776FB06792C15F83B5BCB95 /* BundledPlugins.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = Sources/Untitled/Resources/BundledPlugins.json; sourceTree = SOURCE_ROOT; };
 		D4C328F96B949EE3B6AF0E63 /* PluginReadmeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginReadmeView.swift; sourceTree = "<group>"; };
 		8030D9C6C9C25A98E4A33F43 /* PluginStoreDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginStoreDetailView.swift; sourceTree = "<group>"; };
@@ -256,6 +260,7 @@
 			isa = PBXGroup;
 			children = (
 				A91702000000000000000000 /* IdentityMigration.swift */,
+				A91802000000000000000001 /* HostSoftwareUpdate.swift */,
 				9B899983D24D25EC9EE1F113 /* PluginComposition.swift */,
 				B5FD79D86815E48CF7EA5AAB /* UntitledApp.swift */,
 			);
@@ -310,6 +315,7 @@
 				8938B8CAB0EE925EB47B4514 /* PluginDetailView.swift */,
 				819C126DF646684CE61BA047 /* PluginStoreView.swift */,
 				FCDEEFA91BAF8AD35D711CD1 /* SettingsView.swift */,
+				A91802000000000000000002 /* HostSoftwareUpdateView.swift */,
 				A3A885F2DFD2B7D10EFA4FCC /* ShortcutRecorder.swift */,
 				D96F2B20C58AFE6F6D9D19F9 /* ViewState.swift */,
 			);
@@ -543,6 +549,8 @@
 				BBF12F444124E6EA4DE12608 /* PluginDetailView.swift in Sources */,
 				9DB2215F8EBAEBE02C3AB08E /* PluginStoreView.swift in Sources */,
 				CA21B623D4CC1133FDFE7E5F /* SettingsView.swift in Sources */,
+				A91801000000000000000001 /* HostSoftwareUpdate.swift in Sources */,
+				A91801000000000000000002 /* HostSoftwareUpdateView.swift in Sources */,
 				E16BAD76C88CCB681A9D105A /* ShortcutRecorder.swift in Sources */,
 				A342B2785828FA725849DCD5 /* ViewState.swift in Sources */,
 			);

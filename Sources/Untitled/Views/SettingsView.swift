@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject private var permissions: HostPermissionCenter
+    @StateObject private var softwareUpdate = HostSoftwareUpdate()
     @AppStorage("appearance") private var appearance: AppAppearance = .system
 
     init(store: PluginStore) {
@@ -12,6 +13,8 @@ struct SettingsView: View {
     var body: some View {
         TabView(selection: $permissions.settingsPage) {
             generalSettings.tabItem { Label("通用", systemImage: "gearshape") }.tag(HostSettingsPage.general)
+            HostSoftwareUpdateView(update: softwareUpdate)
+                .tabItem { Label("软件更新", systemImage: "arrow.triangle.2.circlepath") }.tag(HostSettingsPage.softwareUpdate)
             PermissionManagementView(permissions: permissions)
                 .tabItem { Label("权限管理", systemImage: "hand.raised") }.tag(HostSettingsPage.permissions)
         }

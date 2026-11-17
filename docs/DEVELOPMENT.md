@@ -15,6 +15,10 @@
 
 设计依据：[Apple Liquid Glass 采用指南](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass)、[材质规范](https://developer.apple.com/design/human-interface-guidelines/materials)。
 
+### 软件本体更新
+
+设置中的“软件更新”与插件商店独立，显示运行版本/构建号、手动检查正式发布版、更新说明与兼容本体包的下载页入口。没有自动轮询、后台下载或自替换安装；发布来源、资源预算及限制见 [软件更新](HOST-UPDATES.md)。
+
 ### 构建
 
 ```bash
@@ -22,7 +26,7 @@ swift build
 swift test --no-parallel
 python3 scripts/prepare-plugin-resources.py --check
 ./scripts/build-app.sh release
-python3 scripts/package-plugins.py --tag v0.12.5
+python3 scripts/package-plugins.py --tag v0.13.0
 # 仅在 Release 资产实际发布后，追加 --write-catalog 更新在线商店
 ```
 
