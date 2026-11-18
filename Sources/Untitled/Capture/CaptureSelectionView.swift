@@ -1004,6 +1004,9 @@ final class CaptureSelectionBackdropView:NSView {
     private var hoverStartRect:CGRect?
     private var hoverCleanupDeadline:ContinuousClock.Instant?
     private var hoverCleanupTask:Task<Void,Never>?
+    var sleepForHoverCleanup: @MainActor (ContinuousClock.Instant) async throws -> Void = { deadline in
+        if ContinuousClock.now < deadline { try await Task.sleep(until: deadline, clock: .continuous) }
+    }
     private let hoverOutline=CAShapeLayer()
     var presentsHover:Bool { hoverRect != nil }
     /// Read the visible pose only while a path interpolation owns the layer.
@@ -1057,11 +1060,9 @@ final class CaptureSelectionBackdropView:NSView {
         // destination. Release both paths together even without render ticks.
         hoverCleanupDeadline=ContinuousClock.now.advanced(by:.seconds(duration))
         guard hoverCleanupTask == nil else { return }
-        hoverCleanupTask=Task { @MainActor [weak self] in
+        hoverCleanupTask=Task { @MainActor [weak self, sleep = sleepForHoverCleanup] in
             while !Task.isCancelled,let deadline=self?.hoverCleanupDeadline {
-                if ContinuousClock.now<deadline {
-                    do { try await Task.sleep(until:deadline,clock:.continuous) } catch { return }
-                }
+                do { try await sleep(deadline) } catch { return }
                 guard let self,!Task.isCancelled else { return }
                 // A retarget extends this single lease, not a queue of tasks.
                 guard self.hoverCleanupDeadline == deadline else { continue }
