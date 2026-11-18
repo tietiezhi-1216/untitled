@@ -6,6 +6,9 @@ import UniformTypeIdentifiers
 enum CaptureTool: String, Codable, CaseIterable, Identifiable {
     case move, select, arrow, rectangle, ellipse, line, pen, highlight, text, number, mosaic, cover, erase, spotlight, magnify, crop, deleteMarks, watermark, inpaint
     var id: String { rawValue }
+    /// Legacy IDs and shortcuts remain decodable; neither is a visible tool.
+    var isDefaultInteraction: Bool { self == .move || self == .select }
+    var hasAnnotationStyle: Bool { ![.move,.select,.crop,.deleteMarks,.erase,.inpaint].contains(self) }
     var title: String {
         switch self {
         case .deleteMarks: "擦除标注"

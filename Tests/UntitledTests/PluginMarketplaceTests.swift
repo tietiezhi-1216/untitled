@@ -6,6 +6,32 @@ import Testing
 
 @Suite(.serialized)
 struct PluginMarketplaceTests {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["UNTITLED_PACKAGE_CANDIDATES_DIR"] != nil))
+    @MainActor func validatePackagedPluginCatalog() throws {
+        let path = try #require(ProcessInfo.processInfo.environment["UNTITLED_PACKAGE_CANDIDATES_DIR"])
+        let directory = URL(fileURLWithPath: path, isDirectory: true)
+        let catalog = try JSONDecoder().decode(PluginCatalog.self, from:
+            Data(contentsOf: directory.appendingPathComponent("catalog.json")))
+        try catalog.validate()
+        let entries = catalog.plugins
+        let archiveNames = entries.map { $0.downloadURL.lastPathComponent }
+        let packaged = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "zip" }.map(\.lastPathComponent)
+        #expect(!entries.isEmpty)
+        #expect(Set(entries.map(\.id)) == Set(PluginPresentationIndex.bundled.plugins.map(\.id)))
+        #expect(Set(archiveNames).count == entries.count)
+        #expect(Set(archiveNames) == Set(packaged))
+        let registry = PluginComposition.makeUIRegistry()
+        let permissions = PluginComposition.makePermissionCenter()
+        for entry in entries {
+            let manifest = try PluginArchive.read(directory.appendingPathComponent(entry.downloadURL.lastPathComponent),
+                                                  expectedSHA256: entry.sha256)
+            #expect(manifest.id == entry.id && manifest.version == entry.version && manifest.name == entry.name)
+            try registry.validate(manifest)
+            try permissions.validate(manifest)
+        }
+    }
+
     @Test func storefrontRejectsInvalidAssetsAndRequiresCompatibleHost() throws {
         let source = try #require(PluginPresentationIndex.bundled.plugins.first?.storefront)
         var plugin = manifest(id: "dev.test.storefront", name: "Storefront")

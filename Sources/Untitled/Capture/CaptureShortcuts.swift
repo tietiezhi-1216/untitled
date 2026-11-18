@@ -16,7 +16,7 @@ enum CaptureShortcutAction: String, CaseIterable, Identifiable {
         switch self {
         case .close: "关闭"
         case .copy: "复制图像"
-        case .copyAndClose: "完成并复制"
+        case .copyAndClose: "复制并关闭"
         case .save: "保存到文件"
         case .quickSave: "快速保存"
         case .printImage: "打印"

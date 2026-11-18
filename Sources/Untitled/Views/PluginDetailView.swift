@@ -15,6 +15,25 @@ struct PluginDetailView: View {
                     }
                 }
             }
+            .safeAreaInset(edge:.top,spacing:8) {
+                if plugin.isEnabled,store.priorityHotKeysEnabled,store.priorityHotKeyRecoveryNeeded,
+                   plugin.commands.contains(where:{ $0.isEnabled && $0.hotKey != nil }) {
+                    HStack(alignment:.top,spacing:10) {
+                        Image(systemName:"exclamationmark.triangle").foregroundStyle(.orange)
+                        VStack(alignment:.leading,spacing:4) {
+                            Text("优先快捷键暂不可用").font(.callout.weight(.medium))
+                            Text(store.priorityHotKeyStatus ?? "请检查辅助功能授权并重试。")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text("临时故障会有限重试；返回应用、解锁或唤醒时也会尝试恢复。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength:8)
+                        Button("重试") { store.retryHotKeys() }.buttonStyle(.bordered)
+                    }
+                    .padding(.horizontal,hasInsets ? 0:PanelLayout.contentInset).padding(.vertical,8)
+                    .accessibilityIdentifier("commands.priorityRecovery")
+                }
+            }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay {
                 if plugin.commands.isEmpty {

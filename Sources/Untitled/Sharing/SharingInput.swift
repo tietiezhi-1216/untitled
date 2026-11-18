@@ -1,20 +1,9 @@
 import AppKit
-import Combine
+import Carbon
 @preconcurrency import ApplicationServices
 
-/// At most three listener repairs in any minute. No unbounded retry/task queue.
-struct SharingTapRecoveryBudget {
-    private var attempts: [TimeInterval] = []
-    mutating func allow(at now: TimeInterval) -> Bool {
-        guard now.isFinite, now >= 0, attempts.last.map({ now >= $0 }) ?? true else { return false }
-        attempts.removeAll { now - $0 >= 60 }
-        guard attempts.count < 3 else { return false }
-        attempts.append(now); return true
-    }
-}
-
 @MainActor final class SharingInput {
-    enum Mode { case local, preparingCapture, staged, controlling, receiving, parked }
+    enum Mode { case local, staged, controlling, receiving, parked }
     static let replayMarker: Int64 = 0x554E544C534852
     private static let receiverReplayPrefix: UInt64 = 0x554E_0000_0000_0000
     private static let releaseReplayPrefix: UInt64 = 0x554C_0000_0000_0000
@@ -26,9 +15,7 @@ struct SharingTapRecoveryBudget {
     var localResumed: () -> Void = {}
     var physicalStateChanged: () -> Void = {}
     var failure: (String) -> Void = { _ in }
-    // The controller revokes the old handoff without destroying a repairable tap.
-    var interruptForTapRecovery: () -> Bool = { false }
-    var tapRecovered: () -> Void = {}
+    var captureInterrupted: ((SharingCursorInterruption) -> Void)?
     var edge: SharingEdge = .right
     var workspace: SharingDisplayLayout?
     var canSwitch = false
@@ -39,7 +26,26 @@ struct SharingTapRecoveryBudget {
     private var remoteHeld = SharingHeldInputState()
     private var deliveredRemoteHeld = SharingHeldInputState()
     private var physical = SharingHeldInputState()
-    var isNeutral: Bool { physical.isNeutral }
+    var routeHostShortcut: (CGEventType, CGEvent) -> Bool = { _, _ in false }
+    var priorityOwnsKey: (UInt32) -> Bool = { _ in false }
+    var priorityHasOutstandingKeys: () -> Bool = { false }
+    var isNeutral: Bool { physical.isNeutral && !priorityHasOutstandingKeys() }
+    var allowsLocalPriorityShortcuts: Bool {
+        mode == .local && !transitionPending && preparedReceiver == nil && !needsRecovery
+            && pendingReceiverReplay.isEmpty && pendingReleaseReplay.isEmpty && pendingLocalReplay.isEmpty
+    }
+    // Bookkeeping only: remove a hardware-sampled down now owned by the host;
+    // never run handoff/business callbacks from the priority tap's matcher.
+    func notePriorityShortcutOwnership(_ code: UInt32) {
+        physical.observe(.init(kind: .keyUp, code: Int(code)))
+        physicalEpoch &+= 1
+    }
+    func priorityShortcutOwnershipChanged() { physicalStateChanged() }
+    static func isHostShortcutReplay(_ event: CGEvent) -> Bool {
+        let marker = event.getIntegerValueField(.eventSourceUserData)
+        let prefix = UInt64(bitPattern: marker) & 0xFFFF_0000_0000_0000
+        return marker == replayMarker || prefix == receiverReplayPrefix || prefix == releaseReplayPrefix || prefix == localReplayPrefix
+    }
     private var heldKeys: Set<Int> { remoteHeld.keys }
     private var heldButtons: Set<Int> { remoteHeld.buttons }
     private var shortcutKeys = Set<Int>()
@@ -48,28 +54,32 @@ struct SharingTapRecoveryBudget {
     private let handoffClock: () -> TimeInterval
     private let cursor: SharingCursorCapture
     private let tapReadyOverride: (() -> Bool)?
-    private let enableTapOverride: (() -> Bool)?
-    private let samplePhysicalOverride: (() -> SharingHeldInputState)?
-    private var listenerStarted = false
-    private var tapRecovering = false
-    private var tapRecoveryTask: Task<Void, Never>?
-    private var tapRecoveryGeneration: UInt64 = 0
-    private var tapRecoveryBudget = SharingTapRecoveryBudget()
-    private var tapTimeouts = 0, tapUserDisables = 0, tapRecoveries = 0, parkingFocusReleases = 0
-    private var lastTapDisable: String?
-    private var lastTapDisableMode: String?
-    private var lastFailureMode: String?
+    private let repairTapOverride: (() -> Void)?
     private let receiverWarp: (CGPoint) -> CGError
-    private var resignObserver: AnyCancellable?
+    private let eventClock: () -> UInt64
+    private var pointerRestoreInProgress = false
+    private var pointerRestoredAt: UInt64 = 0
+    private var droppedPreRestoreMotion = 0
+    private var insideTap = false, tapTransitionPending = false
+    var transitionPending: Bool { tapTransitionPending || localResumeTask != nil }
+    private let frontmostPID: () -> pid_t?
     private(set) var physicalMouseMovements = 0
     private(set) var externalInputEvents = 0
     private(set) var lastSafetyFailure: String?
+    private var tapTimeouts = 0, tapUserDisables = 0, tapRecoveries = 0
+    private var lastTapDisable: String?
+    private var lastTapDisableMode: String?
+    private var lastFailureMode: String?
     private var receiverCursor: SharingPointerAccumulator?
     private var receiverEpoch: UInt64 = 0, replaySequence: UInt64 = 0
-    private var receiverHasReplay = false
+    private lazy var replaySource: CGEventSource? = {
+        let source = CGEventSource(stateID: .hidSystemState)
+        source?.localEventsSuppressionInterval = 0
+        return source
+    }()
     private var pendingReceiverReplay: [Int64: (epoch: UInt64, held: SharingInputPacket?)] = [:] // At most 512 receiver events.
     private var pendingReleaseReplay: Set<Int64> = [] // At most 288 held key/button releases.
-    private var pendingLocalReplay: Set<Int64> = [] // At most 128 genuine local resume events.
+    private var pendingLocalReplay: [Int64: pid_t] = [:] // At most 128 genuine local resume events.
     private var droppedReceiverReplay = 0
     private var replayDrainMilliseconds: Double?
     private var localResumeTask: Task<Void, Never>?
@@ -80,36 +90,35 @@ struct SharingTapRecoveryBudget {
     private var preparedReceiver: (edge: SharingEdge, fraction: Double, epoch: UInt64)?
     private let eventPoster: (CGEvent) -> Void
     init(cursor: SharingCursorCapture = SharingCursorCapture(), tapReadyOverride: (() -> Bool)? = nil,
-         enableTapOverride: (() -> Bool)? = nil, samplePhysicalOverride: (() -> SharingHeldInputState)? = nil,
-         receiverWarp: @escaping (CGPoint) -> CGError = { CGWarpMouseCursorPosition($0) },
+         receiverWarp: @escaping (CGPoint) -> CGError = SharingPointerWarp.move,
          eventPoster: @escaping (CGEvent) -> Void = { $0.post(tap: .cghidEventTap) },
-         handoffClock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+         handoffClock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         frontmostPID: (() -> pid_t?)? = nil,
+         eventClock: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+         repairTapOverride: (() -> Void)? = nil) {
         self.handoffClock = handoffClock
+        self.eventClock = eventClock
+        self.frontmostPID = frontmostPID ?? (tapReadyOverride == nil ? { NSWorkspace.shared.frontmostApplication?.processIdentifier } : { 42 })
         self.cursor = cursor; self.tapReadyOverride = tapReadyOverride; self.receiverWarp = receiverWarp; self.eventPoster = eventPoster
-        self.enableTapOverride = enableTapOverride; self.samplePhysicalOverride = samplePhysicalOverride
-        resignObserver = NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
-            .receive(on: DispatchQueue.main).sink { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    if self.mode == .parked, !self.cursor.isForeground { self.releaseParkingAfterFocusLoss(); return }
-                    if self.mode == .controlling || self.mode == .staged, !self.cursor.isCaptured { self.failCapture("应用失去前台，已停止向远端转发并归还控制。") }
-                }
-            }
+        self.repairTapOverride = repairTapOverride
     }
-    private var tapReady: Bool {
+    var tapReady: Bool {
         if let tapReadyOverride { return tapReadyOverride() }
         return tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false
     }
-    var needsRecovery: Bool { cursor.needsRecovery || tapRecovering }
-    var isCapturing: Bool { mode == .controlling && cursor.isCaptured && tapReady }
-    var isStaged: Bool { mode == .staged && cursor.isCaptured && tapReady }
-    var isParked: Bool { mode == .parked && cursor.isCaptured && tapReady }
+    var needsRecovery: Bool { cursor.needsRecovery }
+    var isCapturing: Bool { mode == .controlling && !transitionPending && cursor.isCaptured && tapReady }
+    var isStaged: Bool { mode == .staged && !transitionPending && cursor.isCaptured && tapReady }
+    var isParked: Bool { mode == .parked && !transitionPending && cursor.isCaptured && tapReady }
+    var canAcceptHandoff: Bool { tapReady && !transitionPending && !needsRecovery && isNeutral }
+    var canAcceptDirectEntry: Bool {
+        canAcceptHandoff && (mode == .local || isParked) && preparedReceiver == nil
+            && pendingReceiverReplay.isEmpty && pendingReleaseReplay.isEmpty && pendingLocalReplay.isEmpty
+    }
     var safetyDiagnostics: [String: Any] {
         var value = cursor.snapshot
         value["mode"] = String(describing: mode); value["tapReady"] = tapReady
-        value["tapRecovering"] = tapRecovering; value["tapTimeouts"] = tapTimeouts
-        value["tapUserDisables"] = tapUserDisables; value["tapRecoveries"] = tapRecoveries
-        value["parkingFocusReleases"] = parkingFocusReleases
+        value["tapTimeouts"] = tapTimeouts; value["tapUserDisables"] = tapUserDisables; value["tapRecoveries"] = tapRecoveries
         if let lastTapDisable { value["lastTapDisable"] = lastTapDisable }
         if let lastTapDisableMode { value["lastTapDisableMode"] = lastTapDisableMode }
         if let lastFailureMode { value["lastFailureMode"] = lastFailureMode }
@@ -118,30 +127,44 @@ struct SharingTapRecoveryBudget {
         value["queuedReleaseEvents"] = pendingReleaseReplay.count
         value["queuedLocalReplayEvents"] = pendingLocalReplay.count
         value["droppedStaleReceiverEvents"] = droppedReceiverReplay
+        value["droppedPreRestoreMotion"] = droppedPreRestoreMotion
         if let replayDrainMilliseconds { value["replayDrainMilliseconds"] = replayDrainMilliseconds }
         value["physicalMouseMovements"] = physicalMouseMovements; value["externalInputEvents"] = externalInputEvents
         if let lastSafetyFailure { value["failure"] = lastSafetyFailure }
         return value
     }
     func captureValidationError() -> String? {
+        cursor.observeDrift() // Explicit diagnostic only; no position checks on the live routing path.
         do { try cursor.validate(tapReady: tapReady); return nil }
         catch { return error.localizedDescription }
     }
     func maintainCapture() {
-        guard mode == .controlling || mode == .staged || mode == .parked else { return }
-        if mode == .parked, !cursor.isForeground { releaseParkingAfterFocusLoss(); return }
-        do { try cursor.validate(tapReady: tapReady); cursor.heartbeat() }
-        catch { failCapture(error.localizedDescription) }
-    }
-    private func releaseParkingAfterFocusLoss() {
-        // Parking never authorizes forwarding. Losing focus here is a normal
-        // return to local use, not grounds to disable a healthy listener forever.
-        let errors = reset(); canSwitch = false
-        guard errors.isEmpty, !cursor.needsRecovery, tapReady else {
-            failCapture("停放光标恢复未完成，已暂停共享。"); return
+        guard !transitionPending else { return }
+        if mode == .parked {
+            if reconcileParkedCapture(), mode == .parked { cursor.heartbeat() }
+            return
         }
-        parkingFocusReleases = min(parkingFocusReleases + 1, 1_000_000_000)
-        localResumed()
+        guard mode == .controlling || mode == .staged else { return }
+        do { try cursor.validate(tapReady: tapReady); cursor.heartbeat() }
+        catch { failCapture(error) }
+    }
+    /// Outside the tap. Once control has gone back to the peer, parking only
+    /// hides this screen's idle cursor. An expired, fully cleaned parking lease
+    /// is not an input failure; keep the tap and the session as they were.
+    func reconcileParkedCapture() -> Bool {
+        guard mode == .parked else { return true }
+        guard !transitionPending else { return false }
+        do {
+            guard tapReady else { throw SharingCursorInterruption.tapLost }
+            if cursor.isCaptured { return true }
+            guard try cursor.finishExpiredParking() else { return false }
+            mode = .local
+            localResumed() // Recompute edge readiness; do not send another .end.
+            return true
+        } catch {
+            failCapture(error)
+            return false
+        }
     }
     #if DEBUG
     private(set) var appliedPacketCount = 0
@@ -164,8 +187,6 @@ struct SharingTapRecoveryBudget {
         // In-process dependency injection for ordinary tests: never create a real OS tap.
         if tapReadyOverride != nil {
             guard tapReady else { throw PluginError.invalid("测试事件通道未就绪。") }
-            if !listenerStarted { tapRecoveryBudget = SharingTapRecoveryBudget() }
-            listenerStarted = true
             return
         }
         guard tap == nil else { return }
@@ -176,106 +197,157 @@ struct SharingTapRecoveryBudget {
                                          eventsOfInterest: mask, callback: { _, type, event, pointer in
             guard let pointer else { return Unmanaged.passUnretained(event) }
             let suppress = MainActor.assumeIsolated {
-                Unmanaged<SharingInput>.fromOpaque(pointer).takeUnretainedValue().handle(type, event)
+                Unmanaged<SharingInput>.fromOpaque(pointer).takeUnretainedValue().handleEventTap(type, event)
             }
             return suppress ? nil : Unmanaged.passUnretained(event)
         }, userInfo: Unmanaged.passUnretained(self).toOpaque()), let source = CFMachPortCreateRunLoopSource(nil, tap, 0) else {
             throw PluginError.invalid("无法启动键鼠共享，请在应用权限管理中检查辅助功能和输入监控。")
         }
-        self.tap = tap; self.source = source; listenerStarted = true
-        tapRecoveryBudget = SharingTapRecoveryBudget()
+        self.tap = tap; self.source = source
         resamplePhysical()
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
     }
-    func stop() {
-        cancelTapRecovery(); listenerStarted = false
-        reset()
+    private func removeTap() {
         if let tap { CGEvent.tapEnable(tap: tap, enable: false); CFMachPortInvalidate(tap) }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
-        tap = nil; source = nil; canSwitch = false; physical = SharingHeldInputState(); shortcutKeys.removeAll()
+        tap = nil; source = nil
+    }
+    func stop() {
+        reset(); removeTap()
+        canSwitch = false; physical = SharingHeldInputState(); shortcutKeys.removeAll()
+        pointerRestoredAt = 0
+        discardUnobservedReplay()
+    }
+    /// A disabled tap may never acknowledge events already submitted to Quartz.
+    /// Old input markers remain fenced by the replay epoch or missing receipt;
+    /// cleanup releases always pass through, even without a receipt to remove.
+    func discardUnobservedReplay() {
         pendingReceiverReplay.removeAll(); pendingReleaseReplay.removeAll(); pendingLocalReplay.removeAll()
     }
-    func capture(maximumDuration: TimeInterval? = nil, deferForwarding: Bool = false) async throws {
-        guard mode == .local || mode == .parked, isNeutral, localResumeTask == nil, !tapRecovering else { throw PluginError.invalid("仍有按键或控制会话未释放，已取消接管。") }
-        reset(); physicalMouseMovements = 0; externalInputEvents = 0; lastSafetyFailure = nil
-        let epoch = receiverEpoch
-        try await drainReplay()
-        guard await cursor.awaitFocusRestoration() else { throw PluginError.invalid("原应用焦点尚未恢复，请切回原应用后重试。") }
-        try Task.checkCancellation()
-        guard receiverEpoch == epoch, mode == .local else { throw CancellationError() }
-        mode = .preparingCapture
-        do {
-            try await cursor.acquire(tapReady: { self.tapReady }, neutral: { self.isNeutral }, maximumDuration: maximumDuration)
-            try Task.checkCancellation()
-            guard receiverEpoch == epoch, mode == .preparingCapture else { throw CancellationError() }
-            mode = deferForwarding ? .staged : .controlling
-            if !deferForwarding { stagedMotion = .zero }
-        } catch {
-            if receiverEpoch == epoch { mode = .local; stagedMotion = .zero; _ = cursor.release() }
-            throw error
+    /// Called outside the tap, only with permission and no live handoff.
+    func repairTap() -> Bool {
+        guard mode == .local, !transitionPending, !needsRecovery else { return false }
+        if tapReadyOverride != nil { repairTapOverride?() }
+        else {
+            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            if !tapReady { removeTap(); try? start() }
+            if tapReady { resamplePhysical() }
         }
+        guard tapReady else { return false }
+        shortcutKeys.removeAll(); physicalEpoch &+= 1
+        tapRecoveries = min(tapRecoveries + 1, 1_000_000_000)
+        return true
+    }
+    func capture(maximumDuration: TimeInterval? = nil, deferForwarding: Bool = false) async throws {
+        guard mode == .local || mode == .parked, canAcceptHandoff else { throw CancellationError() }
+        reset()
+        let epoch = receiverEpoch, physicalEpoch = self.physicalEpoch
+        try await drainReplay()
+        try Task.checkCancellation()
+        guard receiverEpoch == epoch, self.physicalEpoch == physicalEpoch, mode == .local,
+              !transitionPending else { throw CancellationError() }
+        try freeze(into: deferForwarding ? .staged : .controlling, maximumDuration: maximumDuration)
+    }
+    private func freeze(into next: Mode, maximumDuration: TimeInterval? = nil) throws {
+        physicalMouseMovements = 0; externalInputEvents = 0; lastSafetyFailure = nil
+        try cursor.acquire(tapReady: { self.tapReady }, neutral: { self.isNeutral && !self.transitionPending },
+                           maximumDuration: maximumDuration)
+        mode = next
+        cursor.updateAppearance(avoidSystemEdges: next == .parked, allowed: { [weak self] in
+            guard let self else { return false }
+            return self.tapReady && !self.transitionPending
+        })
+    }
+    func validateStaged() throws {
+        guard mode == .staged, !transitionPending, isNeutral else { throw CancellationError() }
+        try cursor.validate(tapReady: tapReady)
     }
     func beginForwarding() throws {
-        guard mode == .staged, isNeutral else { throw PluginError.invalid("交接准备已失效，未向对端发送输入。") }
-        try cursor.validate(tapReady: tapReady)
+        try validateStaged()
         mode = .controlling
         let motion = stagedMotion; stagedMotion = .zero
         guard motion != .zero else { return }
-        guard cursor.withActiveCapture({ send(.init(kind: .move, x: motion.x, y: motion.y)) }) else { throw PluginError.invalid("交接光标租约已失效，未发送等待期间的移动。") }
+        guard cursor.withActiveCapture({ send(.init(kind: .move, x: motion.x, y: motion.y)) }) else { throw SharingCursorInterruption.leaseLost }
     }
     func parkAfterReturn() async throws {
-        guard mode == .receiving, remoteHeld.isNeutral, isNeutral else { throw PluginError.invalid("按键尚未释放，不能停放光标。") }
+        guard mode == .receiving, remoteHeld.isNeutral, isNeutral else { throw CancellationError() }
         let epoch = physicalEpoch, receiver = receiverEpoch
-        // CGEvent.post is asynchronous. Finish already-issued receiver motion
-        // before anchoring a capture lease; returning nil at a session tap alone
-        // is not proof that WindowServer has not moved its cursor yet.
+        // Wait for events we have actually posted. Do not wait for fractional
+        // pointer coordinates to converge or an appearance callback to run.
         try await drainReplay()
-        guard mode == .receiving, receiverEpoch == receiver, physicalEpoch == epoch else { throw CancellationError() }
-        if receiverHasReplay, let position = receiverCursor?.position {
-            guard receiverWarp(position) == .success else { throw PluginError.invalid("接收光标尚未稳定，已取消交接。") }
-        }
+        guard mode == .receiving, receiverEpoch == receiver, physicalEpoch == epoch,
+              !transitionPending, remoteHeld.isNeutral, isNeutral else { throw CancellationError() }
         reset()
-        try await capture()
-        guard physicalEpoch == epoch else { reset(); throw PluginError.invalid("本机已有实际输入，已取消光标停放。") }
-        mode = .parked; canSwitch = false
+        try freeze(into: .parked)
+        canSwitch = false
     }
     func prepareReceiving(edge: SharingEdge, fraction: Double, deferPointer: Bool = false) async throws {
-        guard !tapRecovering else { throw PluginError.invalid("键鼠监听正在恢复，请稍后重试。") }
         let epoch = physicalEpoch
         await localResumeTask?.value
-        reset()
+        guard !Task.isCancelled, physicalEpoch == epoch, reconcileParkedCapture() else { throw CancellationError() }
+        // Keep a parked cursor hidden until the new sender has acquired its lease.
+        // A stale receiver (e.g. on a cancelled negotiation) still needs a reset.
+        if mode != .parked { reset() }
         let receiver = receiverEpoch
         try await drainReplay()
-        guard await cursor.awaitFocusRestoration() else { throw PluginError.invalid("原应用焦点尚未恢复，未接收对端键盘。") }
         try Task.checkCancellation()
-        guard receiverEpoch == receiver, mode == .local else { throw CancellationError() }
-        guard physicalEpoch == epoch, isNeutral else { throw PluginError.invalid("本机正在使用键鼠，已拒绝对端接管。") }
+        guard receiverEpoch == receiver, mode == .local || isParked, physicalEpoch == epoch, canAcceptHandoff else { throw CancellationError() }
         if deferPointer { preparedReceiver = (edge, fraction, epoch) }
         else { try receive(edge: edge, fraction: fraction) }
     }
     func commitReceiving() throws {
-        guard let preparedReceiver, preparedReceiver.epoch == physicalEpoch, isNeutral else { throw PluginError.invalid("接收准备已失效，未显示对端光标。") }
+        guard reconcileParkedCapture() else { throw CancellationError() }
+        guard let preparedReceiver, preparedReceiver.epoch == physicalEpoch, canAcceptHandoff else { throw PluginError.invalid("接收准备已失效，未显示对端光标。") }
         try receive(edge: preparedReceiver.edge, fraction: preparedReceiver.fraction)
     }
+    func receiveDirectly(edge: SharingEdge, fraction: Double) throws {
+        guard reconcileParkedCapture(), canAcceptDirectEntry else { throw CancellationError() }
+        try receive(edge: edge, fraction: fraction)
+    }
     func receive(edge: SharingEdge, fraction: Double) throws {
-        guard !tapRecovering else { throw PluginError.invalid("键鼠监听正在恢复，请稍后重试。") }
-        let errors = reset()
-        guard errors.isEmpty, !needsRecovery, pendingReleaseReplay.isEmpty else { throw PluginError.invalid("本机光标或按键释放尚未完成，已拒绝对端接管。") }
         let entry = edge.opposite
         let position = Self.clamp(entry.entryPoint(fraction: fraction, bounds: Self.bounds))
-        let result = receiverWarp(position)
-        guard result == .success else { throw PluginError.invalid("无法准备接收端指针（\(result.rawValue)），未确认接管。") }
+        let wasParked = mode == .parked
+        let errors = reset(restoringPoint: wasParked ? position : nil, requirePosition: wasParked)
+        guard errors.isEmpty, canAcceptHandoff, pendingReleaseReplay.isEmpty else { throw PluginError.invalid("本机光标或按键释放尚未完成，已拒绝对端接管。") }
+        if !wasParked {
+            pointerRestoreInProgress = true
+            let result = receiverWarp(position)
+            if result == .success { pointerRestoredAt = eventClock() }
+            pointerRestoreInProgress = false
+            guard result == .success else { throw PluginError.invalid("无法准备接收端指针（\(result.rawValue)），未确认接管。") }
+        }
         receiverCursor = SharingPointerAccumulator(position: position)
         returnEdge = entry; mode = .receiving
     }
-    @discardableResult func reset(restoring normalized: SharingCursorPosition? = nil, handoffDelay: TimeInterval = 0) -> [String] {
+    @discardableResult func reset(restoring normalized: SharingCursorPosition? = nil, returnMotion: CGPoint? = nil,
+                                  handoffDelay: TimeInterval = 0) -> [String] {
+        let restorePoint = normalized.map { Self.clamp(Self.returnLanding($0, motion: returnMotion ?? .zero, bounds: Self.bounds)) }
+        return reset(restoringPoint: restorePoint, handoffDelay: handoffDelay)
+    }
+    static func returnLanding(_ point: SharingCursorPosition, motion: CGPoint, bounds: CGRect) -> CGPoint {
+        let x = bounds.minX + point.x * (bounds.width - 1), y = bounds.minY + point.y * (bounds.height - 1)
+        // Land inside the receiving edge, not on its re-crossing threshold.
+        // Genuine subsequent motion may still turn around without a timer.
+        var target = CGPoint(x: x + motion.x, y: y + motion.y)
+        if point.x <= 0.00001 { target.x = max(bounds.minX + 4, target.x) }
+        if point.x >= 0.99999 { target.x = min(bounds.maxX - 5, target.x) }
+        if point.y <= 0.00001 { target.y = max(bounds.minY + 4, target.y) }
+        if point.y >= 0.99999 { target.y = min(bounds.maxY - 5, target.y) }
+        return target
+    }
+    private func reset(restoringPoint: CGPoint?, requirePosition: Bool = false, handoffDelay: TimeInterval = 0) -> [String] {
+        tapTransitionPending = false
         localResumeGeneration &+= 1; localResumeTask?.cancel(); localResumeTask = nil
         localEvents.removeAll(); localPointer = nil; preparedReceiver = nil
-        receiverEpoch &+= 1; receiverHasReplay = false; stagedMotion = .zero
+        receiverEpoch &+= 1; stagedMotion = .zero
+        let wasCaptured = cursor.isCaptured
+        pointerRestoreInProgress = wasCaptured
+        let recoveryErrors = cursor.release(restoring: restoringPoint, requirePosition: requirePosition)
+        if wasCaptured { pointerRestoredAt = eventClock() }
+        pointerRestoreInProgress = false
         mode = .local; switchAllowedAt = handoffClock() + min(0.65, max(0, handoffDelay))
-        let restorePoint = normalized.map { Self.clamp(CGPoint(x: Self.bounds.minX + $0.x * (Self.bounds.width - 1), y: Self.bounds.minY + $0.y * (Self.bounds.height - 1))) }
-        let recoveryErrors = cursor.release(restoring: restorePoint)
         // Release on the target as well as on disconnect, lock, disable and tap timeout.
         // Include delivered state: a queued key-up can be invalidated even after
         // the desired remote state is neutral. Its matching down still needs up.
@@ -285,10 +357,10 @@ struct SharingTapRecoveryBudget {
             let event: CGEvent?
             if packet.kind == .up {
                 let button = packet.code
-                event = CGEvent(mouseEventSource: nil, mouseType: button == 0 ? .leftMouseUp : button == 1 ? .rightMouseUp : .otherMouseUp,
+                event = CGEvent(mouseEventSource: replaySource, mouseType: button == 0 ? .leftMouseUp : button == 1 ? .rightMouseUp : .otherMouseUp,
                     mouseCursorPosition: receiverCursor?.position ?? CGEvent(source: nil)?.location ?? .zero, mouseButton: CGMouseButton(rawValue: UInt32(button))!)
             } else {
-                event = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(packet.code), keyDown: false)
+                event = CGEvent(keyboardEventSource: replaySource, virtualKey: CGKeyCode(packet.code), keyDown: false)
                 if packet.kind == .flags { event?.type = .flagsChanged }
             }
             event?.flags = []; postRelease(event)
@@ -296,47 +368,42 @@ struct SharingTapRecoveryBudget {
         receiverCursor = nil
         return recoveryErrors
     }
-    private func failCapture(_ message: String) {
-        lastFailureMode = String(describing: mode)
-        cancelTapRecovery(); lastSafetyFailure = message
-        let errors = reset(); canSwitch = false
-        failure(errors.isEmpty ? message : message + "（" + errors.joined(separator: "；") + "）")
+    private func failCapture(_ error: Error) {
+        failCapture(error.localizedDescription, interruption: error as? SharingCursorInterruption)
     }
-    private func cancelTapRecovery() {
-        tapRecoveryGeneration &+= 1; tapRecoveryTask?.cancel(); tapRecoveryTask = nil; tapRecovering = false
-    }
-    private func recoverTimedOutTap() -> Bool {
-        cancelTapRecovery()
-        guard listenerStarted, tapRecoveryBudget.allow(at: handoffClock()) else { return false }
-        let errors = reset(); canSwitch = false
-        guard errors.isEmpty, !cursor.needsRecovery, interruptForTapRecovery(), listenerStarted else { return false }
-        let enabled: Bool
-        if let enableTapOverride { enabled = enableTapOverride() }
-        else if let tap { CGEvent.tapEnable(tap: tap, enable: true); enabled = CGEvent.tapIsEnabled(tap: tap) }
-        else { enabled = false }
-        guard enabled, tapReady else { return false }
-        canSwitch = false; tapRecovering = true
-        let generation = tapRecoveryGeneration
-        tapRecoveryTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
-            guard let self, generation == self.tapRecoveryGeneration, self.listenerStarted else { return }
-            self.tapRecoveryTask = nil; self.tapRecovering = false
-            guard self.tapReady, !self.cursor.needsRecovery else {
-                self.failCapture("键鼠监听恢复失败，请重新开启共享。"); return
+    private func failCapture(_ message: String, interruption: SharingCursorInterruption? = nil) {
+        afterTap { [weak self] in
+            guard let self else { return }
+            self.lastSafetyFailure = message
+            self.lastFailureMode = String(describing: self.mode)
+            self.canSwitch = false
+            if let interruption, interruption.canRepairCapture, let recover = self.captureInterrupted {
+                recover(interruption) // The controller owns ending this handoff exactly once.
+                return
             }
-            // Never restore the old handoff, motion, focus lease, or remote held
-            // input. Only a fresh physical action can request another handoff.
-            self.resamplePhysical(); self.lastSafetyFailure = nil
-            self.tapRecoveries = min(self.tapRecoveries + 1, 1_000_000_000)
-            self.tapRecovered()
+            let errors = self.reset()
+            self.failure(errors.isEmpty ? message : message + "（" + errors.joined(separator: "；") + "）")
         }
-        return true
+    }
+    // Suppression/routing decisions are synchronous. WindowServer must not be
+    // asked to hide, show, warp, or withdraw a panel while it awaits the tap.
+    func handleEventTap(_ type: CGEventType, _ event: CGEvent) -> Bool {
+        insideTap = true; defer { insideTap = false }
+        return handle(type, event)
+    }
+    private func afterTap(_ work: @escaping () -> Void) {
+        guard insideTap else { work(); return }
+        guard !tapTransitionPending else { return }
+        tapTransitionPending = true
+        let epoch = receiverEpoch
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.receiverEpoch == epoch, self.tapTransitionPending else { return }
+            self.tapTransitionPending = false; work()
+        }
     }
     private func resamplePhysical() {
-        if let samplePhysicalOverride { physical = samplePhysicalOverride(); return }
-        if tapReadyOverride != nil { physical = SharingHeldInputState(); return }
         physical = SharingHeldInputState()
-        for code in 0...127 where code != 57 && CGEventSource.keyState(.hidSystemState, key: CGKeyCode(code)) {
+        for code in 0...127 where code != 57 && !priorityOwnsKey(UInt32(code)) && CGEventSource.keyState(.hidSystemState, key: CGKeyCode(code)) {
             physical.observe(.init(kind: .keyDown, code: code))
         }
         for button in 0...31 where CGEventSource.buttonState(.hidSystemState, button: CGMouseButton(rawValue: UInt32(button))!) {
@@ -345,20 +412,22 @@ struct SharingTapRecoveryBudget {
     }
     func handle(_ type: CGEventType, _ event: CGEvent) -> Bool {
         if type == .tapDisabledByTimeout {
-            tapTimeouts = min(tapTimeouts + 1, 1_000_000_000); lastTapDisable = "timeout"; lastTapDisableMode = String(describing: mode)
-            if !recoverTimedOutTap() { failCapture("键鼠监听超时且未能安全恢复，已归还控制；请重新开启共享。") }
+            tapTimeouts = min(tapTimeouts + 1, 1_000_000_000)
+            lastTapDisable = "timeout"; lastTapDisableMode = String(describing: mode)
+            failCapture(SharingCursorInterruption.tapLost)
             return false
         }
         if type == .tapDisabledByUserInput {
-            tapUserDisables = min(tapUserDisables + 1, 1_000_000_000); lastTapDisable = "user-input"; lastTapDisableMode = String(describing: mode)
-            failCapture("键鼠监听被系统用户输入停用，已归还控制；请确认系统状态后重新开启共享。")
+            tapUserDisables = min(tapUserDisables + 1, 1_000_000_000)
+            lastTapDisable = "user-input"; lastTapDisableMode = String(describing: mode)
+            failCapture("键鼠监听已被用户输入停用，已归还控制；请手动重新开启共享。")
             return false
         }
         let marker = event.getIntegerValueField(.eventSourceUserData)
         let prefix = UInt64(bitPattern: marker) & 0xFFFF_0000_0000_0000
         if prefix == Self.localReplayPrefix {
-            pendingLocalReplay.remove(marker)
-            return false
+            guard let target = pendingLocalReplay.removeValue(forKey: marker) else { return true }
+            return frontmostPID() != target || (tapReadyOverride == nil && IsSecureEventInputEnabled())
         }
         if prefix == Self.releaseReplayPrefix {
             pendingReleaseReplay.remove(marker)
@@ -381,66 +450,73 @@ struct SharingTapRecoveryBudget {
         }
         // Don't forward or use injected events from other automation as a handoff trigger.
         if event.getIntegerValueField(.eventSourceUnixProcessID) != 0 {
-            if mode == .controlling || mode == .staged || mode == .preparingCapture {
-                externalInputEvents += 1
-                failCapture("检测到其他输入注入，已暂停共享；请勿同时使用多个键鼠控制工具。")
-            }
+            if mode == .controlling || mode == .staged { externalInputEvents += 1 }
             return false
         }
+        if routeHostShortcut(type, event) { return true }
+        if Self.isPointerMotion(type), pointerRestoreInProgress || (event.timestamp != 0 && event.timestamp < pointerRestoredAt) {
+            droppedPreRestoreMotion += 1
+            return true // A queued pre-warp movement must not reposition or re-enter an edge.
+        }
         observePhysical(type, event)
-        if mode == .preparingCapture || mode == .staged {
+        let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
+        if type == .keyUp, shortcutKeys.remove(code) != nil { return true }
+        if tapTransitionPending { return cursor.panelBlocksLocalInput }
+        let chord: CGEventFlags = [.maskControl, .maskAlternate, .maskCommand]
+        if type == .keyDown, event.flags.intersection([.maskControl, .maskAlternate, .maskCommand, .maskShift]) == chord,
+           code == 53 || code == 40 {
+            shortcutKeys.insert(code)
+            if code == 53 || mode != .local { afterTap { [weak self] in self?.returnLocal(nil) } }
+            else if canSwitch {
+                if let entry = workspace?.defaultEntry { requestAfterTap(entry.wireEdge, entry.fraction, needsNeutral: false) }
+                else { requestAfterTap(edge, 0.5, needsNeutral: false) }
+            }
+            return true
+        }
+        if localResumeTask != nil { resumeLocalInput(event); return true }
+        if mode == .staged {
             if type != .mouseMoved {
-                resumeLocalInput(event) // Cancel and restore verified original focus before local replay.
+                resumeLocalInput(event) // Withdraw first, then replay only to the unchanged foreground.
                 return true
             }
-            if mode == .staged {
-                do { try cursor.validate(tapReady: tapReady) }
-                catch { failCapture(error.localizedDescription); return false }
-            }
+            guard cursor.isCaptured else { failCapture(SharingCursorInterruption.leaseLost); return insideTap }
             let dx = event.getDoubleValueField(.mouseEventDeltaX), dy = event.getDoubleValueField(.mouseEventDeltaY)
             stagedMotion.x = min(4096, max(-4096, stagedMotion.x + dx)); stagedMotion.y = min(4096, max(-4096, stagedMotion.y + dy))
             if dx != 0 || dy != 0 { physicalMouseMovements += 1 }
-            return true // No network input before accepted handoff + source lease + commit.
+            return true // No network input before entry/commit is sent with a live lease.
         }
-        if mode == .parked || localResumeTask != nil {
+        if mode == .parked {
             resumeLocalInput(event)
             return true
         }
         if mode == .controlling {
             if [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged].contains(type),
                event.getDoubleValueField(.mouseEventDeltaX) != 0 || event.getDoubleValueField(.mouseEventDeltaY) != 0 { physicalMouseMovements += 1 }
-            do { try cursor.validate(tapReady: tapReady) }
-            catch { failCapture(error.localizedDescription); return false }
-        }
-        let code = Int(event.getIntegerValueField(.keyboardEventKeycode))
-        if type == .keyUp, shortcutKeys.remove(code) != nil { return true }
-        let chord: CGEventFlags = [.maskControl, .maskAlternate, .maskCommand]
-        if type == .keyDown, event.flags.intersection([.maskControl, .maskAlternate, .maskCommand, .maskShift]) == chord,
-           code == 53 || code == 40 {
-            shortcutKeys.insert(code)
-            if code == 53 || mode != .local { returnLocal(nil) }
-            else if canSwitch {
-                if let entry = workspace?.defaultEntry { requestControl(entry.wireEdge, entry.fraction) }
-                else { requestControl(edge, 0.5) }
-            }
-            return true
+            do {
+                if insideTap { guard cursor.isCaptured else { throw SharingCursorInterruption.leaseLost } }
+                else { try cursor.validate(tapReady: tapReady) }
+            } catch { failCapture(error); return insideTap }
         }
         if mode == .receiving {
-            // Local physical activity always takes precedence over remote input.
-            if Self.isPhysicalActivity(type) { returnLocal(nil) }
+            // Real native callbacks queue cleanup and replay, so there is no
+            // WindowServer round trip while it waits for this event's decision.
+            if Self.isPhysicalActivity(type) {
+                if insideTap { resumeLocalInput(event); return true }
+                returnLocal(nil)
+            }
             return false
         }
         let delta = CGPoint(x: event.getDoubleValueField(.mouseEventDeltaX), y: event.getDoubleValueField(.mouseEventDeltaY))
         if mode == .local {
-            if canSwitch, type == .mouseMoved, physical.isNeutral,
+            if canSwitch, type == .mouseMoved, isNeutral,
                event.flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift]).isEmpty,
                handoffClock() >= switchAllowedAt {
                 if let workspace {
                     if let entry = workspace.handoff(point: event.location, delta: delta, screen: Self.bounds) {
-                        switchAllowedAt = handoffClock() + 0.65; requestControl(entry.wireEdge, entry.fraction)
+                        switchAllowedAt = handoffClock() + 0.65; requestAfterTap(entry.wireEdge, entry.fraction, needsNeutral: true)
                     }
                 } else if edge.isCrossing(event.location, delta: delta, bounds: Self.bounds) {
-                    switchAllowedAt = handoffClock() + 0.65; requestControl(edge, edge.fraction(event.location, bounds: Self.bounds))
+                    switchAllowedAt = handoffClock() + 0.65; requestAfterTap(edge, edge.fraction(event.location, bounds: Self.bounds), needsNeutral: true)
                 }
             }
             return false
@@ -467,13 +543,22 @@ struct SharingTapRecoveryBudget {
         // The watchdog and the send callback serialize on the same generational lease.
         // A stale .controlling enum can never reopen forwarding after background recovery.
         guard cursor.withActiveCapture({ send(packet) }) else {
-            failCapture("光标接管已超时或失效，未继续向远端转发。")
-            return false
+            failCapture(SharingCursorInterruption.leaseLost)
+            return insideTap
         }
         return true
     }
+    private func requestAfterTap(_ edge: SharingEdge, _ fraction: Double, needsNeutral: Bool) {
+        if !insideTap { requestControl(edge, fraction); return }
+        let epoch = receiverEpoch
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.receiverEpoch == epoch, self.canSwitch, self.mode == .local,
+                  !self.transitionPending, !needsNeutral || self.isNeutral else { return }
+            self.requestControl(edge, fraction)
+        }
+    }
     func apply(_ packet: SharingInputPacket) {
-        guard mode == .receiving, (try? packet.validate()) != nil else { return }
+        guard mode == .receiving, !transitionPending, (try? packet.validate()) != nil else { return }
         guard pendingReceiverReplay.count < 512 else { failCapture("接收输入回放积压，已安全归还控制。"); return }
         #if DEBUG
         appliedPacketCount += 1
@@ -496,20 +581,20 @@ struct SharingTapRecoveryBudget {
             var pointer = receiverCursor ?? SharingPointerAccumulator(position: current)
             let position = pointer.advance(x: packet.x, y: packet.y) { Self.clamp($0) }
             receiverCursor = pointer
-            event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: position, mouseButton: CGMouseButton(rawValue: UInt32(button ?? 0))!)
+            event = CGEvent(mouseEventSource: replaySource, mouseType: type, mouseCursorPosition: position, mouseButton: CGMouseButton(rawValue: UInt32(button ?? 0))!)
             // This is already an absolute target position. Reapplying deltas at
             // the HID tap can introduce a second round of pointer acceleration.
         case .down, .up:
             let down = packet.kind == .down
             let type: CGEventType = packet.code == 0 ? (down ? .leftMouseDown : .leftMouseUp) : packet.code == 1 ? (down ? .rightMouseDown : .rightMouseUp) : (down ? .otherMouseDown : .otherMouseUp)
-            event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: current, mouseButton: CGMouseButton(rawValue: UInt32(packet.code))!)
+            event = CGEvent(mouseEventSource: replaySource, mouseType: type, mouseCursorPosition: current, mouseButton: CGMouseButton(rawValue: UInt32(packet.code))!)
             event?.setIntegerValueField(.mouseEventClickState, value: Int64(packet.clickCount))
         case .keyDown, .keyUp, .flags:
             let down = packet.kind == .keyDown
-            event = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(packet.code), keyDown: packet.kind == .flags ? packet.pressed : down)
+            event = CGEvent(keyboardEventSource: replaySource, virtualKey: CGKeyCode(packet.code), keyDown: packet.kind == .flags ? packet.pressed : down)
             if packet.kind == .flags { event?.type = .flagsChanged }
         case .scroll:
-            event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(packet.y), wheel2: Int32(packet.x), wheel3: 0)
+            event = CGEvent(scrollWheelEvent2Source: replaySource, units: .pixel, wheelCount: 2, wheel1: Int32(packet.y), wheel2: Int32(packet.x), wheel3: 0)
         }
         event?.flags = CGEventFlags(rawValue: packet.flags)
         postReceiver(event, packet: packet)
@@ -522,7 +607,7 @@ struct SharingTapRecoveryBudget {
         guard let event else { return }
         let token = replayToken(prefix: Self.receiverReplayPrefix)
         let held: SharingInputPacket? = [.keyDown, .keyUp, .flags, .down, .up].contains(packet.kind) ? packet : nil
-        pendingReceiverReplay[token] = (receiverEpoch, held); receiverHasReplay = true
+        pendingReceiverReplay[token] = (receiverEpoch, held)
         event.setIntegerValueField(.eventSourceUserData, value: token)
         eventPoster(event)
     }
@@ -539,7 +624,7 @@ struct SharingTapRecoveryBudget {
         let deadline = started + 250_000_000
         while !pendingReceiverReplay.isEmpty || !pendingReleaseReplay.isEmpty || !pendingLocalReplay.isEmpty {
             try Task.checkCancellation()
-            guard DispatchTime.now().uptimeNanoseconds < deadline else { throw PluginError.invalid("本机输入回放尚未完成，已取消交接；请重新开启共享后重试。") }
+            guard DispatchTime.now().uptimeNanoseconds < deadline else { throw SharingCursorInterruption.replayBusy }
             try await Task.sleep(for: .milliseconds(5))
         }
         try Task.checkCancellation()
@@ -556,7 +641,10 @@ struct SharingTapRecoveryBudget {
         default: break
         }
         if old != physical { physicalStateChanged() }
-        if preparedReceiver != nil, Self.isPhysicalActivity(type) { returnLocal(nil) }
+        if preparedReceiver != nil, mode == .local, Self.isPhysicalActivity(type) { afterTap { [weak self] in self?.returnLocal(nil) } }
+    }
+    private static func isPointerMotion(_ type: CGEventType) -> Bool {
+        type == .mouseMoved || type == .leftMouseDragged || type == .rightMouseDragged || type == .otherMouseDragged
     }
     nonisolated static func isPhysicalActivity(_ type: CGEventType) -> Bool {
         [.keyDown, .keyUp, .flagsChanged, .mouseMoved, .leftMouseDown, .leftMouseUp, .leftMouseDragged,
@@ -564,20 +652,23 @@ struct SharingTapRecoveryBudget {
     }
     private func resumeLocalInput(_ event: CGEvent) {
         if localResumeTask == nil {
-            returnLocal(nil) // Also revoke a still-forwarding peer, including during the return task.
-            reset(); canSwitch = false
-            localPointer = CGEvent(source: nil)?.location
-            let generation = localResumeGeneration
+            canSwitch = false
+            localPointer = cursor.frozenPosition ?? event.location
+            let generation = localResumeGeneration, target = frontmostPID()
             localResumeTask = Task { @MainActor [weak self] in
-                guard let self else { return }
-                let restored = await self.cursor.awaitFocusRestoration()
-                guard generation == self.localResumeGeneration, !Task.isCancelled else { return }
+                guard let self, generation == self.localResumeGeneration, !Task.isCancelled else { return }
                 let events = self.localEvents; self.localEvents.removeAll(); self.localPointer = nil
                 self.localResumeTask = nil
-                // Only restore genuine local input after the real app owns focus.
-                // A rejected restoration fails closed instead of typing into Untitled.
-                if restored && self.cursor.localReplayAllowed { events.forEach { self.post($0) }; self.localResumed() }
-                else { self.failure("原应用焦点未恢复，请切回原应用后继续；共享已暂停。") }
+                let epoch = self.receiverEpoch
+                self.returnLocal(nil) // Revoke a still-forwarding peer before replay.
+                let errors = epoch == self.receiverEpoch ? self.reset(handoffDelay: 0.65) : []
+                guard errors.isEmpty, !self.cursor.cleanupPending, self.tapReady else { return }
+                // No app is activated/restored. If a different app is now in
+                // front, drop the batch rather than type or click into it.
+                if let target, self.frontmostPID() == target, self.tapReadyOverride != nil || !IsSecureEventInputEnabled() {
+                    events.forEach { self.post($0, to: target) }
+                }
+                self.localResumed()
             }
         }
         guard let copy = event.copy() else { return }
@@ -586,13 +677,15 @@ struct SharingTapRecoveryBudget {
             copy.location = next; localPointer = next
             if localEvents.last?.type == copy.type { localEvents.removeLast() }
         }
-        guard localEvents.count < 128 else { reset(); canSwitch = false; failure("本机输入恢复队列已满，共享已暂停。"); return }
+        guard localEvents.count < 128, pendingLocalReplay.count + localEvents.count < 128 else {
+            localResumeTask?.cancel(); localResumeTask = nil; localEvents.removeAll()
+            failCapture("本机输入恢复队列已满，共享已暂停。"); return
+        }
         localEvents.append(copy)
     }
-    private func post(_ event: CGEvent?) {
-        guard let event else { return }
+    private func post(_ event: CGEvent, to target: pid_t) {
         let token = replayToken(prefix: Self.localReplayPrefix)
-        pendingLocalReplay.insert(token)
+        pendingLocalReplay[token] = target
         event.setIntegerValueField(.eventSourceUserData, value: token)
         eventPoster(event)
     }

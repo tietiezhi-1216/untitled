@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Network
 import Security
@@ -32,8 +33,59 @@ import Security
     private var listenerReady = false
     private var generation = 0
     private var inFlightBytes = 0
+    private var clipboardTextSending = false
+    private var clipboardImages: SharingClipboardImageLink?
+    var beginClipboardImage: (UInt64) -> SharingClipboardImageLink.Delivery? = { _ in nil }
+    var clipboardImageStatusChanged: (SharingClipboardImageStatus) -> Void = { _ in }
     var port: NWEndpoint.Port? { listenerReady ? listener?.port : nil }
     var isConnected: Bool { activeID != nil }
+    var canDial: Bool { listenerReady && pairingKey != nil && activeID == nil && candidates.isEmpty }
+    var canSendClipboardText: Bool { isConnected && !clipboardTextSending && inFlightBytes <= 4096 }
+
+    private static func pskMetadata(_ connection: NWConnection) -> sec_protocol_metadata_t? {
+        guard let metadata = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else { return nil }
+        let security = metadata.securityProtocolMetadata
+        guard sec_protocol_metadata_get_negotiated_tls_protocol_version(security) == .TLSv12,
+              sec_protocol_metadata_get_negotiated_tls_ciphersuite(security).rawValue == UInt16(TLS_PSK_WITH_AES_128_GCM_SHA256) else { return nil }
+        return security
+    }
+    static func exporter(_ connection: NWConnection, label: String) -> Data? {
+        guard let metadata = pskMetadata(connection) else { return nil }
+        return label.withCString { pointer in
+            guard let secret = sec_protocol_metadata_create_secret(metadata, label.utf8.count, pointer, 32) else { return nil }
+            return Data(secret as DispatchData)
+        }
+    }
+    func setClipboardImageGrants(_ grants: SharingClipboardGrants?) {
+        clipboardImages?.stop(); clipboardImages = nil
+        guard let grants else { clipboardImageStatusChanged(.inactive); return }
+        guard let id = activeID, let primary = candidates[id],
+              let key = Self.exporter(primary, label: "Untitled clipboard primary v1") else {
+            clipboardImageStatusChanged(.unavailable); return
+        }
+        let initiator = id == outgoingID
+        let link = SharingClipboardImageLink(grants: grants, primaryKey: SymmetricKey(data: key), initiator: initiator,
+            beginImage: { [weak self] revision in self?.beginClipboardImage(revision) })
+        link.stateChanged = { [weak self, weak link] status in
+            guard let self, let link, self.clipboardImages === link else { return }
+            self.clipboardImageStatusChanged(status)
+        }
+        clipboardImages = link
+        link.startHandshakeDeadline()
+        clipboardImageStatusChanged(.preparing)
+        // The independent stream may arrive before a delayed primary packet.
+        // Dial only after the acceptor confirms this exact pair of grants.
+        if !initiator { _ = send(.init(kind: .clipboardImageReady, imageGrants: grants)) }
+    }
+    func acceptClipboardImageReady(_ grants: SharingClipboardGrants) {
+        guard let id = activeID, id == outgoingID, let primary = candidates[id], let pairingKey,
+              let link = clipboardImages, link.grants == grants.reversed else { return }
+        let parameters = Self.parameters(key: pairingKey)
+        if localOnly { parameters.includePeerToPeer = false }
+        link.open(to: primary.endpoint, parameters: parameters)
+    }
+    func offerClipboardImage(_ png: Data, revision: UInt64) { clipboardImages?.offer(png, revision: revision) }
+    func discardPendingClipboardImage() { clipboardImages?.discardPending() }
 
     static func parameters(key: Data) -> NWParameters {
         let tls = NWProtocolTLS.Options()
@@ -70,7 +122,13 @@ import Security
         if !localOnly { listener.service = NWListener.Service(name: name, type: Self.serviceType) }
         listener.newConnectionHandler = { [weak self] connection in
             MainActor.assumeIsolated {
-                guard let self, self.generation == generation, self.activeID == nil, self.candidates.count < 4 else { connection.cancel(); return }
+                guard let self, self.generation == generation else { connection.cancel(); return }
+                if self.activeID != nil {
+                    if let link = self.clipboardImages { link.accept(connection) }
+                    else { connection.cancel() }
+                    return
+                }
+                guard self.candidates.count < 4 else { connection.cancel(); return }
                 // Refuse a cross-dial without cancelling our legitimate outgoing attempt.
                 if self.outgoingID != nil { self.collisionDetected = true; connection.cancel(); return }
                 self.attach(connection)
@@ -104,14 +162,20 @@ import Security
         browser.stateUpdateHandler = { [weak self] state in
             MainActor.assumeIsolated {
                 guard let self, self.generation == generation else { return }
-                if case .failed(let error) = state { self.stop(); self.failed("设备发现失败，请检查本地网络权限：\(error.localizedDescription)") }
+                if case .failed(let error) = state {
+                    // Bonjour is optional. Don't dismantle a healthy explicit
+                    // IP/VPN link, or its listener, because browsing failed.
+                    self.browser?.cancel(); self.browser = nil
+                    self.peersChanged([])
+                    self.diagnostics("discovery failed: \(error.localizedDescription)")
+                }
             }
         }
         self.browser = browser
         browser.start(queue: .main)
     }
     func connect(_ endpoint: NWEndpoint) throws {
-        guard let pairingKey, listenerReady, activeID == nil, candidates.isEmpty else { throw PluginError.invalid("请先断开当前连接，或等待配对完成。") }
+        guard canDial, let pairingKey else { throw PluginError.invalid("请先断开当前连接，或等待配对完成。") }
         // Keep outgoing connection options separate from the listener's local binding.
         // Listener readiness (including a nonzero port) is checked independently.
         let outgoing = Self.parameters(key: pairingKey)
@@ -129,23 +193,27 @@ import Security
                 self.diagnostics("connection: \(state)")
                 switch state {
                 case .ready:
-                    guard let metadata = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata,
-                          sec_protocol_metadata_get_negotiated_tls_protocol_version(metadata.securityProtocolMetadata) == .TLSv12,
-                          sec_protocol_metadata_get_negotiated_tls_ciphersuite(metadata.securityProtocolMetadata).rawValue == UInt16(TLS_PSK_WITH_AES_128_GCM_SHA256) else {
+                    guard Self.pskMetadata(connection) != nil else {
                         self.fail(id, reason: "对端未协商指定的 TLS-PSK 认证套件，已拒绝连接。"); return
                     }
                     guard self.activeID == nil else { self.remove(id); return }
                     self.collisionDetected = false
-                    self.activeID = id; self.framer = SharingFramer(); self.inFlightBytes = 0
+                    self.activeID = id; self.framer = SharingFramer(); self.inFlightBytes = 0; self.clipboardTextSending = false
                     for other in Array(self.candidates.keys) where other != id { self.remove(other) }
                     self.connected(); self.receive(id)
                 case .failed(let error):
                     if self.activeID != id, case .tls(let status) = error { self.tlsHandshakeFailed(status) }
-                    self.fail(id, reason: self.collisionDetected ? "两端同时发起了连接，请只在其中一台 Mac 点击连接后重试。" : "连接失败，请确认两端配对密钥一致：\(error.localizedDescription)")
+                    self.fail(id, reason: self.connectionError(error))
                 case .waiting(let error):
-                    if self.activeID != id, case .tls(let status) = error {
+                    guard self.activeID != id else { break } // An established path uses the session heartbeat.
+                    if case .tls(let status) = error {
                         self.tlsHandshakeFailed(status)
-                        self.fail(id, reason: "TLS 认证失败，请核对两端的配对密钥。")
+                        self.fail(id, reason: self.connectionError(error))
+                    } else if outgoing {
+                        // NWConnection can wait for a network-path change even
+                        // after ECONNREFUSED. A restarted listener is not a path
+                        // change; return this failed dial to the retry owner now.
+                        self.fail(id, reason: self.connectionError(error))
                     }
                 case .cancelled: self.fail(id, reason: nil)
                 default: break
@@ -157,6 +225,11 @@ import Security
             guard let self, self.generation == generation, self.candidates[id] != nil, self.activeID != id else { return }
             self.fail(id, reason: self.collisionDetected ? "两端同时发起了连接，请只在其中一台 Mac 点击连接后重试。" : "配对超时，请检查网络与配对密钥。")
         }
+    }
+    private func connectionError(_ error: NWError) -> String {
+        if collisionDetected { return "两端同时发起了连接，请只在其中一台 Mac 点击连接后重试。" }
+        if case .tls = error { return "TLS 认证失败，请核对两端的配对密钥。" }
+        return "连接失败：\(error.localizedDescription)"
     }
     private func receive(_ id: UUID) {
         guard let connection = candidates[id], activeID == id else { return }
@@ -178,6 +251,10 @@ import Security
     }
     @discardableResult func send(_ message: SharingMessage, ifAllowed: (() -> Bool)? = nil) -> Bool {
         guard let id = activeID, let connection = candidates[id] else { return false }
+        let isClipboard = message.kind == .clipboardText
+        // At most one text send pending. Input and control frames never wait
+        // for clipboard acknowledgement or a separate transfer queue.
+        guard !isClipboard || canSendClipboardText else { return false }
         do {
             let data = try SharingFramer.encode(message)
             // Drop live audio under congestion. Never build an unbounded queue or drop a key-up.
@@ -186,20 +263,26 @@ import Security
             // Revalidate after encoding, just before committing a new input frame.
             if let ifAllowed, !ifAllowed() { return false }
             inFlightBytes += data.count
+            if isClipboard { clipboardTextSending = true }
+            let size = data.count
             connection.send(content: data, completion: .contentProcessed { [weak self] error in
                 MainActor.assumeIsolated {
                     guard let self, self.activeID == id else { return }
-                    self.inFlightBytes = max(0, self.inFlightBytes - data.count)
+                    self.inFlightBytes = max(0, self.inFlightBytes - size)
+                    if isClipboard { self.clipboardTextSending = false }
                     if let error { self.fail(id, reason: error.localizedDescription) }
                 }
             })
             return true
-        } catch { fail(id, reason: error.localizedDescription); return false }
+        } catch {
+            if !isClipboard { fail(id, reason: error.localizedDescription) }
+            return false
+        }
     }
     func disconnect() {
         guard !candidates.isEmpty else { return }
         for id in Array(candidates.keys) { remove(id) }
-        activeID = nil; framer = SharingFramer(); inFlightBytes = 0
+        activeID = nil; framer = SharingFramer(); inFlightBytes = 0; clipboardTextSending = false
         disconnected(nil)
     }
     private func fail(_ id: UUID, reason: String?) {
@@ -208,7 +291,7 @@ import Security
         if wasActive || candidates.isEmpty { disconnected(reason) }
     }
     private func remove(_ id: UUID) {
-        if activeID == id { activeID = nil }
+        if activeID == id { setClipboardImageGrants(nil); activeID = nil }
         if outgoingID == id { outgoingID = nil }
         if let connection = candidates.removeValue(forKey: id) { connection.stateUpdateHandler = nil; connection.cancel() }
     }
@@ -217,7 +300,7 @@ import Security
         browser?.cancel(); browser = nil
         listener?.cancel(); listener = nil
         for id in Array(candidates.keys) { remove(id) }
-        pairingKey = nil; listenerReady = false; collisionDetected = false; framer = SharingFramer(); inFlightBytes = 0
+        pairingKey = nil; listenerReady = false; collisionDetected = false; framer = SharingFramer(); inFlightBytes = 0; clipboardTextSending = false
         peersChanged([])
     }
 }

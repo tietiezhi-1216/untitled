@@ -8,12 +8,15 @@ struct CaptureEditableArchive: Codable {
     let marks: [CaptureMark]
     static func url(for rendered:URL)->URL { rendered.deletingPathExtension().appendingPathExtension("editing") }
     @MainActor static func save(_ document:CaptureDocument, for rendered:URL) throws {
+        try save(base:document.unmarkedImage,marks:document.archiveMarks,for:rendered)
+    }
+    @MainActor static func save(base:CGImage,marks:[CaptureMark],for rendered:URL) throws {
         let file=url(for:rendered)
-        guard !document.marks.isEmpty else {
+        guard !marks.isEmpty else {
             if FileManager.default.fileExists(atPath:file.path) { try FileManager.default.removeItem(at:file) }
             return
         }
-        let archive=CaptureEditableArchive(version:1,source:try CaptureImage.png(document.unmarkedImage),marks:document.marks)
+        let archive=CaptureEditableArchive(version:1,source:try CaptureImage.png(base),marks:marks)
         let encoder=PropertyListEncoder();encoder.outputFormat = .binary
         try encoder.encode(archive).write(to:file,options:.atomic)
     }

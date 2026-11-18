@@ -13,6 +13,18 @@ struct CaptureRecord: Codable, Identifiable {
     var isVideo: Bool { filename.hasSuffix(".mp4") }
 }
 
+@MainActor enum CaptureClipboard {
+    /// The complete PNG is available on this Mac immediately. Never offer
+    /// the copy as a Continuity promise or make a local paste fetch it back.
+    static func writePNG(_ data: Data, to pasteboard: NSPasteboard = .general) -> Int? {
+        let item = NSPasteboardItem()
+        guard item.setData(data, forType: .png) else { return nil }
+        let claim = pasteboard.prepareForNewContents(with: .currentHostOnly)
+        guard pasteboard.changeCount == claim, pasteboard.writeObjects([item]) else { return nil }
+        return pasteboard.changeCount
+    }
+}
+
 @MainActor final class CaptureDocument: ObservableObject {
     @Published private(set) var image: CGImage
     @Published private(set) var marks: [CaptureMark] = []
@@ -24,13 +36,45 @@ struct CaptureRecord: Codable, Identifiable {
     @Published var error: String? { didSet { if let error { reportError?(error) } } }
     @Published private(set) var analyzing = false
     private var base: CGImage
+    private(set) var captureViewport: CGRect?
+    var coordinateOrigin: CGPoint { captureViewport?.origin ?? .zero }
+    var archiveMarks: [CaptureMark] { marks.map { $0.moving(by: CGSize(width: -coordinateOrigin.x, height: -coordinateOrigin.y)) } }
+    /// A screenshot keeps its full source until output. Changing the crop never
+    /// transforms marks or records another full-image undo snapshot.
+    func setCaptureViewport(_ rect: CGRect) throws {
+        let clipped = rect.integral.intersection(CGRect(x: 0, y: 0, width: base.width, height: base.height))
+        guard !clipped.isNull, clipped.width >= 2, clipped.height >= 2 else { throw PluginError.invalid("截图范围无效。") }
+        guard captureViewport != clipped else { return }
+        let previous = captureViewport
+        captureViewport = clipped
+        do { image = try renderCurrent() } catch { captureViewport = previous; throw error }
+    }
+    func replaceCaptureSource(_ source:CGImage) throws {
+        let previous=base;base=source
+        do { image=try renderCurrent();undoStack=[];redoStack=[];markEdit=nil;updateCounts() }
+        catch { base=previous;throw error }
+    }
+    private func renderCurrent() throws -> CGImage {
+        let source: CGImage
+        if let captureViewport {
+            guard let cropped = base.cropping(to: captureViewport) else { throw PluginError.invalid("无法读取截图范围。") }
+            source = cropped
+        } else { source = base }
+        return marks.isEmpty ? source : try CaptureImage.render(source, marks: archiveMarks)
+    }
     private struct Snapshot { let base: CGImage; let marks: [CaptureMark]; let offset: CGPoint }
     private var undoStack: [Snapshot] = [], redoStack: [Snapshot] = []
     private var markEdit: Snapshot?
     private var lastCommittedImage: CGImage?
-    var commit: ((CGImage) throws -> Void)?
+    var commit: ((CGImage, Data?) throws -> Void)?
+    private let copyDefaults: UserDefaults
+    private let writeClipboard: (Data) -> Bool
 
-    init(image: CGImage) { self.image = image; base = image }
+    init(image: CGImage, copyDefaults: UserDefaults = .standard,
+         writeClipboard: @escaping (Data) -> Bool = { CaptureClipboard.writePNG($0) != nil }) {
+        self.image = image; base = image
+        self.copyDefaults = copyDefaults; self.writeClipboard = writeClipboard
+    }
     func add(_ mark: CaptureMark) {
         guard mark.tool != .move, mark.tool != .select else { return }
         change {
@@ -45,15 +89,15 @@ struct CaptureRecord: Codable, Identifiable {
     }
     func restoreAnnotations(base:CGImage,marks:[CaptureMark]) throws {
         let rendered=try CaptureImage.render(base,marks:marks)
-        self.base=base;self.marks=marks;image=rendered;canvasOffset = .zero
+        self.base=base;self.marks=marks;captureViewport=nil;image=rendered;canvasOffset = .zero
         undoStack=[];redoStack=[];selectedMarkID=nil;updateCounts()
     }
-    func persist() throws {
+    func persist(encodedPNG: Data? = nil) throws {
         guard lastCommittedImage !== image else { return }
-        try commit?(image);lastCommittedImage=image
+        try commit?(image, encodedPNG);lastCommittedImage=image
     }
     var selectedMark: CaptureMark? { marks.first { $0.id == selectedMarkID } }
-    var unmarkedImage: CGImage { base }
+    var unmarkedImage: CGImage { captureViewport.flatMap { base.cropping(to: $0) } ?? base }
     var isEditingMark: Bool { markEdit != nil }
     func nextNumber(format: CaptureNumberFormat, start: Int = 1) -> Int {
         max(start,(marks.filter { $0.tool == .number && $0.style.numberFormat == format }.compactMap { $0.numberValue ?? Int($0.text) }.max() ?? (start-1)) + 1)
@@ -66,11 +110,11 @@ struct CaptureRecord: Codable, Identifiable {
     func previewMark(_ value: CaptureMark) {
         guard markEdit != nil, let index=marks.firstIndex(where: { $0.id == value.id }) else { return }
         marks[index] = value
-        do { image=try CaptureImage.render(base,marks:marks) } catch { self.error=error.localizedDescription }
+        do { image=try renderCurrent() } catch { self.error=error.localizedDescription }
     }
     func finishMarkEdit() {
         guard let snapshot=markEdit else { return };markEdit=nil
-        if snapshot.marks != marks { undoStack.append(snapshot);redoStack=[];updateCounts() }
+        if snapshot.marks != marks { undoStack.append(snapshot);if undoStack.count > 40 { undoStack.removeFirst() };redoStack=[];updateCounts() }
     }
     func updateSelected(_ action: (inout CaptureMark) -> Void) {
         guard let index=marks.firstIndex(where: { $0.id == selectedMarkID }) else { return }
@@ -106,10 +150,11 @@ struct CaptureRecord: Codable, Identifiable {
     }
     @discardableResult func copy() -> Bool {
         do {
-            try persist()
-            if UserDefaults.standard.bool(forKey: "capture.autoSaveCopy") { _ = try CaptureOutputPreferences.save(image) }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setData(try CaptureImage.png(image), forType: .png)
+            finishMarkEdit()
+            let data = try CaptureImage.png(image)
+            try persist(encodedPNG: data)
+            if copyDefaults.bool(forKey: "capture.autoSaveCopy") { _ = try CaptureOutputPreferences.save(image) }
+            guard writeClipboard(data) else { throw PluginError.invalid("无法写入系统剪贴板，请重试复制。") }
             return true
         } catch { self.error = error.localizedDescription; return false }
     }
@@ -185,7 +230,7 @@ struct CaptureRecord: Codable, Identifiable {
         let previous = Snapshot(base: base, marks: marks, offset: canvasOffset)
         do {
             try action()
-            let rendered = try CaptureImage.render(base, marks: marks)
+            let rendered = try renderCurrent()
             undoStack.append(previous)
             if undoStack.count > 40 { undoStack.removeFirst() }
             redoStack.removeAll()
@@ -197,7 +242,7 @@ struct CaptureRecord: Codable, Identifiable {
     }
     private func restore(_ snapshot: Snapshot) {
         base = snapshot.base; marks = snapshot.marks; canvasOffset = snapshot.offset
-        do { image = try CaptureImage.render(base, marks: marks) }
+        do { image = try renderCurrent() }
         catch { self.error = error.localizedDescription }
         if !marks.contains(where: { $0.id == selectedMarkID }) { selectedMarkID=nil }
         updateCounts()
@@ -216,9 +261,11 @@ struct CaptureRecord: Codable, Identifiable {
     @Published var notice: String?
     var showHistory: () -> Void = {}
     var canUseFeatures: () -> Bool = { true }
+    var didCopyPNG: (Data, Int) -> Void = { _, _ in }
     let directory: URL
-    private let service = CaptureService()
-    let globalMouse = CaptureGlobalMouse()
+    private let service: CaptureService
+    private let writePNGToPasteboard: (Data) -> Int?
+    let globalMouse: CaptureGlobalMouse
     private(set) var editors: [CaptureFloatingEditor] = []
     private var captureGeneration = 0
     private var delayPanel: NSPanel?
@@ -239,7 +286,10 @@ struct CaptureRecord: Codable, Identifiable {
     private var recordingAnnotations: CaptureRecordingAnnotations?
     var isRecording: Bool { recordingStarted != nil }
 
-    init(directory: URL? = nil) {
+    init(directory: URL? = nil, service: CaptureService = CaptureService(), globalMouse: CaptureGlobalMouse = CaptureGlobalMouse(),
+         writePNGToPasteboard: @escaping (Data) -> Int? = { CaptureClipboard.writePNG($0) }) {
+        self.service=service;self.globalMouse=globalMouse
+        self.writePNGToPasteboard = writePNGToPasteboard
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("com.untitled.app/Capture", isDirectory: true)
         do {
@@ -260,15 +310,13 @@ struct CaptureRecord: Codable, Identifiable {
     func configureGlobalMouse(permissions: PluginPermissionClient, allowed: @escaping () -> Bool) {
         globalMouse.start(isAllowed: { [weak self] in
             guard let self else { return false }
-            return allowed() && self.canUseFeatures() && !self.busy && !self.isRecording && self.scrollSession == nil
+            return allowed() && self.canUseFeatures() && !self.busy && !self.service.hasActiveCapture && !self.isRecording && self.scrollSession == nil
         }, permissions: permissions) { [weak self] selection, action in
             guard let self, self.canUseFeatures() else { return }
             self.busy = true; defer { self.busy = false }
             switch action {
             case .edit: self.accept(selection.image, at: selection.presentationFrame)
-            case .copy:
-                _ = try self.storeImage(selection.image)
-                guard CaptureDocument(image: selection.image).copy() else { throw PluginError.invalid("复制失败。") }
+            case .copy: try self.copyAndStore(selection.image)
             case .pin: _ = try self.pinManager.create(selection.image, frame: selection.presentationFrame)
             case .text:
                 let result = try await CaptureRecognition.recognize(selection.image)
@@ -278,7 +326,16 @@ struct CaptureRecord: Codable, Identifiable {
         }
     }
 
+    func shouldIgnoreCaptureRequest(_ action:ActionKind) -> Bool {
+        if action == .captureRecording,isRecording { return false } // Explicit stop remains available.
+        switch action {
+        case .captureRegion,.captureWindow,.captureScreen,.captureScrolling,.captureRecording,.captureDelayed,.captureAndCopy,.captureLastRegion:
+            return busy || service.hasActiveCapture || scrollSession != nil || isRecording || globalMouse.hasActiveCapture
+        default: return false
+        }
+    }
     func perform(_ action: ActionKind, permissions: PluginPermissionClient) async throws {
+        guard !shouldIgnoreCaptureRequest(action) else { return }
         if action == .captureRecording, isRecording { try await stopRecording(); return }
         switch action {
         case .captureHistory: showHistory(); return
@@ -292,13 +349,50 @@ struct CaptureRecord: Codable, Identifiable {
         case .pinFiles: pinFiles(); return
         default: break
         }
-        guard !busy, scrollSession == nil, !isRecording else { throw PluginError.invalid("请先完成当前的截图或录屏。") }
+        guard !busy, scrollSession == nil, !isRecording else { return }
         busy = true
         defer { busy = false }
         let generation = captureGeneration
         if action == .captureDelayed, !(try await waitForDelay()) { return }
         guard generation == captureGeneration, canUseFeatures() else { return }
         let mode: CaptureService.Mode = action == .captureScreen ? .screen : action == .captureWindow ? .window : .region
+        var outputRecord: CaptureRecord?
+        let outputHandler: CaptureSelectionOutputHandler = { [weak self] output, post, frame, target in
+            guard let self,self.canUseFeatures(),self.captureGeneration == generation,!Task.isCancelled else { throw CancellationError() }
+            let document = self.clipboardDocument(output.image)
+            document.commit = { [weak self] image, encodedPNG in
+                guard let self,self.canUseFeatures(),self.captureGeneration == generation else { throw CancellationError() }
+                if let record=outputRecord {
+                    try (encodedPNG ?? CaptureImage.png(image)).write(to: self.url(record), options: .atomic)
+                    if let index=self.history.firstIndex(where:{ $0.id == record.id }) {
+                        self.history[index].width=image.width;self.history[index].height=image.height;self.history[index].revision=UUID();try self.saveIndex()
+                    }
+                } else { outputRecord = try self.storeImage(image, encodedPNG: encodedPNG) }
+                if let record=outputRecord { try CaptureEditableArchive.save(base:output.base,marks:output.marks,for:self.url(record)) }
+            }
+            switch post {
+            case .copy:
+                guard document.copy() else { throw PluginError.invalid(document.error ?? "复制失败，请重试。") }
+            case .pin:
+                try document.persist()
+                let id=try self.pinManager.create(output.image,frame:frame)
+                if let record=self.pinManager.record(id) { try CaptureEditableArchive.save(base:output.base,marks:output.marks,for:self.pinManager.url(record)) }
+            case .save:
+                guard let target else { return false };try document.persist();try CaptureImage.write(output.image,to:target)
+            case .quickSave:
+                guard document.quickSave() else { throw PluginError.invalid(document.error ?? "保存失败，请重试。") }
+            case .ocr:
+                let result=try await CaptureRecognition.recognize(output.image)
+                try Task.checkCancellation()
+                guard self.canUseFeatures(),self.captureGeneration == generation else { throw CancellationError() }
+                guard !result.text.isEmpty else { throw PluginError.invalid("未识别到文字。") }
+                NSPasteboard.general.clearContents()
+                guard NSPasteboard.general.setString(result.text,forType:.string) else { throw PluginError.invalid("无法写入系统剪贴板。") }
+                try document.persist()
+            case .edit: return false
+            }
+            return true
+        }
         let chosen: CaptureSelection?
         if action == .captureLastRegion {
             guard let data = UserDefaults.standard.data(forKey: "capture.lastRegion"),
@@ -306,8 +400,13 @@ struct CaptureRecord: Codable, Identifiable {
                 throw PluginError.invalid("还没有上次截图区域，请先框选一次。")
             }
             chosen = try await service.repeatRegion(memory, permissions: permissions)
-        } else { chosen = try await service.choose(mode, permissions: permissions, allowComplexSelection: action != .captureScrolling && action != .captureRecording) }
-        guard let selection = chosen, generation == captureGeneration else { return }
+        } else { chosen = try await service.choose(mode, permissions: permissions, allowComplexSelection: action != .captureScrolling && action != .captureRecording,
+                                                automaticallyCopiesSelection: action == .captureAndCopy,outputHandler:outputHandler) }
+        guard let selection = chosen else { return }
+        // Keep the frozen selection visible through history persistence and editor
+        // layout; dismiss only once the destination is ready, including error exits.
+        defer { selection.completePresentation() }
+        guard generation == captureGeneration else { return }
         let memory = CaptureRegionMemory(displayID: selection.display.displayID, rect: selection.rect)
         if !selection.isComposite {
             UserDefaults.standard.set(try JSONEncoder().encode(memory), forKey: "capture.lastRegion")
@@ -315,18 +414,22 @@ struct CaptureRecord: Codable, Identifiable {
             recent.removeAll { $0.displayID == memory.displayID && $0.rect == memory.rect }; recent.insert(memory, at: 0)
             UserDefaults.standard.set(try JSONEncoder().encode(Array(recent.prefix(100))), forKey: "capture.regionHistory")
         }
+        if selection.outputHandled { return }
         guard canUseFeatures() else { throw PluginError.invalid("截图插件已停用。") }
         if action != .captureScrolling && action != .captureRecording, let post = selection.postAction {
-            _ = try storeImage(selection.image)
+            if post != .copy { _ = try storeImage(selection.image) }
             switch post {
-            case .copy: guard CaptureDocument(image: selection.image).copy() else { throw PluginError.invalid("复制失败。") }
+            case .copy: try copyAndStore(selection.image)
             case .pin: _ = try pinManager.create(selection.image, frame: selection.presentationFrame)
             case .save: CaptureDocument(image: selection.image).save()
+            case .quickSave: _ = CaptureDocument(image:selection.image).quickSave()
+            case .ocr, .edit: break
             }
             return
         }
         switch action {
         case .captureScrolling:
+            selection.dismissPresentation()
             let axis = StitchAxis(rawValue: UserDefaults.standard.string(forKey: "capture.scrollAxis") ?? "") ?? .vertical
             let session = ScrollCaptureSession(selection: selection, service: service, axis: axis, permissions: permissions)
             session.finished = { [weak self] image in
@@ -335,6 +438,7 @@ struct CaptureRecord: Codable, Identifiable {
             }
             scrollSession = session; session.start()
         case .captureRecording:
+            selection.dismissPresentation()
             guard #available(macOS 15, *) else { throw PluginError.invalid("录屏需要 macOS 15 或更高版本。") }
             guard await CaptureRecordingCountdown.wait(seconds: UserDefaults.standard.integer(forKey: "capture.recordingDelay")),
                   generation == captureGeneration, canUseFeatures() else { return }
@@ -378,12 +482,12 @@ struct CaptureRecord: Codable, Identifiable {
             panel.collectionBehavior = CaptureWindowPolicy.floatingBehavior
             panel.center(); panel.makeKeyAndOrderFront(nil); recordingPanel = panel
         case .captureAndCopy:
-            _ = try storeImage(selection.image)
-            guard CaptureDocument(image: selection.image).copy() else { throw PluginError.invalid("无法复制截图。") }
+            try copyAndStore(selection.image)
             notice = "截图已复制并保存到历史。"
         default:
-            accept(selection.image, at: selection.presentationFrame)
+            accept(selection.image, at: selection.presentationFrame, presentation: selection.presentation,editableExport:selection.editableExport)
             if let tool = selection.initialTool { editors.last?.tool = tool }
+            if let initialAction=selection.initialAction { editors.last?.perform(initialAction) }
         }
     }
 
@@ -405,17 +509,38 @@ struct CaptureRecord: Codable, Identifiable {
         exportRecording(record)
     }
 
-    func accept(_ image: CGImage, at frame: CGRect? = nil) {
-        guard canUseFeatures() else { return }
+    func accept(_ image: CGImage, at frame: CGRect? = nil, presentation: CaptureSelectionPresentation? = nil, editableExport:CaptureSelectionExport? = nil) {
+        guard canUseFeatures() else { presentation?.dismiss(); return }
         do {
             let record = try storeImage(image)
-            openEditor(image, record: record, frame: frame)
-        } catch { errorMessage = error.localizedDescription }
+            if let editableExport { try CaptureEditableArchive.save(base:editableExport.base,marks:editableExport.marks,for:url(record)) }
+            let editor = openEditor(image, record: record, frame: frame)
+            if let presentation {
+                let previousClose = editor.onClose
+                editor.onClose = { [weak presentation] in presentation?.dismiss(); previousClose?() }
+                presentation.beginHandoff(above: [editor.canvasPanel, editor.toolsPanel,editor.stylesPanel])
+            }
+        } catch { presentation?.dismiss(); errorMessage = error.localizedDescription }
     }
-    @discardableResult func storeImage(_ image: CGImage) throws -> CaptureRecord {
+    private func clipboardDocument(_ image: CGImage) -> CaptureDocument {
+        CaptureDocument(image: image, writeClipboard: { [weak self] data in
+            guard let self, let count = self.writePNGToPasteboard(data) else { return false }
+            self.didCopyPNG(data, count)
+            return true
+        })
+    }
+    func copyAndStore(_ image: CGImage) throws {
+        let document = clipboardDocument(image)
+        document.commit = { [weak self] image, encodedPNG in
+            guard let self else { throw CancellationError() }
+            try self.storeImage(image, encodedPNG: encodedPNG)
+        }
+        guard document.copy() else { throw PluginError.invalid(document.error ?? "无法复制截图。") }
+    }
+    @discardableResult func storeImage(_ image: CGImage, encodedPNG: Data? = nil) throws -> CaptureRecord {
         let id = UUID()
         let record = CaptureRecord(id: id, date: Date(), filename: id.uuidString + ".png", width: image.width, height: image.height)
-        try CaptureImage.png(image).write(to: directory.appendingPathComponent(record.filename), options: .atomic)
+        try (encodedPNG ?? CaptureImage.png(image)).write(to: directory.appendingPathComponent(record.filename), options: .atomic)
         history.insert(record, at: 0)
         try saveIndex()
         return record
@@ -572,26 +697,27 @@ struct CaptureRecord: Codable, Identifiable {
         }
         return true
     }
-    private func openEditor(_ image: CGImage, record: CaptureRecord?, pinID: UUID? = nil, recognition: RecognitionTab? = nil, frame: CGRect? = nil) {
+    @discardableResult private func openEditor(_ image: CGImage, record: CaptureRecord?, pinID: UUID? = nil, recognition: RecognitionTab? = nil, frame: CGRect? = nil) -> CaptureFloatingEditor {
         if let pinID, let existing = editors.first(where: { $0.canvasPanel.identifier?.rawValue == pinID.uuidString }) {
-            existing.show(recognition: recognition); return
+            existing.show(recognition: recognition); return existing
         }
         let preferred = pinID.flatMap { pinManager.beginEditing($0) } ?? frame
-        let document = CaptureDocument(image: image)
+        let document = clipboardDocument(image)
         let archiveURL=record.map(url) ?? pinID.flatMap { pinManager.record($0).map(pinManager.url) }
         let transformedPin = pinID.flatMap { pinManager.record($0)?.adjustments }.map { $0 != CapturePinAdjustments() } ?? false
         if let archiveURL, !transformedPin {
             do { try CaptureEditableArchive.restore(document,for:archiveURL) }
             catch { document.error="无法恢复可编辑标注，已打开导出的图片："+error.localizedDescription }
         }
-        let editor = CaptureFloatingEditor(document: document, controller: self, preferredFrame: preferred)
+        let editor = CaptureFloatingEditor(document: document, controller: self, preferredFrame: preferred,
+                                           preservesPresentationFrame: frame != nil)
         if let pinID { editor.canvasPanel.identifier = NSUserInterfaceItemIdentifier(pinID.uuidString) }
-        document.commit = { [weak self, weak editor, weak document] image in
+        document.commit = { [weak self, weak editor, weak document] image, encodedPNG in
             guard let self else { return }
             if let pinID { try self.pinManager.updateImage(image, id: pinID, frame: editor?.imageFrame) }
             if let archiveURL,let document { try CaptureEditableArchive.save(document,for:archiveURL) }
             guard let record else { return }
-            try CaptureImage.png(image).write(to: self.url(record), options: .atomic)
+            try (encodedPNG ?? CaptureImage.png(image)).write(to: self.url(record), options: .atomic)
             if let index = self.history.firstIndex(where: { $0.id == record.id }) {
                 self.history[index].width = image.width; self.history[index].height = image.height
                 self.history[index].revision = UUID()
@@ -612,6 +738,7 @@ struct CaptureRecord: Codable, Identifiable {
             self?.editors.removeAll { $0 === editor }
         }
         editor.show(recognition: recognition)
+        return editor
     }
     func exportRecording(_ record: CaptureRecord) {
         let window = OwnedCaptureWindow(contentRect: CGRect(x: 100, y: 100, width: 820, height: 700),
