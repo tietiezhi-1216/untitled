@@ -2,16 +2,13 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-enum PluginStoreScope: String, CaseIterable { case store = "商店", installed = "已安装" }
 enum PluginStoreSort: String, CaseIterable { case catalog = "默认顺序", name = "名称", recent = "最近安装" }
 
 @MainActor final class PluginMarketplaceNavigation: ObservableObject {
     @Published var search = ""
-    @Published var scope: PluginStoreScope
-    @Published var category: String?
+    @Published var selectedID: String?
     @Published var sort = PluginStoreSort.catalog
     @Published var onlyUninstalled = false
-    init(scope: PluginStoreScope = .store) { self.scope = scope }
 }
 
 struct PluginStoreItem: Identifiable {
@@ -37,33 +34,21 @@ struct PluginStoreItem: Identifiable {
 
 struct PluginStoreView: View {
     @EnvironmentObject private var store: PluginStore
-    @ObservedObject private var navigation: PluginMarketplaceNavigation
-    @ViewState private var selectedID: String?
+    @ObservedObject var navigation: PluginMarketplaceNavigation
     let selectPlugin: (String) -> Void
 
-    init(initialScope: PluginStoreScope = .store, navigation: PluginMarketplaceNavigation? = nil,
-         selectPlugin: @escaping (String) -> Void) {
-        self.navigation = navigation ?? PluginMarketplaceNavigation(scope: initialScope)
-        self.selectPlugin = selectPlugin
-    }
-
     private var allItems: [PluginStoreItem] {
-        if navigation.scope == .installed { return store.installed.map { .installed($0, store: store) } }
-        return store.catalog.map { entry in
+        store.catalog.map { entry in
             PluginStoreItem(id: entry.id, entry: entry, plugin: store.installed.first { $0.id == entry.id },
                             presentation: store.presentation(for: entry), author: entry.author)
-        } + store.installed.filter { plugin in !store.catalog.contains { $0.id == plugin.id } }
-            .map { .installed($0, store: store) }
+        }
     }
 
     private var items: [PluginStoreItem] {
         let filtered = allItems.filter { item in
-            (navigation.scope == .store ? item.entry != nil : item.plugin != nil) &&
-                (navigation.category == nil || item.presentation.category == navigation.category) &&
-                (!navigation.onlyUninstalled || navigation.scope == .installed || item.plugin == nil) &&
-                (navigation.search.isEmpty || (item.presentation.name + item.presentation.summary + item.author +
-                    (item.entry?.name ?? "") + (item.presentation.storefront?.category ?? ""))
-                    .localizedCaseInsensitiveContains(navigation.search))
+            (!navigation.onlyUninstalled || item.plugin == nil) &&
+                (navigation.search.isEmpty || [item.presentation.name, item.presentation.summary, item.author, (item.entry?.name ?? "")]
+                    .contains { $0.localizedCaseInsensitiveContains(navigation.search) })
         }
         switch navigation.sort {
         case .catalog: return filtered
@@ -78,42 +63,36 @@ struct PluginStoreView: View {
 
     private var title: String {
         if !navigation.search.isEmpty { return "“\(navigation.search)”的搜索结果" }
-        return navigation.category ?? (navigation.scope == .installed ? "已安装" : "插件商店")
+        return "插件商店"
     }
 
     var body: some View {
         Group {
-            if let selectedID, let item = allItems.first(where: { $0.id == selectedID }) {
-                PluginStoreDetailView(item: item, goBack: { self.selectedID = nil }, openPlugin: selectPlugin)
+            if let selectedID = navigation.selectedID, let item = allItems.first(where: { $0.id == selectedID }) {
+                PluginStoreDetailView(item: item, goBack: { navigation.selectedID = nil }, openPlugin: openPlugin)
             } else { marketplace }
         }
-        .task(id: navigation.scope) { if navigation.scope == .store && store.catalog.isEmpty { await store.refreshCatalog() } }
-        .onChange(of: navigation.search) { _, _ in selectedID = nil }
-        .onChange(of: navigation.category) { _, _ in selectedID = nil }
+        .task { if store.catalog.isEmpty { await store.refreshCatalog() } }
+        .onChange(of: navigation.search) { _, _ in navigation.selectedID = nil }
+    }
+
+    private func openPlugin(_ id: String) {
+        navigation.selectedID = nil
+        selectPlugin(id)
     }
 
     private var marketplace: some View {
         VStack(spacing: 0) {
-            Text(title)
-                .font(.system(size: 28, weight: .bold)).lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle()).panelWindowDragArea().panelRegion("panel.title")
-                .padding(.horizontal, PanelLayout.contentInset).padding(.top, 64).padding(.bottom, 18)
-                .panelRegion("panel.header")
-
-            HStack {
-                HStack(spacing: 0) {
-                    scopeButton("商店", value: .store)
-                    scopeButton("已安装 · \(store.installed.count)", value: .installed)
-                }
-                .background(Color.primary.opacity(0.07), in: Capsule())
-                .panelRegion("store.scope")
-                Spacer()
+            HStack(alignment: .firstTextBaseline, spacing: 16) {
+                Text(title)
+                    .font(.system(size: 28, weight: .bold)).lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle()).panelWindowDragArea().panelRegion("panel.title")
                 Menu {
                     Picker("排序", selection: $navigation.sort) {
                         ForEach(PluginStoreSort.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
-                    Toggle("仅显示未安装", isOn: $navigation.onlyUninstalled).disabled(navigation.scope == .installed)
+                    Toggle("仅显示未安装", isOn: $navigation.onlyUninstalled)
                     Divider()
                     Button("刷新商店", systemImage: "arrow.clockwise") { Task { await store.refreshCatalog() } }
                         .disabled(store.isRefreshing)
@@ -127,8 +106,8 @@ struct PluginStoreView: View {
                 .foregroundStyle(Color.accentColor).font(.system(size: 13, weight: .medium))
                 .fixedSize().panelRegion("store.filter")
             }
-            .padding(.horizontal, PanelLayout.contentInset).frame(height: 30)
-            .panelRegion("store.controls").padding(.bottom, 12)
+            .padding(.horizontal, PanelLayout.contentInset).padding(.top, 64).padding(.bottom, 18)
+            .panelRegion("panel.header")
             PanelDivider().padding(.bottom, 28)
 
             if let error = store.catalogError {
@@ -143,34 +122,23 @@ struct PluginStoreView: View {
                 LazyVGrid(columns: [GridItem(.flexible(minimum: 250), spacing: 26), GridItem(.flexible(minimum: 250), spacing: 26)],
                           alignment: .leading, spacing: 34) {
                     ForEach(items) { item in
-                        PluginStoreCard(item: item, openPlugin: selectPlugin) { selectedID = item.id }
+                        PluginStoreCard(item: item, openPlugin: openPlugin) { navigation.selectedID = item.id }
                     }
                 }
                 .padding(.horizontal, PanelLayout.contentInset).padding(.bottom, 36)
             }
             .panelRegion("store.gallery").frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay {
-                if store.isRefreshing && store.catalog.isEmpty && navigation.scope == .store {
+                if store.isRefreshing && store.catalog.isEmpty {
                     ProgressView("正在加载插件…")
                 } else if items.isEmpty {
                     ContentUnavailableView(
                         navigation.search.isEmpty ? "暂无插件" : "没有找到插件", systemImage: "magnifyingglass",
-                        description: Text(navigation.search.isEmpty ? "选择其他分类，或从筛选菜单导入 ZIP。" : "试试其他关键词。")
+                        description: Text(navigation.search.isEmpty ? "可从筛选菜单导入 ZIP。" : "试试其他关键词。")
                     )
                 }
             }
         }
-    }
-
-    private func scopeButton(_ title: String, value: PluginStoreScope) -> some View {
-        Button { navigation.scope = value } label: {
-            Text(title).font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(navigation.scope == value ? Color.white : Color.primary.opacity(0.7))
-                .padding(.horizontal, 15).frame(height: 28)
-                .background(navigation.scope == value ? Color.accentColor : Color.clear, in: Capsule())
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain).accessibilityAddTraits(navigation.scope == value ? .isSelected : [])
     }
 
     private func importPackage() {
@@ -203,7 +171,6 @@ private struct PluginStoreCard: View {
                         PluginIconView(icon: item.presentation.icon, size: 50)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(item.presentation.name).font(.system(size: 14, weight: .semibold)).foregroundStyle(.primary)
-                            Text(item.presentation.category).font(.system(size: 11)).foregroundStyle(.secondary)
                             Text(item.author).font(.system(size: 10)).foregroundStyle(.tertiary)
                         }.lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
                     }

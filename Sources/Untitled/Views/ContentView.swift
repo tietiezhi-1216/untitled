@@ -12,9 +12,8 @@ struct ContentView: View {
     @ViewState private var selection: String
     @StateObject private var marketplace = PluginMarketplaceNavigation()
 
-    init(initialSelection: String = "__store__", initialStoreScope: PluginStoreScope = .store) {
+    init(initialSelection: String = "__store__") {
         _selection = ViewState(wrappedValue: initialSelection)
-        _marketplace = StateObject(wrappedValue: PluginMarketplaceNavigation(scope: initialStoreScope))
     }
 
     private var selectedPlugin: InstalledPlugin? {
@@ -72,7 +71,10 @@ struct ContentView: View {
         .onChange(of: store.requestedPluginID) { _, id in
             if let id { selection = id; store.requestedPluginID = nil }
         }
-        .onChange(of: marketplace.search) { _, _ in selection = "__store__" }
+        .onChange(of: marketplace.search) { _, _ in
+            marketplace.selectedID = nil
+            selection = "__store__"
+        }
         .alert("操作未完成", isPresented: Binding(
             get: { store.errorMessage != nil },
             set: { if !$0 { store.errorMessage = nil } }
@@ -95,16 +97,7 @@ struct ContentView: View {
                 .panelRegion("store.sidebar.search")
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
-                    navigationItem("探索", symbol: "star", id: "__store__")
-                    navigationItem("已安装", symbol: "square.stack.3d.up", id: "__installed__")
-                    if !categories.isEmpty {
-                        Text("分类").font(.caption.weight(.medium)).foregroundStyle(.tertiary)
-                            .padding(.horizontal, 12).padding(.top, 18).padding(.bottom, 4)
-                            .accessibilityAddTraits(.isHeader)
-                        ForEach(categories, id: \.title) { category in
-                            navigationItem(category.title, symbol: category.symbol, id: "__category__." + category.title)
-                        }
-                    }
+                    navigationItem("插件商店", symbol: "storefront", id: "__store__")
                     Text("我的插件")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
@@ -151,38 +144,19 @@ struct ContentView: View {
         .panelRegion("panel.sidebar")
     }
 
-    private var categories: [(title: String, symbol: String)] {
-        let presentations = store.presentations.plugins + store.catalog.map { store.presentation(for: $0) } +
-            store.installed.map { store.presentation(for: $0.manifest) }
-        var values: [String: String] = [:]
-        for presentation in presentations {
-            if let storefront = presentation.storefront { values[storefront.category] = storefront.categorySymbol }
-            else if values[presentation.category] == nil { values[presentation.category] = "square.grid.2x2" }
-        }
-        return values.map { (title: $0.key, symbol: $0.value) }.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-    }
-
     private func isSelected(_ id: String) -> Bool {
-        if id == "__store__" { return selectedPlugin == nil && marketplace.scope == .store && marketplace.category == nil }
-        if id == "__installed__" { return selectedPlugin == nil && marketplace.scope == .installed && marketplace.category == nil }
-        if id.hasPrefix("__category__.") { return selectedPlugin == nil && marketplace.category == String(id.dropFirst("__category__.".count)) }
+        if id == "__store__" { return selectedPlugin == nil }
         return selection == id
     }
 
     private func navigationItem(_ title: String, symbol: String, id: String, icon: PluginIcon? = nil, enabled: Bool = true) -> some View {
         let active = isSelected(id)
         return Button {
-            if id == "__store__" || id == "__installed__" {
+            if id == "__store__" {
                 marketplace.search = ""
-                marketplace.category = nil
-                marketplace.scope = id == "__store__" ? .store : .installed
-                selection = "__store__"
-            } else if id.hasPrefix("__category__.") {
-                marketplace.search = ""
-                marketplace.category = String(id.dropFirst("__category__.".count))
-                marketplace.scope = .store
-                selection = "__store__"
-            } else { selection = id }
+                marketplace.selectedID = nil
+            }
+            selection = id
         } label: {
             HStack(spacing: 10) {
                 if let icon {
