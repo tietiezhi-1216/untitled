@@ -310,6 +310,7 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
     private let elementResolver:((CGPoint)->CGRect?)?
     private let elementHitResolver:((CGPoint)->CaptureElementHit?)?
     private let hoverReduceMotion:()->Bool
+    private let hoverNow:()->TimeInterval
     private var hover=CaptureElementHoverState()
     private var hoverRetryTask:Task<Void,Never>?
     private var hoverRetryGeneration=0
@@ -350,8 +351,9 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
     override var acceptsFirstResponder:Bool { true }
     override func acceptsFirstMouse(for event:NSEvent?) -> Bool { true }
     init(image:CGImage,allowsShapes:Bool,elementDetectionAllowed:Bool=false,elementResolver:((CGPoint)->CGRect?)?=nil,elementHitResolver:((CGPoint)->CaptureElementHit?)?=nil,sessionDefaults:UserDefaults = .standard,
-         hoverReduceMotion:@escaping ()->Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }) {
-        self.image=image;self.allowsShapes=allowsShapes;self.hoverReduceMotion=hoverReduceMotion
+         hoverReduceMotion:@escaping ()->Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
+         hoverNow:@escaping ()->TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.image=image;self.allowsShapes=allowsShapes;self.hoverReduceMotion=hoverReduceMotion;self.hoverNow=hoverNow
         session=CaptureSelectionSession(image:image,allowsAnnotations:allowsShapes,defaults:sessionDefaults)
         self.elementDetectionAllowed=elementDetectionAllowed;self.elementResolver=elementResolver;self.elementHitResolver=elementHitResolver
         super.init(frame:.zero)
@@ -956,7 +958,7 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
         let hint=force ? nil:hover.refinementHint(at:point,window:windows.first { $0.contains(point) })
         let result=hover.selectionUsingHit(at:point,window:windows.first { $0.contains(point) },
                         enabled:shape != .windows && detectElements && canDetectElements,
-                        now:ProcessInfo.processInfo.systemUptime,force:force) {
+                        now:hoverNow(),force:force) {
             if let elementHitResolver { return elementHitResolver(point) }
             if let elementResolver { return elementResolver(point).map { CaptureElementHit(rect:$0) } }
             return elementHit(at:point,hint:hint)
@@ -965,7 +967,7 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
         return result
     }
     private func scheduleHoverRetry() {
-        guard let delay=hover.retryDelay(now:ProcessInfo.processInfo.systemUptime) else { cancelHoverRetry();return }
+        guard let delay=hover.retryDelay(now:hoverNow()) else { cancelHoverRetry();return }
         guard hoverRetryTask == nil else { return }
         let generation=hoverRetryGeneration,deadline=ContinuousClock.now.advanced(by:.seconds(delay))
         // A bounded uncertain-hit validation, even

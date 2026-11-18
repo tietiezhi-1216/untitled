@@ -462,12 +462,16 @@ struct CaptureFloatingEditorTests {
         first.hint="箭头";second.hint="复制"
         var entered=false,exited=false
         first.hoverChanged={ if $0 { entered=true } else { exited=true } }
+        panel.ignoresMouseEvents = true // Only the synthetic hover events below can route to this window.
         container.addSubview(first);container.addSubview(second);panel.orderFrontRegardless()
         defer { first.endHover();second.endHover();panel.close();panel.contentView=nil }
         let event=try #require(NSEvent.mouseEvent(with:.mouseMoved,location:.zero,modifierFlags:[],timestamp:0,windowNumber:panel.windowNumber,context:nil,eventNumber:1,clickCount:0,pressure:0))
         first.mouseEntered(with:event)
         #expect(entered && first.isHovering && first.hintPanel == nil)
-        try await Task.sleep(for:.milliseconds(410))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while first.hintPanel == nil && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
         let hint=try #require(first.hintPanel)
         #expect(hint.isVisible && !panel.isKeyWindow)
         second.mouseEntered(with:event)

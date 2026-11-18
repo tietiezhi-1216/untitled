@@ -578,9 +578,15 @@ final class CaptureToolbarHelpView: NSView {
             else { self?.dismissHint() }
             return event
         }
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(350))
         pending = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: .milliseconds(350)) } catch { return }
-            guard let self, isHovering else { return }
+            guard !Task.isCancelled else { return }
+            // Time the delay from the hover, not from the task's first turn
+            // after AppKit finishes processing window or toolbar updates.
+            if ContinuousClock.now < deadline {
+                do { try await Task.sleep(until: deadline, clock: .continuous) } catch { return }
+            }
+            guard let self, !Task.isCancelled, isHovering else { return }
             pending = nil; showHint()
         }
     }
