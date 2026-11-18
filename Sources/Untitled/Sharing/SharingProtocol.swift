@@ -90,6 +90,32 @@ struct SharingPointerAccumulator {
     }
 }
 
+/// A bounded prefix sum of motion sent on one ordered handoff. The peer names
+/// the packet that crossed back; apply only subsequently sent displacement.
+/// Position continuity must never re-deliver keyboard, drag or scroll events.
+struct SharingReturnMotion {
+    static let capacity = 256
+    private var samples: [CGPoint] = []
+    private var total = CGPoint.zero
+    private var count: UInt64 = 0
+    private var lastNonMove: UInt64 = 0
+
+    mutating func record(_ packet: SharingInputPacket) {
+        count += 1
+        if packet.kind == .move {
+            total.x += packet.x; total.y += packet.y
+        } else { lastNonMove = count }
+        let index = Int((count - 1) % UInt64(Self.capacity))
+        if samples.count < Self.capacity { samples.append(total) }
+        else { samples[index] = total }
+    }
+    func after(_ index: UInt64) -> CGPoint? {
+        guard index > 0, index <= count, count - index < Self.capacity, lastNonMove <= index else { return nil }
+        let prefix = samples[Int((index - 1) % UInt64(Self.capacity))]
+        return CGPoint(x: min(128, max(-128, total.x - prefix.x)), y: min(128, max(-128, total.y - prefix.y)))
+    }
+}
+
 struct SharingInputPacket: Codable, Equatable, Sendable {
     enum Kind: String, Codable, Sendable { case move, down, up, keyDown, keyUp, flags, scroll }
     var kind: Kind
@@ -138,8 +164,30 @@ struct SharingHeldInputState: Equatable, Sendable {
     }
 }
 
+struct SharingClipboardGrants: Codable, Equatable, Sendable {
+    let local: UUID
+    let peer: UUID
+    var reversed: Self { .init(local: peer, peer: local) }
+}
+
+struct SharingClipboardText: Codable, Equatable, Sendable {
+    static let maximumBytes = 32 * 1024
+    let from: UUID
+    let to: UUID
+    let utf8: Data
+    var revision: UInt64? = nil // Ordered with images only when both peers support the bulk lane.
+
+    var text: String? {
+        guard !utf8.isEmpty, utf8.count <= Self.maximumBytes else { return nil }
+        return String(data: utf8, encoding: .utf8)
+    }
+}
+
 struct SharingMessage: Codable, Sendable {
-    enum Kind: String, Codable, Sendable { case hello, begin, accepted, commit, end, input, micDemand, micState, audio, ping, layout, layoutAck }
+    enum Kind: String, Codable, Sendable {
+        case hello, begin, accepted, commit, end, input, micDemand, micState, audio, ping, layout, layoutAck
+        case clipboardConsent, clipboardText, clipboardImageReady
+    }
     var kind: Kind
     var version: Int? = nil
     var deviceID: String? = nil
@@ -159,13 +207,39 @@ struct SharingMessage: Codable, Sendable {
     var cursorParking: Bool? = nil // Opt-in lifecycle capability; old peers ignore it.
     var handoffID: String? = nil
     var returned: Bool? = nil // Normal edge return, not emergency/cancel/disconnect.
+    var continuousReturn: Bool? = nil // Hello opt-in. Absent on old builds.
+    var directHandoff: Bool? = nil // Hello opt-in for single-message entry on the ordered connection.
+    var directEntry: Bool? = nil // Begin only; follows a qualified local freeze and includes the layout stamp.
+    var returnAfterInput: UInt64? = nil // 1-based input index within this handoff, not a global counter.
     var keyboardEnabled: Bool? = nil // Hello/ping state only; never authorizes remote enablement.
+    var automaticReconnect: Bool? = nil // Hello only. A manual disconnect can refuse background dials, not explicit ones.
+    var clipboardSync: Bool? = nil // Capability only, not consent (hello).
+    var clipboardImages: Bool? = nil // Hello only; requires clipboardSync.
+    var clipboardGrant: UUID? = nil // Fresh local opt-in per connection/activation.
+    var clipboardText: SharingClipboardText? = nil
+    var imageGrants: SharingClipboardGrants? = nil // Acceptor is listening for this pair of grants.
 
     func validate() throws {
+        guard clipboardSync == nil || kind == .hello,
+              clipboardImages == nil || (kind == .hello && clipboardSync == true),
+              clipboardGrant == nil || kind == .clipboardConsent,
+              clipboardText == nil || kind == .clipboardText,
+              imageGrants == nil || kind == .clipboardImageReady else {
+            throw PluginError.invalid("剪贴板消息字段无效。")
+        }
         if let screenAspect { guard screenAspect.isFinite, (0.1...10).contains(screenAspect) else { throw PluginError.invalid("屏幕比例无效。") } }
         try layoutOffset?.validate(); try layoutStamp?.validate(); try returnPosition?.validate(); try screenPixels?.validate()
         if let handoffID, UUID(uuidString: handoffID) == nil { throw PluginError.invalid("无效的接力标识。") }
         if returned == true, kind != .end || handoffID == nil { throw PluginError.invalid("正常归还缺少接力标识。") }
+        if continuousReturn != nil || directHandoff != nil || automaticReconnect != nil, kind != .hello {
+            throw PluginError.invalid("设备握手字段无效。")
+        }
+        if directEntry != nil, kind != .begin || handoffID == nil || layoutStamp == nil {
+            throw PluginError.invalid("直接屏幕切换缺少接力标识或布局版本。")
+        }
+        if let returnAfterInput, kind != .end || returned != true || handoffID == nil || returnPosition == nil || returnAfterInput == 0 {
+            throw PluginError.invalid("无效的归还位移确认。")
+        }
         if layoutVersion == 2 { guard layoutOffset != nil, layoutStamp != nil, screenAspect != nil else { throw PluginError.invalid("自由布局信息不完整。") } }
         if layoutVersion == 3 {
             guard let screenPixels, let screenAspect, abs(screenPixels.aspect - screenAspect) < 0.0001,
@@ -186,6 +260,12 @@ struct SharingMessage: Codable, Sendable {
         case .input:
             guard let input else { throw PluginError.invalid("缺少输入数据。") }
             try input.validate()
+        case .clipboardConsent:
+            guard let enabled, enabled == (clipboardGrant != nil) else { throw PluginError.invalid("无效的剪贴板授权。") }
+        case .clipboardText:
+            guard clipboardText?.text != nil, clipboardText?.revision != 0 else { throw PluginError.invalid("无效的剪贴板文本。") }
+        case .clipboardImageReady:
+            guard let imageGrants, imageGrants.local != imageGrants.peer else { throw PluginError.invalid("无效的截图通道确认。") }
         case .micDemand, .micState:
             guard enabled != nil else { throw PluginError.invalid("无效的麦克风状态。") }
         case .audio:
@@ -206,7 +286,11 @@ struct SharingFramer {
     private var buffer = Data()
     static func encode(_ message: SharingMessage) throws -> Data {
         try message.validate()
-        let body = try JSONEncoder().encode(message)
+        let encoder = JSONEncoder()
+        // The text bytes are base64. Keep the frame size predictable even for
+        // inputs whose base64 representation includes many slashes.
+        if message.kind == .clipboardText { encoder.outputFormatting = [.withoutEscapingSlashes] }
+        let body = try encoder.encode(message)
         guard body.count <= maximumBytes else { throw PluginError.invalid("共享数据过大。") }
         var length = UInt32(body.count).bigEndian
         var framed = withUnsafeBytes(of: &length) { Data($0) }

@@ -13,6 +13,12 @@ struct HotKeyPressState {
 
 @MainActor
 final class HotKeyManager {
+    /// Native Carbon remains the default. Tests can own registrations without
+    /// reserving real system chords, including deterministic conflict failures.
+    struct Driver {
+        let register: (HotKey, @escaping @MainActor (Bool) -> Void) throws -> (@MainActor @Sendable () -> Void)
+    }
+    private let driver: Driver?
     private let resources = CarbonResources()
     private struct Callbacks { let press: () -> Void; let release: (() -> Void)? }
     private var callbacks: [UInt32: Callbacks] = [:]
@@ -20,8 +26,10 @@ final class HotKeyManager {
     private var nextIdentifier: UInt32 = 0
     private var setupStatus: OSStatus = noErr
 
-    init() {
+    init(driver: Driver? = nil) {
+        self.driver=driver
         resources.owner = self
+        guard driver == nil else { return }
         var eventTypes = [
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)),
@@ -46,8 +54,7 @@ final class HotKeyManager {
 
     func clear() {
         let releases = presses.clear().compactMap { callbacks[$0]?.release }
-        resources.references.forEach { UnregisterEventHotKey($0) }
-        resources.references.removeAll()
+        resources.clearRegistrations()
         callbacks.removeAll()
         releases.forEach { $0() }
     }
@@ -58,6 +65,12 @@ final class HotKeyManager {
         nextIdentifier &+= 1
         if nextIdentifier == 0 { nextIdentifier = 1 }
         let identifier = nextIdentifier
+        if let driver {
+            let stop=try driver.register(hotKey) { [weak self] pressed in self?.dispatch(identifier,pressed:pressed) }
+            resources.driverStops.append(stop)
+            callbacks[identifier] = Callbacks(press:action,release:onRelease)
+            return
+        }
         var reference: EventHotKeyRef?
         let status = RegisterEventHotKey(hotKey.keyCode, hotKey.modifiers,
                                         EventHotKeyID(signature: 0x554E544C, id: identifier),
@@ -82,12 +95,16 @@ final class HotKeyManager {
     private final class CarbonResources: @unchecked Sendable {
         var eventHandler: EventHandlerRef?
         var references: [EventHotKeyRef] = []
+        var driverStops: [@MainActor @Sendable () -> Void] = []
         @MainActor weak var owner: HotKeyManager?
 
+        @MainActor func clearRegistrations() {
+            references.forEach { UnregisterEventHotKey($0) };references.removeAll()
+            let stops=driverStops;driverStops.removeAll();stops.forEach { $0() }
+        }
         @MainActor func invalidate() {
             owner = nil
-            references.forEach { UnregisterEventHotKey($0) }
-            references.removeAll()
+            clearRegistrations()
             if let eventHandler { RemoveEventHandler(eventHandler) }
             eventHandler = nil
         }

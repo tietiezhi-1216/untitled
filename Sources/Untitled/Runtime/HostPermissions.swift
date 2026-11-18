@@ -53,10 +53,26 @@ struct HostPermissionDescriptor: Identifiable {
 enum HostSettingsPage: String, CaseIterable { case general, softwareUpdate, permissions }
 
 struct HostPermissionRequest: Identifiable, Equatable {
-    let pluginID: String
-    let pluginName: String
+    enum Source: Equatable { case plugin(id: String, name: String), hostShortcutRouting }
+    let source: Source
     let permissions: Set<HostPermissionID>
-    var id: String { pluginID }
+    var pluginID: String? {
+        if case .plugin(let id, _) = source { return id }
+        return nil
+    }
+    var name: String {
+        switch source {
+        case .plugin(_, let name): name
+        case .hostShortcutRouting: "快捷键优先模式"
+        }
+    }
+    var id: String { pluginID ?? "host.shortcutRouting" }
+    init(pluginID: String, pluginName: String, permissions: Set<HostPermissionID>) {
+        source = .plugin(id: pluginID, name: pluginName); self.permissions = permissions
+    }
+    init(hostShortcutRouting permissions: Set<HostPermissionID>) {
+        source = .hostShortcutRouting; self.permissions = permissions
+    }
 }
 
 enum HostPermissionError: LocalizedError {
@@ -140,6 +156,19 @@ enum HostPermissionError: LocalizedError {
         messages[id] = status(id) == .authorized ? nil : "请在系统隐私设置中允许 \(HostInfo.name)；部分权限更改后需要重新启动应用。"
     }
     func openSettings(_ id: HostPermissionID) { byID[id]?.openSettings() }
+
+    static let shortcutRoutingPermissions: Set<HostPermissionID> = [.accessibility]
+
+    /// This grant is for the host's explicit shortcut-routing mode, not plugin input access.
+    /// Query without publishing from a tap callback; plugins still use declaration-checked require.
+    func hasShortcutRoutingAccess() -> Bool {
+        Self.shortcutRoutingPermissions.allSatisfy { byID[$0]?.status() == .authorized }
+    }
+    func revealShortcutRoutingPermissions() {
+        refresh(Self.shortcutRoutingPermissions)
+        pendingRequest = .init(hostShortcutRouting: Self.shortcutRoutingPermissions)
+        reveal()
+    }
 }
 
 /// A plugin receives this client from the host; it cannot manufacture an OS grant.

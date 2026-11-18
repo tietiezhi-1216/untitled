@@ -3,10 +3,12 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject private var permissions: HostPermissionCenter
+    @ObservedObject private var store: PluginStore
     @StateObject private var softwareUpdate = HostSoftwareUpdate()
     @AppStorage("appearance") private var appearance: AppAppearance = .system
 
     init(store: PluginStore) {
+        self.store = store
         permissions = store.permissions
     }
 
@@ -32,6 +34,32 @@ struct SettingsView: View {
                     ForEach(AppAppearance.allCases) { appearance in Text(appearance.title).tag(appearance) }
                 }
             }
+            Section("全局快捷键") {
+                Toggle("优先响应所有插件快捷键", isOn: Binding(
+                    get: { store.priorityHotKeysEnabled }, set: { store.setPriorityHotKeysEnabled($0) }))
+                Text("仅匹配已设置且启用的组合键，不记录普通输入；匹配时可能阻止系统及其他应用接收。需要辅助功能授权。安全输入、较早的系统过滤器等情况仍可能限制优先级。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let status = store.priorityHotKeyStatus {
+                    Text(status).font(.caption).foregroundStyle(.secondary)
+                }
+                if store.priorityHotKeyRecoveryNeeded {
+                    Text("临时故障会有限重试；返回应用、解锁或唤醒时，也会在授权和安全输入状态允许后尝试恢复。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if store.priorityHotKeysEnabled && store.priorityShortcutsYieldToSharing {
+                    Text("键鼠共享正在交接或控制输入，普通插件快捷键暂时让行；共享紧急返回及停止仍可用。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                HStack {
+                    Toggle("暂停所有键盘快捷键", isOn: Binding(
+                        get: { store.hotKeysPaused }, set: { store.setHotKeysPaused($0) }))
+                    Spacer()
+                    if store.priorityHotKeysEnabled {
+                        Button("权限…") { permissions.revealShortcutRoutingPermissions() }
+                        Button("重试") { store.retryHotKeys() }
+                    }
+                }
+            }
             Section("关于") {
                 LabeledContent("应用", value: HostInfo.name)
                 LabeledContent(
@@ -52,7 +80,7 @@ struct PermissionManagementView: View {
             HStack(spacing: 12) {
                 if let request = permissions.pendingRequest {
                     let missing = request.permissions.contains { permissions.status($0) != .authorized }
-                    Text(missing ? "「\(request.pluginName)」需要授权" : "已就绪，请返回「\(request.pluginName)」重试")
+                    Text(missing ? "「\(request.name)」需要授权" : "已就绪，请返回「\(request.name)」重试")
                         .font(.callout).foregroundStyle(.secondary).lineLimit(1)
                     Button {
                         permissions.pendingRequest = nil

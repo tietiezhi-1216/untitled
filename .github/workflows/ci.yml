@@ -24,7 +24,8 @@ jobs:
       - name: Validate plugin packages
         run: |
           python3 scripts/prepare-plugin-resources.py --check
-          python3 scripts/package-plugins.py --tag v0.13.0
+          python3 scripts/package-plugins.py --tag v0.13.1
+          UNTITLED_PACKAGE_CANDIDATES_DIR="$PWD/dist/plugins" swift test --no-parallel --skip-build --filter validatePackagedPluginCatalog
       - name: Build app
         run: ./scripts/build-app.sh release
       - name: Build Xcode target

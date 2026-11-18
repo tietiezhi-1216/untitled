@@ -2,7 +2,7 @@ import AppKit
 @preconcurrency import ScreenCaptureKit
 import SwiftUI
 
-enum CaptureSelectionPostAction { case copy, pin, save }
+enum CaptureSelectionPostAction { case copy, pin, save, quickSave, ocr, edit }
 
 @MainActor struct CaptureSelection {
     let display: SCDisplay
@@ -15,6 +15,12 @@ enum CaptureSelectionPostAction { case copy, pin, save }
     var isComposite = false
     var initialTool: CaptureTool? = nil
     var postAction: CaptureSelectionPostAction? = nil
+    var presentation: CaptureSelectionPresentation? = nil
+    var outputHandled = false
+    var editableExport: CaptureSelectionExport? = nil
+    var initialAction: CaptureShortcutAction? = nil
+    func dismissPresentation() { presentation?.dismiss() }
+    func completePresentation() { presentation?.complete() }
     var presentationFrame: CGRect? {
         if let presentationFrameOverride { return presentationFrameOverride }
         guard let screen = NSScreen.screens.first(where: {
@@ -59,18 +65,33 @@ struct CaptureRegionMemory: Codable, Equatable {
     static func markControl(_ window: NSWindow, name: String) {
         window.identifier = NSUserInterfaceItemIdentifier(controlPrefix + name)
         window.hidesOnDeactivate = false
+        window.animationBehavior = .none
     }
 }
 
 @MainActor final class CaptureService {
     enum Mode { case region, window, screen }
     private var selector: CaptureSelector?
+    private weak var pendingPresentation: CaptureSelectionPresentation?
     private var generation = 0
+    private var requestID: UUID?
+    var hasActiveCapture:Bool { requestID != nil || pendingPresentation?.isActive == true }
+    private let loadContent: @MainActor () async throws -> SCShareableContent
+    init(loadContent: @escaping @MainActor () async throws -> SCShareableContent = {
+        try await SCShareableContent.excludingDesktopWindows(false,onScreenWindowsOnly:true)
+    }) { self.loadContent=loadContent }
+    private func beginRequest() -> UUID? {
+        guard !hasActiveCapture else { return nil }
+        let id=UUID();requestID=id;return id
+    }
+    private func endRequest(_ id:UUID) { if requestID == id { requestID=nil } }
 
     func repeatRegion(_ memory: CaptureRegionMemory, permissions: PluginPermissionClient) async throws -> CaptureSelection? {
+        guard let request=beginRequest() else { return nil };defer { endRequest(request) }
         let current = generation
         try permissions.require([.screenRecording])
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content = try await loadContent()
+        guard generation == current else { return nil };try Task.checkCancellation()
         guard let display = content.displays.first(where: { $0.displayID == memory.displayID }) else {
             throw PluginError.invalid("上次截图所在的显示器已断开，请重新框选。")
         }
@@ -85,11 +106,16 @@ struct CaptureRegionMemory: Codable, Equatable {
         return CaptureSelection(display: display, filter: filter, rect: rect, scale: scale, image: image)
     }
 
-    func choose(_ mode: Mode, permissions: PluginPermissionClient, allowComplexSelection: Bool = true) async throws -> CaptureSelection? {
+    func choose(_ mode: Mode, permissions: PluginPermissionClient, allowComplexSelection: Bool = true,
+                automaticallyCopiesSelection: Bool = false, outputHandler: CaptureSelectionOutputHandler? = nil) async throws -> CaptureSelection? {
+        guard let request=beginRequest() else { return nil };defer { endRequest(request) }
+        pendingPresentation?.dismiss()
         let currentGeneration = generation
         try permissions.require([.screenRecording])
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content = try await loadContent()
+        guard generation == currentGeneration else { return nil };try Task.checkCancellation()
         var screens: [(NSScreen, SCDisplay, SCContentFilter, CGImage)] = []
+        var capturedPixels = 0
         let mouse = NSEvent.mouseLocation
         for screen in NSScreen.screens {
             guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
@@ -101,7 +127,12 @@ struct CaptureRegionMemory: Codable, Equatable {
             config.width = max(1, Int(filter.contentRect.width * scale))
             config.height = max(1, Int(filter.contentRect.height * scale))
             config.showsCursor = false
+            guard config.width > 0, config.height <= (CaptureImage.maximumPixels-capturedPixels)/config.width else {
+                throw PluginError.invalid("当前显示器组合超过8000万像素，请使用单屏截图或降低显示分辨率。")
+            }
+            capturedPixels += config.width*config.height
             let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            guard generation == currentGeneration else { return nil };try Task.checkCancellation()
             screens.append((screen, display, filter, image))
         }
         guard !screens.isEmpty else { throw PluginError.invalid("没有可用的显示器。") }
@@ -116,25 +147,39 @@ struct CaptureRegionMemory: Codable, Equatable {
             .compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value }
         let ranks = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($0.element, $0.offset) })
         let windows = content.windows.sorted { (ranks[$0.windowID] ?? .max) < (ranks[$1.windowID] ?? .max) }
+        let elementDetectionAllowed = CaptureElementHitTesting.isAllowed(using: permissions)
         let selected: CaptureSelection? = await withCheckedContinuation { continuation in
             let selector = CaptureSelector()
             self.selector = selector
-            selector.show(screens, windows: windows, allowsShapes: allowComplexSelection) { [weak self] selection in
+            selector.show(screens, windows: windows, allowsShapes: allowComplexSelection, elementDetectionAllowed: elementDetectionAllowed,
+                          automaticallyCopiesSelection: automaticallyCopiesSelection, outputHandler: outputHandler) { [weak self] selection in
                 self?.selector = nil
+                self?.pendingPresentation = selection?.presentation
                 continuation.resume(returning: selection)
             }
+            // The selector owns the single composite; do not retain all source
+            // bitmaps in this suspended async frame through the editing session.
+            screens.removeAll()
         }
         guard let selected else { return nil }
-        if mode == .window, let id = selected.windowID, let window = content.windows.first(where: { $0.windowID == id }) {
+        if !selected.outputHandled, selected.editableExport == nil, mode == .window, let id = selected.windowID, let window = content.windows.first(where: { $0.windowID == id }) {
             let filter = SCContentFilter(desktopIndependentWindow: window)
             let configuration = SCStreamConfiguration()
             configuration.width = max(1, Int(window.frame.width * selected.scale))
             configuration.height = max(1, Int(window.frame.height * selected.scale))
             configuration.ignoreShadowsSingleWindow = true
             configuration.showsCursor = false
-            let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
-            return CaptureSelection(display: selected.display, filter: selected.filter, rect: selected.rect,
-                                    scale: selected.scale, image: image, windowID: id, initialTool:selected.initialTool,postAction:selected.postAction)
+            do {
+                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+                guard generation == currentGeneration else { selected.dismissPresentation();return nil }
+                try Task.checkCancellation()
+                return CaptureSelection(display: selected.display, filter: selected.filter, rect: selected.rect,
+                                        scale: selected.scale, image: image, windowID: id, initialTool:selected.initialTool,postAction:selected.postAction,
+                                        presentation:selected.presentation)
+            } catch {
+                selected.dismissPresentation()
+                throw error
+            }
         }
         return selected
     }
@@ -157,12 +202,17 @@ struct CaptureRegionMemory: Codable, Equatable {
         return SCContentFilter(display: display, excludingApplications: apps, exceptingWindows: visibleContent)
     }
 
-    func cancel() { generation += 1; selector?.finish(nil) }
+    func cancel() {
+        generation += 1;requestID=nil
+        selector?.finish(nil)
+        pendingPresentation?.dismiss(); pendingPresentation = nil
+    }
 
     /// Global mouse gestures use Quartz desktop coordinates, including negative origins.
     func captureGlobalRegion(_ globalRect: CGRect, permissions: PluginPermissionClient) async throws -> CaptureSelection {
         try permissions.require([.screenRecording])
-        let content=try await SCShareableContent.excludingDesktopWindows(false,onScreenWindowsOnly:true)
+        let content=try await loadContent()
+        try Task.checkCancellation()
         let displays=content.displays.filter { $0.frame.intersects(globalRect) }
         guard let first=displays.first,globalRect.width>=8,globalRect.height>=8 else { throw PluginError.invalid("截图范围不在可用显示器内。") }
         let filters=displays.map { contentFilter(display:$0,content:content) }

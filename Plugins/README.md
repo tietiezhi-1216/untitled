@@ -158,7 +158,9 @@ struct ExampleProvider: PluginUIProvider {
 
 显式声明需要 `minimumHostVersion: "0.5.0"` 或更高；此版本及以上的插件必须包含 `permissions`。最多 32 项，ID 无重复，每项用途 1–240 字。`optional` 表示按功能选项使用，默认 false；所有权限仍然在实际操作时检查，不会因为安装或启用插件就请求授权。旧包通过原生能力的兼容声明继续使用。
 
-当前宿主管理：`system.screenRecording`、`system.accessibility`、`system.inputMonitoring`、`system.camera`、`system.microphone`。全局热键采用 Carbon 注册，不需要输入监控或辅助功能授权。
+当前宿主管理：`system.screenRecording`、`system.accessibility`、`system.inputMonitoring`、`system.camera`、`system.microphone`。普通全局热键采用 Carbon 注册，不需要输入监控或辅助功能授权。
+
+宿主 0.12.1+ 可由用户在应用通用设置明确开启“优先响应所有插件快捷键”。这是独立的宿主命令触发模式，使用辅助功能授权的 active event tap，不修改清单、默认绑定或插件权限，也不向插件提供原始输入。匹配时尝试阻止下游响应；安全输入及其他过滤器可能限制优先级。按键重绑、录制、停用和退出均清理逻辑动作，共享交接/控制期间普通快捷键让行，失败显示回退状态。权限边界与预算见[宿主优先模式](../docs/PERMISSIONS.md#宿主快捷键优先模式0121)。
 
 插件只调用绑定到自身身份的客户端：
 

@@ -1,4 +1,5 @@
 import Foundation
+@preconcurrency import ScreenCaptureKit
 import Testing
 
 @testable import Untitled
@@ -104,6 +105,29 @@ import Testing
         #expect(throws: PluginError.self) { try store.permissionClient(for: plugin.id).require([.screenRecording]) }
     }
 
+    @Test @MainActor func repeatedCaptureIsIgnoredBeforeHostPermissionManagement() async throws {
+        let directory=FileManager.default.temporaryDirectory.appendingPathComponent("CaptureHostAdmission-"+UUID().uuidString)
+        let system=FakeSystem(),center=system.center()
+        var continuation:CheckedContinuation<SCShareableContent,any Error>?
+        let controller=ScreenshotController(directory:directory.appendingPathComponent("Images"),service:CaptureService {
+            try await withCheckedThrowingContinuation { continuation=$0 }
+        })
+        let store=PluginStore(directory:directory.appendingPathComponent("Plugins"),permissions:center,captureFactory:{ _ in controller })
+        defer { continuation?.resume(throwing:CancellationError());controller.deactivate();try? FileManager.default.removeItem(at:directory) }
+        let plugin=try screenshot();try store.installManifest(plugin.manifest)
+        _=store.screenshots
+        let first=Task { try await controller.perform(.captureRegion,permissions:PluginPermissionClient { _ in }) }
+        for _ in 0..<100 { if continuation != nil { break };try await Task.sleep(for:.milliseconds(5)) }
+        #expect(controller.busy && continuation != nil)
+        try await store.performScreenshot(.captureRegion,pluginID:plugin.id)
+        try await store.performScreenshot(.captureRecording,pluginID:plugin.id)
+        #expect(center.pendingRequest == nil && system.requests.isEmpty && store.errorMessage == nil)
+        let pending=continuation;continuation=nil;pending?.resume(throwing:CancellationError())
+        _=await first.result
+        do { try await store.performScreenshot(.captureRegion,pluginID:plugin.id);Issue.record("A new nonbusy capture must still check authorization") }
+        catch is HostPermissionError {}
+        #expect(center.pendingRequest?.permissions == [.screenRecording] && system.requests.isEmpty)
+    }
     @Test @MainActor func onlyEnabledRecordingOptionsRequireOptionalPermissions() {
         let name = "com.untitled.tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!

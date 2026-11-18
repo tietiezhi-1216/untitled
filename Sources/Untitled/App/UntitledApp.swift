@@ -28,6 +28,7 @@ struct UntitledApp: App {
                 .environmentObject(store)
                 .onAppear { [store, appDelegate] in
                     appDelegate.prepareForQuit = { [weak store] in await store?.prepareForQuit() ?? true }
+                    appDelegate.showMainWindow = { [weak store] in store?.showMainWindow() }
                     guard !appDelegate.handledLaunchArguments else { return }
                     appDelegate.handledLaunchArguments = true
                     if store.installed.contains(where: { $0.isEnabled && $0.manifest.hasCaptureCapability }) { store.screenshots.pinManager.activate() }
@@ -71,11 +72,15 @@ struct UntitledApp: App {
 
 @MainActor final class CaptureAppDelegate: NSObject, NSApplicationDelegate {
     var prepareForQuit: (() async -> Bool)?
+    var showMainWindow: (() -> Void)?
     var handledLaunchArguments = false
     private var finishing = false
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // An internal input-focus request must never reopen the main panel.
-        !SharingNativeCursorFocus.capturingForInput
+        guard let showMainWindow else { return true }
+        // Other windows (such as Settings) can keep the default reopen behavior
+        // from restoring the main scene. Always target the same scene as the menu.
+        showMainWindow()
+        return false
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let prepareForQuit else { return .terminateNow }
@@ -101,6 +106,9 @@ private struct AppMenuView: View {
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
         SettingsLink { Text("设置…") }
+        Button(store.hotKeysPaused ? "恢复所有键盘快捷键" : "暂停所有键盘快捷键") {
+            store.setHotKeysPaused(!store.hotKeysPaused)
+        }
         Button("权限管理…") {
             store.permissions.settingsPage = .permissions
             store.permissions.refresh()

@@ -31,7 +31,7 @@ struct SharingPluginView: View {
                 if let inputStatus = controller.inputStatus {
                     Text(inputStatus).font(.caption).foregroundStyle(.orange)
                 } else if controller.peerKeyboardMouseEnabled == false {
-                    Text("对端键鼠共享已暂停，请在那台 Mac 重新开启“共享”。").font(.caption).foregroundStyle(.orange)
+                    Text("对端连接仍在，键鼠暂不可用。").font(.caption).foregroundStyle(.orange)
                 }
             }.padding(.bottom, 12)
         }
@@ -42,23 +42,47 @@ struct SharingPluginView: View {
         }
         .confirmationDialog("解除本机配对？", isPresented: $unpair) {
             Button("解除配对", role: .destructive) {
-                run { controller.stopUserSession(); try SharingPairingKey.delete(); hasKey = false; keyDraft = ""; notice = "已解除配对。" }
+                run {
+                    controller.stopUserSession()
+                    try SharingPairingKey.delete()
+                    controller.forgetReconnectRoute()
+                    hasKey = false; keyDraft = ""; notice = "已解除配对。"
+                }
             }
         }
         .panelRegion("sharing.dashboard")
     }
     private var header: some View {
         HStack(spacing: 12) {
-            Label(controller.isRunning && !controller.keyboardMouseEnabled ? "本机已暂停" : (controller.peerKeyboardMouseEnabled == false ? "对端已暂停" : (controller.peerName != nil ? "已连接" : (controller.isRunning ? "等待连接" : "未连接"))), systemImage: "circle.fill")
-                .font(.callout).foregroundStyle(controller.isRunning && (!controller.keyboardMouseEnabled || controller.peerKeyboardMouseEnabled == false) ? Color.orange : (controller.peerName != nil ? .green : .secondary))
+            Label(connectionLabel, systemImage: "circle.fill")
+                .font(.callout).foregroundStyle(controller.isRunning && (controller.inputRecovering || !controller.keyboardMouseEnabled || controller.peerKeyboardMouseEnabled == false) ? Color.orange : (controller.peerName != nil ? .green : .secondary))
             Spacer()
             if !hasKey { Button("配对设备") { showSettings = true }.buttonStyle(.borderedProminent) }
             Toggle("共享", isOn: Binding(get: { controller.isRunning && controller.keyboardMouseEnabled }, set: { enabled in
                 run { if enabled { try controller.startUserSession() } else { controller.stopUserSession() } }
             })).toggleStyle(.switch).disabled(!hasKey)
+                .help("连接配对 Mac 后自动同步新复制的文字和 Untitled 截图")
             Button { showSettings = true } label: { Image(systemName: "slider.horizontal.3") }
                 .help("连接设备").accessibilityLabel("连接设备")
         }.panelRegion("sharing.layout.header")
+    }
+    private var connectionLabel: String {
+        if controller.inputRecovering { return "键鼠正在恢复" }
+        if controller.isRunning && !controller.keyboardMouseEnabled { return "本机已暂停" }
+        if controller.peerKeyboardMouseEnabled == false { return "对端键鼠暂不可用" }
+        if controller.peerName != nil { return "已连接" }
+        if controller.reconnecting { return "正在重连" }
+        return controller.isRunning ? "等待连接" : "未连接"
+    }
+    private var clipboardNotice: String? {
+        switch controller.clipboardStatus {
+        case .unsupported: return "对端版本不支持剪贴板同步。"
+        case .denied: return "macOS 已拒绝 Untitled 访问剪贴板，可在系统设置中允许。"
+        case .waiting: return "等待对端剪贴板就绪。旧版对端请更新 Untitled。"
+        case .active where controller.clipboardImageStatus == .unavailable:
+            return "文本仍可同步；截图通道不可用，可断开后重新连接。"
+        default: return nil
+        }
     }
     private var connectionSettings: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -69,7 +93,11 @@ struct SharingPluginView: View {
             }
             if let name = controller.peerName {
                 HStack { Label(name, systemImage: "desktopcomputer").lineLimit(1); Spacer(); Button("断开") { controller.disconnect() } }
+                if let clipboardNotice { Text(clipboardNotice).font(.caption).foregroundStyle(.secondary) }
             } else {
+                if controller.reconnecting {
+                    HStack { Text("正在用原配对重连…"); Spacer(); Button("取消重连") { controller.disconnect() } }
+                }
                 HStack {
                     TextField("对端地址", text: $manualHost).textFieldStyle(.roundedBorder)
                     Button("连接") { run { try controller.connectUserSelected(host: manualHost, port: manualPort); showSettings = false } }
@@ -101,7 +129,13 @@ struct SharingPluginView: View {
             if !hasKey || editingKey {
                 HStack {
                     SecureField("粘贴配对码", text: $keyDraft).textFieldStyle(.roundedBorder)
-                    Button("保存") { run { try SharingPairingKey.save(keyDraft); keyDraft = ""; hasKey = true; editingKey = false; notice = "已配对。" } }
+                    Button("保存") {
+                        run {
+                            try SharingPairingKey.save(keyDraft)
+                            controller.forgetReconnectRoute()
+                            keyDraft = ""; hasKey = true; editingKey = false; notice = "已配对。"
+                        }
+                    }
                         .disabled(keyDraft.isEmpty || controller.isRunning)
                 }.disabled(controller.isRunning)
                 if !hasKey { Button("生成配对码") { generateKey() }.disabled(controller.isRunning) }
@@ -111,12 +145,16 @@ struct SharingPluginView: View {
     }
     private func run(_ body: () throws -> Void) { do { try body() } catch { store.handleExecutionError(error) } }
     private func generateKey() {
-        run { try SharingPairingKey.save(SharingPairingKey.generate()); hasKey = true; notice = "复制配对码，在另一台 Mac 保存即可。" }
+        run {
+            try SharingPairingKey.save(SharingPairingKey.generate())
+            controller.forgetReconnectRoute()
+            hasKey = true; notice = "复制配对码，在另一台 Mac 保存即可。"
+        }
     }
     private func copyKey() {
-        guard let key = SharingPairingKey.load() else { return }
-        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(key, forType: .string)
-        let changeCount = NSPasteboard.general.changeCount
+        guard let key = SharingPairingKey.load(), let changeCount = SharingSystemPasteboard.copyPairingCode(key) else {
+            notice = "未能复制配对码。"; return
+        }
         notice = "已复制，仅分享给可信设备。"
         DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
             if NSPasteboard.general.changeCount == changeCount { NSPasteboard.general.clearContents() }
