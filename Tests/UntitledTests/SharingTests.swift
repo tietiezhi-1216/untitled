@@ -395,10 +395,17 @@ import Testing
         var readyCount = 0
         let ia = SharingInput(tapReadyOverride: { true }, eventPoster: { _ in })
         let ib = SharingInput(tapReadyOverride: { true }, eventPoster: { _ in })
-        let a = PeripheralSharingController(defaults: da, input: ia, loadPairingKey: { key }, inputAccessAvailable: { true }, monotonicNow: { clock.now })
-        let b = PeripheralSharingController(defaults: db, input: ib, loadPairingKey: { key }, inputAccessAvailable: { true })
+        // Both heartbeat clocks and pasteboards are fixtures: a slow runner
+        // must not expire just one side or consult the desktop pasteboard.
+        let a = PeripheralSharingController(defaults: da, input: ia, loadPairingKey: { key }, inputAccessAvailable: { true },
+                                            clipboard: SharingClipboard(board: TestPasteboard(), automatic: false), monotonicNow: { clock.now })
+        let b = PeripheralSharingController(defaults: db, input: ib, loadPairingKey: { key }, inputAccessAvailable: { true },
+                                            clipboard: SharingClipboard(board: TestPasteboard(), automatic: false), monotonicNow: { clock.now })
         for c in [a, b] { c.isAllowed = { true }; c.requirePermissions = { _ in } }
         defer { a.stop(); b.stop(); da.removePersistentDomain(forName: first); db.removePersistentDomain(forName: second) }
+        var diagnostics: [String] = []
+        a.transport.diagnostics = { diagnostics.append("dialer: " + $0) }
+        b.transport.diagnostics = { diagnostics.append("listener: " + $0) }
         let connected = a.transport.connected
         a.transport.connected = { readyCount += 1; connected() }
         try a.startUserSession(localOnly: true); try b.startUserSession(localOnly: true)
@@ -407,12 +414,15 @@ import Testing
         try a.connect(host: "127.0.0.1", port: port)
         try #require(await wait { b.peerName != nil && a.peerName != nil })
         b.disconnect()
-        try #require(await wait { readyCount == 2 && a.reconnecting && !a.transport.isConnected })
+        try #require(await wait {
+            readyCount == 2 && a.reconnecting && a.transport.canDial && b.transport.canDial
+                && b.status == "已主动断开，未接受后台连接。"
+        }, "\(a.status) / \(b.status); \(diagnostics)")
         #expect(b.peerName == nil && !b.reconnecting && b.clipboardStatus == .disconnected)
         #expect(b.isRunning && db.bool(forKey: "sharing.disconnectHold"))
         try a.connect(host: "127.0.0.1", port: port)
-        try #require(await wait { a.peerName != nil && b.peerName != nil })
-        #expect(!db.bool(forKey: "sharing.disconnectHold"))
+        try #require(await wait { a.peerName != nil && b.peerName != nil }, "\(a.status) / \(b.status); \(diagnostics)")
+        #expect(readyCount == 3 && !db.bool(forKey: "sharing.disconnectHold"))
         // Sleep/lock uses the same stopUserSession path and must never re-dial.
         a.stopUserSession(); clock.now += 60
         try #require(await wait { !b.transport.isConnected })
