@@ -125,9 +125,10 @@ final class PluginStore: ObservableObject {
     private var recordingObserver: AnyCancellable?
 
     init(directory: URL? = nil, captureDirectory: URL? = nil, startupError: String? = nil, uiRegistry: PluginUIRegistry? = nil, permissions: HostPermissionCenter? = nil, sharingDefaults: UserDefaults? = nil,
-         presentations: PluginPresentationIndex = .bundled,
+         presentations: PluginPresentationIndex = .bundled, initialCatalog: [CatalogEntry] = [],
          dictationFactory: @escaping (URL) -> DoubaoDictationController = { DoubaoDictationController(preferencesURL: $0) }) {
         self.presentations = presentations
+        self.catalog = initialCatalog
         self.dictationFactory = dictationFactory
         self.startupError = startupError
         if let sharingDefaults { self.sharingDefaults = sharingDefaults; isolatedSharingDomain = nil }
