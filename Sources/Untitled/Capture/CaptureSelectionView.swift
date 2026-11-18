@@ -1002,15 +1002,16 @@ final class CaptureSelectionBackdropView:NSView {
     private var shadeFillRule:CAShapeLayerFillRule = .nonZero
     private var hoverRect:CGRect?
     private var hoverStartRect:CGRect?
+    private var hoverCleanupDeadline:ContinuousClock.Instant?
+    private var hoverCleanupTask:Task<Void,Never>?
     private let hoverOutline=CAShapeLayer()
     var presentsHover:Bool { hoverRect != nil }
-    /// Read the visible pose, not the latest hit-test target. Before the first
-    /// CA commit, an existing animation's start is the last displayed pose.
+    /// Read the visible pose only while a path interpolation owns the layer.
+    /// Before its first CA commit, the start is the last displayed pose.
     var presentedHoverRect:CGRect? {
-        guard hoverRect != nil else { return nil }
-        if let path=hoverOutline.presentation()?.path { return path.boundingBoxOfPath }
-        if hoverOutline.animation(forKey:Self.hoverAnimationKey) != nil,let hoverStartRect { return hoverStartRect }
-        return hoverRect
+        guard let hoverRect else { return nil }
+        guard hoverOutline.animation(forKey:Self.hoverAnimationKey) != nil else { return hoverRect }
+        return hoverOutline.presentation()?.path?.boundingBoxOfPath ?? hoverStartRect ?? hoverRect
     }
     override var isFlipped:Bool { true }
     override var isOpaque:Bool { false }
@@ -1037,12 +1038,38 @@ final class CaptureSelectionBackdropView:NSView {
         // fills it. Boolean subtraction would change path topology mid-tween.
         let path=CGMutablePath();path.addRect(bounds);path.addRect(rect);return path
     }
-    private func stopGeometryAnimation() {
+    private func stopGeometryAnimation(keepCleanup:Bool=false) {
         hoverStartRect=nil
         layer?.removeAnimation(forKey:Self.hoverAnimationKey)
         hoverOutline.removeAnimation(forKey:Self.hoverAnimationKey)
+        if !keepCleanup {
+            hoverCleanupDeadline=nil
+            hoverCleanupTask?.cancel();hoverCleanupTask=nil
+        }
     }
-    func cancelAnimations() { hoverStartRect=nil;layer?.removeAllAnimations();hoverOutline.removeAllAnimations() }
+    func cancelAnimations() {
+        stopGeometryAnimation()
+        layer?.removeAllAnimations();hoverOutline.removeAllAnimations()
+    }
+    private func scheduleHoverCleanup(after duration:TimeInterval) {
+        // Core Animation can keep completed path animations attached when a
+        // window is not being rendered. Model geometry is already at the
+        // destination. Release both paths together even without render ticks.
+        hoverCleanupDeadline=ContinuousClock.now.advanced(by:.seconds(duration))
+        guard hoverCleanupTask == nil else { return }
+        hoverCleanupTask=Task { @MainActor [weak self] in
+            while !Task.isCancelled,let deadline=self?.hoverCleanupDeadline {
+                if ContinuousClock.now<deadline {
+                    do { try await Task.sleep(until:deadline,clock:.continuous) } catch { return }
+                }
+                guard let self,!Task.isCancelled else { return }
+                // A retarget extends this single lease, not a queue of tasks.
+                guard self.hoverCleanupDeadline == deadline else { continue }
+                self.stopGeometryAnimation()
+                return
+            }
+        }
+    }
     func updateHoverGeometry(_ area:CGRect,rect:CGRect,duration:TimeInterval) {
         let duration=CaptureBackdropTransition.duration(duration)
         if frame == area,hoverRect == rect {
@@ -1051,10 +1078,10 @@ final class CaptureSelectionBackdropView:NSView {
         }
         let start=presentedHoverRect
         let animate=duration>0 && frame == area && hoverRect != nil && start != rect
-        stopGeometryAnimation()
+        stopGeometryAnimation(keepCleanup:animate)
         frame=area;hoverRect=rect;shadeFillRule = .evenOdd;shadePath=hoverShade(rect)
         updateLayer()
-        guard animate,let start,let layer else { return }
+        guard animate,let start,let layer else { stopGeometryAnimation();return }
         hoverStartRect=start
         let now=CACurrentMediaTime()
         for (target,from,to) in [(layer,hoverShade(start),hoverShade(rect)),
@@ -1065,6 +1092,7 @@ final class CaptureSelectionBackdropView:NSView {
             animation.timingFunction=CAMediaTimingFunction(name:.easeOut)
             target.add(animation,forKey:Self.hoverAnimationKey)
         }
+        scheduleHoverCleanup(after:duration)
     }
     func updateGeometry(_ area:CGRect,undimmed:CGPath?) {
         stopGeometryAnimation();hoverRect=nil;shadeFillRule = .nonZero

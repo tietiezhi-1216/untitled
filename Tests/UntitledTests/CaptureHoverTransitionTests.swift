@@ -222,13 +222,19 @@ struct CaptureHoverTransitionTests {
         #expect(probes == 2)
     }
 
-    @Test func aCompletedTransitionHasNoAnimationLeftRunning() async throws {
+    @Test(arguments:[false,true])
+    func aCompletedTransitionHasNoAnimationLeftRunning(renderingSuspended:Bool) async throws {
         let fixture=try Fixture();defer { fixture.close() }
         fixture.panel.orderFrontRegardless()
         fixture.move(to:CGPoint(x:100,y:100));fixture.panel.displayIfNeeded();CATransaction.flush()
-        fixture.move(to:CGPoint(x:600,y:450))
         let key=CaptureSelectionBackdropView.hoverAnimationKey
         let shade=try #require(fixture.backdrop.layer)
+        if renderingSuspended {
+            // A stalled compositor must not be needed to release old paths.
+            let frozenTime=shade.convertTime(CACurrentMediaTime(),from:nil)
+            shade.speed=0;shade.timeOffset=frozenTime
+        }
+        fixture.move(to:CGPoint(x:600,y:450))
         #expect(shade.animation(forKey:key)?.duration == 0.12)
         #expect(fixture.outline.animation(forKey:key)?.duration == 0.12)
         let deadline=ContinuousClock.now.advanced(by:.seconds(2))
