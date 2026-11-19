@@ -12,7 +12,13 @@ struct HotKeyPressState {
 }
 
 @MainActor
-final class HotKeyManager {
+protocol HotKeyRegistering {
+    func clear()
+    func register(_ hotKey: HotKey, exclusive: Bool, onRelease: (() -> Void)?, action: @escaping () -> Void) throws
+}
+
+@MainActor
+final class HotKeyManager: HotKeyRegistering {
     private let resources = CarbonResources()
     private struct Callbacks { let press: () -> Void; let release: (() -> Void)? }
     private var callbacks: [UInt32: Callbacks] = [:]
@@ -52,16 +58,17 @@ final class HotKeyManager {
         releases.forEach { $0() }
     }
 
-    func register(_ hotKey: HotKey, onRelease: (() -> Void)? = nil, action: @escaping () -> Void) throws {
+    func register(_ hotKey: HotKey, exclusive: Bool = true, onRelease: (() -> Void)? = nil, action: @escaping () -> Void) throws {
         try hotKey.validate()
         guard setupStatus == noErr else { throw PluginError.invalid("无法监听快捷键（\(setupStatus)）。") }
         nextIdentifier &+= 1
         if nextIdentifier == 0 { nextIdentifier = 1 }
         let identifier = nextIdentifier
+        let options: OptionBits = exclusive ? OptionBits(kEventHotKeyExclusive) : 0
         var reference: EventHotKeyRef?
         let status = RegisterEventHotKey(hotKey.keyCode, hotKey.modifiers,
                                         EventHotKeyID(signature: 0x554E544C, id: identifier),
-                                        GetApplicationEventTarget(), OptionBits(kEventHotKeyExclusive), &reference)
+                                        GetApplicationEventTarget(), options, &reference)
         guard status == noErr, let reference else {
             throw PluginError.invalid("\(hotKey.display) 无法注册，可能已被系统或其他应用占用（\(status)）。")
         }
