@@ -121,16 +121,18 @@ final class PluginStore: ObservableObject {
     let presentations: PluginPresentationIndex
     private var documentationCache: [(key: String, text: String)] = []
     private let startupError: String?
-    private let hotKeys = HotKeyManager()
+    private let hotKeys: any HotKeyRegistering
     private var recordingObserver: AnyCancellable?
 
     init(directory: URL? = nil, captureDirectory: URL? = nil, startupError: String? = nil, uiRegistry: PluginUIRegistry? = nil, permissions: HostPermissionCenter? = nil, sharingDefaults: UserDefaults? = nil,
          presentations: PluginPresentationIndex = .bundled, initialCatalog: [CatalogEntry] = [],
+         hotKeys: (any HotKeyRegistering)? = nil,
          dictationFactory: @escaping (URL) -> DoubaoDictationController = { DoubaoDictationController(preferencesURL: $0) }) {
         self.presentations = presentations
         self.catalog = initialCatalog
         self.dictationFactory = dictationFactory
         self.startupError = startupError
+        self.hotKeys = hotKeys ?? HotKeyManager()
         if let sharingDefaults { self.sharingDefaults = sharingDefaults; isolatedSharingDomain = nil }
         else if directory != nil {
             let domain = "com.untitled.app.sharing.isolated." + UUID().uuidString
@@ -472,7 +474,7 @@ final class PluginStore: ObservableObject {
                     let release: (() -> Void)? = command.action == .holdDoubaoDictation ? { [weak self] in
                         self?.dictationControllers[plugin.id]?.holdReleased(command.id)
                     } : nil
-                    try hotKeys.register(hotKey, onRelease: release) { [weak self] in
+                    try hotKeys.register(hotKey, exclusive: !command.action.isScreenshotAction, onRelease: release) { [weak self] in
                         if command.action == .holdDoubaoDictation {
                             // Capture the gesture synchronously so a rapid key-up cannot precede start.
                             do { try self?.performDictationAction(command.action, pluginID: plugin.id, holdCommandID: command.id) }

@@ -207,12 +207,51 @@ struct PluginTests {
         #expect(store.hotKeyErrors.isEmpty)
     }
 
-    @Test @MainActor func nativeHotKeyEventDispatch() async throws {
+    @Test @MainActor func captureHotKeysAreNonexclusiveWithoutChangingSavedBindings() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let permissions = HostPermissionCenter(drivers: [])
+        let hotKeys = RecordingHotKeys()
+        let store = PluginStore(directory: directory, captureDirectory: directory.appendingPathComponent("Images"),
+                                permissions: permissions, hotKeys: hotKeys)
+        let capture = PluginManifest(schemaVersion: 1, id: "dev.example.capture", name: "Capture Test",
+                                     version: "1.0.0", summary: "Test", author: "Tests", repository: HostInfo.repository,
+                                     minimumHostVersion: "0.2.0", actions: [.captureRegion, .toggleCaptureHotKeys], templates: [])
+        let panel = manifest()
+        let regionKey = HotKey(keyCode: UInt32(kVK_ANSI_1), modifiers: UInt32(controlKey), key: "1")
+        let panelKey = HotKey(keyCode: UInt32(kVK_F19), modifiers: UInt32(cmdKey | optionKey | controlKey | shiftKey), key: "F19")
+        let region = PluginCommand(action: .captureRegion, hotKey: regionKey)
+        try store.installManifest(capture)
+        try store.installManifest(panel)
+        try store.saveCommand(region, pluginID: capture.id)
+        try store.saveCommand(PluginCommand(action: .showMainWindow, hotKey: panelKey), pluginID: panel.id)
+
+        let expected = [regionKey.identity: false, panelKey.identity: true]
+        #expect(hotKeys.exclusivity == expected)
+        #expect(throws: PluginError.self) {
+            try store.saveCommand(PluginCommand(action: .showMainWindow, hotKey: regionKey), pluginID: panel.id)
+        }
+        try await store.performScreenshot(.toggleCaptureHotKeys, pluginID: capture.id)
+        #expect(hotKeys.exclusivity == [panelKey.identity: true])
+        try await store.performScreenshot(.toggleCaptureHotKeys, pluginID: capture.id)
+        #expect(hotKeys.exclusivity == expected)
+
+        let reloadedHotKeys = RecordingHotKeys()
+        let reloaded = PluginStore(directory: directory, captureDirectory: directory.appendingPathComponent("Images"),
+                                   permissions: permissions, hotKeys: reloadedHotKeys)
+        #expect(reloaded.installed.first { $0.id == capture.id }?.commands == [region])
+        #expect(reloadedHotKeys.exclusivity == expected)
+        reloaded.setEnabled(false, pluginID: capture.id)
+        #expect(reloadedHotKeys.exclusivity == [panelKey.identity: true])
+    }
+
+    @Test(arguments: [true, false]) @MainActor func nativeHotKeyEventDispatch(exclusive: Bool) throws {
         _ = NSApplication.shared
         let manager = HotKeyManager()
         defer { manager.clear() }
         var count = 0
-        try manager.register(HotKey(keyCode: UInt32(kVK_F19), modifiers: UInt32(cmdKey | optionKey | controlKey | shiftKey), key: "F19")) { count += 1 }
+        let key = HotKey(keyCode: UInt32(kVK_F19), modifiers: UInt32(cmdKey | optionKey | controlKey | shiftKey), key: "F19")
+        try manager.register(key, exclusive: exclusive) { count += 1 }
         var event: EventRef?
         #expect(CreateEvent(nil, OSType(kEventClassKeyboard), UInt32(kEventHotKeyPressed), 0, 0, &event) == noErr)
         let hotKeyEvent = try #require(event)
@@ -397,6 +436,16 @@ struct PluginTests {
 
     @MainActor private final class PanelBoundsObservation {
         var frames: [String: CGRect] = [:]
+    }
+
+    @MainActor private final class RecordingHotKeys: HotKeyRegistering {
+        private(set) var exclusivity: [String: Bool] = [:]
+
+        func clear() { exclusivity.removeAll() }
+
+        func register(_ hotKey: HotKey, exclusive: Bool, onRelease: (() -> Void)?, action: @escaping () -> Void) throws {
+            exclusivity[hotKey.identity] = exclusive
+        }
     }
 
     private func manifest(id: String = "com.untitled.test", version: String = "1.0.0", minimumHostVersion: String = "0.2.0") -> PluginManifest {
