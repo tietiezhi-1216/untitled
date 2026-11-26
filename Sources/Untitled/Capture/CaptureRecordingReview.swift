@@ -117,8 +117,10 @@ struct CaptureRecordingPlaybackBar: View {
     private var trimControls: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("截取时间段").font(.headline)
-            trimRow("起点", value: Binding(get: { playback.edit.start }, set: playback.setStart))
-            trimRow("终点", value: Binding(get: { playback.edit.end }, set: playback.setEnd))
+            // Explicit setters avoid a Swift 6.3 IRGen crash when Binding
+            // reabstracts an actor-isolated method reference.
+            trimRow("起点", value: Binding(get: { playback.edit.start }, set: { playback.setStart($0) }))
+            trimRow("终点", value: Binding(get: { playback.edit.end }, set: { playback.setEnd($0) }))
             HStack {
                 Button("恢复完整时长") { playback.resetTrim() }
                 Spacer()
