@@ -745,11 +745,24 @@ struct CaptureTests {
         let motion = try #require(NSEvent.mouseEvent(with: .mouseMoved, location: .zero,
             modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
             eventNumber: 1, clickCount: 0, pressure: 0))
+        // Test before and after the dwell without assuming the host will paint
+        // four layout passes in less than 300ms on a shared CI runner.
+        func pauseDwell(_ anchor: PluginHeaderHoverTracking.Anchor) -> AsyncStream<Void>.Continuation {
+            let (gate, release) = AsyncStream<Void>.makeStream()
+            anchor.waitForDwell = { duration in
+                #expect(duration == .milliseconds(300))
+                for await _ in gate {}
+            }
+            return release
+        }
+        let menuDwell = pauseDwell(menu)
+        defer { menuDwell.finish() }
         let before = bounds.frames
         #expect(before["plugin.header.hoverHint"] == nil)
         menu.mouseEntered(with: motion)
         try await settle()
         #expect(bounds.frames["plugin.header.hoverHint"] == nil)
+        menuDwell.finish()
         let menuHint = try await waitForHint()
         let menuButton = try #require(before["plugin.ui.captureMenu"])
         #expect(abs(menuHint.minY - menuButton.maxY - 6) < 1)
@@ -765,9 +778,12 @@ struct CaptureTests {
         }
 
         // Entering a different control clears the old name before showing the next.
+        let settingsDwell = pauseDwell(settings)
+        defer { settingsDwell.finish() }
         settings.mouseEntered(with: motion)
         try await settle()
         #expect(bounds.frames["plugin.header.hoverHint"] == nil)
+        settingsDwell.finish()
         let settingsHint = try await waitForHint()
         #expect(settingsHint.midX > menuHint.midX)
         settings.mouseExited(with: motion)
@@ -781,10 +797,13 @@ struct CaptureTests {
         try await settle()
         #expect(bounds.frames["plugin.header.hoverHint"] == nil)
 
-        // Leaving before the dwell completes must not show a stale tooltip.
+        // Leaving before a pending dwell completes must not show a stale tooltip.
+        let cancelledDwell = pauseDwell(menu)
+        defer { cancelledDwell.finish() }
         menu.mouseEntered(with: motion)
+        try await settle()
         menu.mouseExited(with: motion)
-        try await Task.sleep(for: .milliseconds(340))
+        cancelledDwell.finish()
         try await settle()
         #expect(bounds.frames["plugin.header.hoverHint"] == nil)
     }

@@ -212,6 +212,7 @@ struct PluginHeaderHoverTracking: NSViewRepresentable {
         private static weak var active: Anchor?
         var title = ""
         var show: ((Bool) -> Void)?
+        var waitForDwell: @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
         private var tracking: NSTrackingArea?
         private var delay: Task<Void, Never>?
         private var monitor: Any?
@@ -245,8 +246,8 @@ struct PluginHeaderHoverTracking: NSViewRepresentable {
                 return event
             }
 
-            delay = Task { @MainActor [weak self] in
-                do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+            delay = Task { @MainActor [weak self, wait = waitForDwell] in
+                do { try await wait(.milliseconds(300)); try Task.checkCancellation() } catch { return }
                 guard let self, Self.active === self else { return }
                 delay = nil
                 guard self.window?.isVisible == true, !isHiddenOrHasHiddenAncestor, !visibleRect.isEmpty else {
