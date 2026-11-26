@@ -1,4 +1,5 @@
 import AppKit
+@preconcurrency import AVFoundation
 import Combine
 import SwiftUI
 import UniformTypeIdentifiers
@@ -13,6 +14,18 @@ struct CaptureRecord: Codable, Identifiable {
     var isVideo: Bool { filename.hasSuffix(".mp4") }
 }
 
+@MainActor enum CaptureClipboard {
+    /// The complete PNG is available on this Mac immediately. Never offer
+    /// the copy as a Continuity promise or make a local paste fetch it back.
+    static func writePNG(_ data: Data, to pasteboard: NSPasteboard = .general) -> Int? {
+        let item = NSPasteboardItem()
+        guard item.setData(data, forType: .png) else { return nil }
+        let claim = pasteboard.prepareForNewContents(with: .currentHostOnly)
+        guard pasteboard.changeCount == claim, pasteboard.writeObjects([item]) else { return nil }
+        return pasteboard.changeCount
+    }
+}
+
 @MainActor final class CaptureDocument: ObservableObject {
     @Published private(set) var image: CGImage
     @Published private(set) var marks: [CaptureMark] = []
@@ -24,13 +37,45 @@ struct CaptureRecord: Codable, Identifiable {
     @Published var error: String? { didSet { if let error { reportError?(error) } } }
     @Published private(set) var analyzing = false
     private var base: CGImage
+    private(set) var captureViewport: CGRect?
+    var coordinateOrigin: CGPoint { captureViewport?.origin ?? .zero }
+    var archiveMarks: [CaptureMark] { marks.map { $0.moving(by: CGSize(width: -coordinateOrigin.x, height: -coordinateOrigin.y)) } }
+    /// A screenshot keeps its full source until output. Changing the crop never
+    /// transforms marks or records another full-image undo snapshot.
+    func setCaptureViewport(_ rect: CGRect) throws {
+        let clipped = rect.integral.intersection(CGRect(x: 0, y: 0, width: base.width, height: base.height))
+        guard !clipped.isNull, clipped.width >= 2, clipped.height >= 2 else { throw PluginError.invalid("截图范围无效。") }
+        guard captureViewport != clipped else { return }
+        let previous = captureViewport
+        captureViewport = clipped
+        do { image = try renderCurrent() } catch { captureViewport = previous; throw error }
+    }
+    func replaceCaptureSource(_ source:CGImage) throws {
+        let previous=base;base=source
+        do { image=try renderCurrent();undoStack=[];redoStack=[];markEdit=nil;updateCounts() }
+        catch { base=previous;throw error }
+    }
+    private func renderCurrent() throws -> CGImage {
+        let source: CGImage
+        if let captureViewport {
+            guard let cropped = base.cropping(to: captureViewport) else { throw PluginError.invalid("无法读取截图范围。") }
+            source = cropped
+        } else { source = base }
+        return marks.isEmpty ? source : try CaptureImage.render(source, marks: archiveMarks)
+    }
     private struct Snapshot { let base: CGImage; let marks: [CaptureMark]; let offset: CGPoint }
     private var undoStack: [Snapshot] = [], redoStack: [Snapshot] = []
     private var markEdit: Snapshot?
     private var lastCommittedImage: CGImage?
-    var commit: ((CGImage) throws -> Void)?
+    var commit: ((CGImage, Data?) throws -> Void)?
+    private let copyDefaults: UserDefaults
+    private let writeClipboard: (Data) -> Bool
 
-    init(image: CGImage) { self.image = image; base = image }
+    init(image: CGImage, copyDefaults: UserDefaults = .standard,
+         writeClipboard: @escaping (Data) -> Bool = { CaptureClipboard.writePNG($0) != nil }) {
+        self.image = image; base = image
+        self.copyDefaults = copyDefaults; self.writeClipboard = writeClipboard
+    }
     func add(_ mark: CaptureMark) {
         guard mark.tool != .move, mark.tool != .select else { return }
         change {
@@ -45,15 +90,15 @@ struct CaptureRecord: Codable, Identifiable {
     }
     func restoreAnnotations(base:CGImage,marks:[CaptureMark]) throws {
         let rendered=try CaptureImage.render(base,marks:marks)
-        self.base=base;self.marks=marks;image=rendered;canvasOffset = .zero
+        self.base=base;self.marks=marks;captureViewport=nil;image=rendered;canvasOffset = .zero
         undoStack=[];redoStack=[];selectedMarkID=nil;updateCounts()
     }
-    func persist() throws {
+    func persist(encodedPNG: Data? = nil) throws {
         guard lastCommittedImage !== image else { return }
-        try commit?(image);lastCommittedImage=image
+        try commit?(image, encodedPNG);lastCommittedImage=image
     }
     var selectedMark: CaptureMark? { marks.first { $0.id == selectedMarkID } }
-    var unmarkedImage: CGImage { base }
+    var unmarkedImage: CGImage { captureViewport.flatMap { base.cropping(to: $0) } ?? base }
     var isEditingMark: Bool { markEdit != nil }
     func nextNumber(format: CaptureNumberFormat, start: Int = 1) -> Int {
         max(start,(marks.filter { $0.tool == .number && $0.style.numberFormat == format }.compactMap { $0.numberValue ?? Int($0.text) }.max() ?? (start-1)) + 1)
@@ -66,11 +111,11 @@ struct CaptureRecord: Codable, Identifiable {
     func previewMark(_ value: CaptureMark) {
         guard markEdit != nil, let index=marks.firstIndex(where: { $0.id == value.id }) else { return }
         marks[index] = value
-        do { image=try CaptureImage.render(base,marks:marks) } catch { self.error=error.localizedDescription }
+        do { image=try renderCurrent() } catch { self.error=error.localizedDescription }
     }
     func finishMarkEdit() {
         guard let snapshot=markEdit else { return };markEdit=nil
-        if snapshot.marks != marks { undoStack.append(snapshot);redoStack=[];updateCounts() }
+        if snapshot.marks != marks { undoStack.append(snapshot);if undoStack.count > 40 { undoStack.removeFirst() };redoStack=[];updateCounts() }
     }
     func updateSelected(_ action: (inout CaptureMark) -> Void) {
         guard let index=marks.firstIndex(where: { $0.id == selectedMarkID }) else { return }
@@ -106,10 +151,11 @@ struct CaptureRecord: Codable, Identifiable {
     }
     @discardableResult func copy() -> Bool {
         do {
-            try persist()
-            if UserDefaults.standard.bool(forKey: "capture.autoSaveCopy") { _ = try CaptureOutputPreferences.save(image) }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setData(try CaptureImage.png(image), forType: .png)
+            finishMarkEdit()
+            let data = try CaptureImage.png(image)
+            try persist(encodedPNG: data)
+            if copyDefaults.bool(forKey: "capture.autoSaveCopy") { _ = try CaptureOutputPreferences.save(image) }
+            guard writeClipboard(data) else { throw PluginError.invalid("无法写入系统剪贴板，请重试复制。") }
             return true
         } catch { self.error = error.localizedDescription; return false }
     }
@@ -185,7 +231,7 @@ struct CaptureRecord: Codable, Identifiable {
         let previous = Snapshot(base: base, marks: marks, offset: canvasOffset)
         do {
             try action()
-            let rendered = try CaptureImage.render(base, marks: marks)
+            let rendered = try renderCurrent()
             undoStack.append(previous)
             if undoStack.count > 40 { undoStack.removeFirst() }
             redoStack.removeAll()
@@ -197,7 +243,7 @@ struct CaptureRecord: Codable, Identifiable {
     }
     private func restore(_ snapshot: Snapshot) {
         base = snapshot.base; marks = snapshot.marks; canvasOffset = snapshot.offset
-        do { image = try CaptureImage.render(base, marks: marks) }
+        do { image = try renderCurrent() }
         catch { self.error = error.localizedDescription }
         if !marks.contains(where: { $0.id == selectedMarkID }) { selectedMarkID=nil }
         updateCounts()
@@ -206,7 +252,11 @@ struct CaptureRecord: Codable, Identifiable {
 }
 
 @MainActor final class ScreenshotController: ObservableObject {
-    @Published private(set) var history: [CaptureRecord] = []
+    @Published private(set) var history: [CaptureRecord] = [] {
+        didSet { scheduleHistoryCleanup() }
+    }
+    @Published private(set) var historyRetentionDays: Int
+    @Published private(set) var historyCleanupWarning: String?
     @Published private(set) var busy = false
     @Published private(set) var recordingStarted: Date?
     @Published var errorMessage: String? {
@@ -216,10 +266,17 @@ struct CaptureRecord: Codable, Identifiable {
     @Published var notice: String?
     var showHistory: () -> Void = {}
     var canUseFeatures: () -> Bool = { true }
+    var didCopyPNG: (Data, Int) -> Void = { _, _ in }
     let directory: URL
-    private let service = CaptureService()
-    let globalMouse = CaptureGlobalMouse()
+    private let service: CaptureService
+    private let writePNGToPasteboard: (Data) -> Int?
+    let globalMouse: CaptureGlobalMouse
     private(set) var editors: [CaptureFloatingEditor] = []
+    private let historyDefaults: UserDefaults
+    private let trashHistoryFile: (URL) throws -> URL
+    private var historyCleanupActive = false
+    private var historyCleanupTask: Task<Void, Never>?
+    private var openHistoryRecords: [UUID: Int] = [:]
     private var captureGeneration = 0
     private var delayPanel: NSPanel?
     private var delayCancelled = false
@@ -232,14 +289,23 @@ struct CaptureRecord: Codable, Identifiable {
     }()
     private var scrollSession: ScrollCaptureSession?
     private var recorder: NSObject?
-    private var recordingPanel: NSPanel?
-    private var exportWindows: [NSWindow] = []
+    private(set) var recordingPresentation: CaptureRecordingPresentation?
+    private var recordingReviewID: UUID?
+    private var historyReviewTask: Task<Void, Never>?
     private var stoppingRecording = false
     private var camera: CaptureCameraPair?
     private var recordingAnnotations: CaptureRecordingAnnotations?
     var isRecording: Bool { recordingStarted != nil }
 
-    init(directory: URL? = nil) {
+    init(directory: URL? = nil, service: CaptureService = CaptureService(), globalMouse: CaptureGlobalMouse = CaptureGlobalMouse(),
+         writePNGToPasteboard: @escaping (Data) -> Int? = { CaptureClipboard.writePNG($0) },
+         historyDefaults: UserDefaults = .standard,
+         trashHistoryFile: @escaping (URL) throws -> URL = CaptureHistoryRetention.trash) {
+        self.service=service;self.globalMouse=globalMouse
+        self.writePNGToPasteboard = writePNGToPasteboard
+        self.historyDefaults = historyDefaults
+        self.trashHistoryFile = trashHistoryFile
+        historyRetentionDays = CaptureHistoryRetention.readDays(from: historyDefaults)
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("com.untitled.app/Capture", isDirectory: true)
         do {
@@ -260,15 +326,13 @@ struct CaptureRecord: Codable, Identifiable {
     func configureGlobalMouse(permissions: PluginPermissionClient, allowed: @escaping () -> Bool) {
         globalMouse.start(isAllowed: { [weak self] in
             guard let self else { return false }
-            return allowed() && self.canUseFeatures() && !self.busy && !self.isRecording && self.scrollSession == nil
+            return allowed() && self.canUseFeatures() && !self.busy && !self.service.hasActiveCapture && !self.isRecording && self.scrollSession == nil
         }, permissions: permissions) { [weak self] selection, action in
             guard let self, self.canUseFeatures() else { return }
             self.busy = true; defer { self.busy = false }
             switch action {
             case .edit: self.accept(selection.image, at: selection.presentationFrame)
-            case .copy:
-                _ = try self.storeImage(selection.image)
-                guard CaptureDocument(image: selection.image).copy() else { throw PluginError.invalid("复制失败。") }
+            case .copy: try self.copyAndStore(selection.image)
             case .pin: _ = try self.pinManager.create(selection.image, frame: selection.presentationFrame)
             case .text:
                 let result = try await CaptureRecognition.recognize(selection.image)
@@ -278,27 +342,77 @@ struct CaptureRecord: Codable, Identifiable {
         }
     }
 
-    func perform(_ action: ActionKind, permissions: PluginPermissionClient) async throws {
+    func shouldIgnoreCaptureRequest(_ action:ActionKind) -> Bool {
+        if action == .captureRecording,isRecording { return false } // Explicit stop remains available.
+        switch action {
+        case .captureRegion,.captureWindow,.captureScreen,.captureScrolling,.captureRecording,.captureDelayed,.captureAndCopy,.captureLastRegion:
+            return busy || service.hasActiveCapture || scrollSession != nil || isRecording || globalMouse.hasActiveCapture
+        default: return false
+        }
+    }
+    func perform(_ action: ActionKind, permissions: PluginPermissionClient,
+                 liveActions: Set<CaptureSelectionLiveAction> = [],
+                 allowsLiveAction: @escaping @MainActor (ActionKind) -> Bool = { _ in false }) async throws {
+        guard !shouldIgnoreCaptureRequest(action) else { return }
         if action == .captureRecording, isRecording { try await stopRecording(); return }
         switch action {
         case .captureHistory: showHistory(); return
-        case .pinClipboard: try pinClipboard(); return
+        case .pinSelection, .pinClipboard:
+            if canUseFeatures() { service.pinCurrentSelection() }
+            return
         case .togglePins: togglePins(); return
-        case .restorePin: try pinManager.restoreLastClosed(); return
+        case .restorePin: pinManager.restoreLastClosed(); return
         case .closePins: pinManager.closeAll(); return
         case .hideOtherPins: pinManager.toggleOthers(); return
         case .togglePinClickThrough: pinManager.toggleClickThrough(); return
-        case .cyclePinGroup: pinManager.cycleGroup(); return
+        case .cyclePinGroup: return // Legacy no-op; pins are no longer grouped.
         case .pinFiles: pinFiles(); return
         default: break
         }
-        guard !busy, scrollSession == nil, !isRecording else { throw PluginError.invalid("请先完成当前的截图或录屏。") }
+        guard !busy, scrollSession == nil, !isRecording else { return }
         busy = true
         defer { busy = false }
         let generation = captureGeneration
         if action == .captureDelayed, !(try await waitForDelay()) { return }
         guard generation == captureGeneration, canUseFeatures() else { return }
         let mode: CaptureService.Mode = action == .captureScreen ? .screen : action == .captureWindow ? .window : .region
+        var outputRecord: CaptureRecord?
+        let outputHandler: CaptureSelectionOutputHandler = { [weak self] output, post, frame, target in
+            guard let self,self.canUseFeatures(),self.captureGeneration == generation,!Task.isCancelled else { throw CancellationError() }
+            let document = self.clipboardDocument(output.image)
+            document.commit = { [weak self] image, encodedPNG in
+                guard let self,self.canUseFeatures(),self.captureGeneration == generation else { throw CancellationError() }
+                if let record=outputRecord {
+                    try (encodedPNG ?? CaptureImage.png(image)).write(to: self.url(record), options: .atomic)
+                    if let index=self.history.firstIndex(where:{ $0.id == record.id }) {
+                        self.history[index].width=image.width;self.history[index].height=image.height;self.history[index].revision=UUID();try self.saveIndex()
+                    }
+                } else { outputRecord = try self.storeImage(image, encodedPNG: encodedPNG) }
+                if let record=outputRecord { try CaptureEditableArchive.save(base:output.base,marks:output.marks,for:self.url(record)) }
+            }
+            switch post {
+            case .copy:
+                guard document.copy() else { throw PluginError.invalid(document.error ?? "复制失败，请重试。") }
+            case .pin:
+                try document.persist()
+                let id=try self.pinManager.create(output.image,frame:frame)
+                if let record=self.pinManager.record(id) { try CaptureEditableArchive.save(base:output.base,marks:output.marks,for:self.pinManager.url(record)) }
+            case .save:
+                guard let target else { return false };try document.persist();try CaptureImage.write(output.image,to:target)
+            case .quickSave:
+                guard document.quickSave() else { throw PluginError.invalid(document.error ?? "保存失败，请重试。") }
+            case .ocr:
+                let result=try await CaptureRecognition.recognize(output.image)
+                try Task.checkCancellation()
+                guard self.canUseFeatures(),self.captureGeneration == generation else { throw CancellationError() }
+                guard !result.text.isEmpty else { throw PluginError.invalid("未识别到文字。") }
+                NSPasteboard.general.clearContents()
+                guard NSPasteboard.general.setString(result.text,forType:.string) else { throw PluginError.invalid("无法写入系统剪贴板。") }
+                try document.persist()
+            case .edit: return false
+            }
+            return true
+        }
         let chosen: CaptureSelection?
         if action == .captureLastRegion {
             guard let data = UserDefaults.standard.data(forKey: "capture.lastRegion"),
@@ -306,8 +420,26 @@ struct CaptureRecord: Codable, Identifiable {
                 throw PluginError.invalid("还没有上次截图区域，请先框选一次。")
             }
             chosen = try await service.repeatRegion(memory, permissions: permissions)
-        } else { chosen = try await service.choose(mode, permissions: permissions, allowComplexSelection: action != .captureScrolling && action != .captureRecording) }
-        guard let selection = chosen, generation == captureGeneration else { return }
+        } else {
+            let canSwitch = [.captureRegion, .captureWindow, .captureDelayed].contains(action)
+            chosen = try await service.choose(mode, permissions: permissions,
+                allowComplexSelection: action != .captureScrolling && action != .captureRecording,
+                automaticallyCopiesSelection: action == .captureAndCopy,
+                liveActions: canSwitch ? liveActions : [], outputHandler: outputHandler)
+        }
+        guard let selection = chosen else { return }
+        // Keep the frozen selection visible through history persistence and editor
+        // layout; dismiss only once the destination is ready, including error exits.
+        defer { selection.completePresentation() }
+        guard generation == captureGeneration else { return }
+        let destination = selection.liveAction?.action ?? action
+        if let handoff = selection.liveAction {
+            try Task.checkCancellation()
+            guard handoff.isSupported, liveActions.contains(handoff), !selection.isComposite,
+                  allowsLiveAction(destination) else { throw PluginError.invalid("当前选区无法执行该操作。") }
+            do { try permissions.require(CapturePermissionRequirements.permissions(for: destination)) }
+            catch { selection.dismissPresentation(); throw error }
+        }
         let memory = CaptureRegionMemory(displayID: selection.display.displayID, rect: selection.rect)
         if !selection.isComposite {
             UserDefaults.standard.set(try JSONEncoder().encode(memory), forKey: "capture.lastRegion")
@@ -315,114 +447,275 @@ struct CaptureRecord: Codable, Identifiable {
             recent.removeAll { $0.displayID == memory.displayID && $0.rect == memory.rect }; recent.insert(memory, at: 0)
             UserDefaults.standard.set(try JSONEncoder().encode(Array(recent.prefix(100))), forKey: "capture.regionHistory")
         }
+        if selection.outputHandled { return }
         guard canUseFeatures() else { throw PluginError.invalid("截图插件已停用。") }
-        if action != .captureScrolling && action != .captureRecording, let post = selection.postAction {
-            _ = try storeImage(selection.image)
+        if selection.liveAction == nil, action != .captureScrolling && action != .captureRecording, let post = selection.postAction {
+            if post != .copy { _ = try storeImage(selection.image) }
             switch post {
-            case .copy: guard CaptureDocument(image: selection.image).copy() else { throw PluginError.invalid("复制失败。") }
+            case .copy: try copyAndStore(selection.image)
             case .pin: _ = try pinManager.create(selection.image, frame: selection.presentationFrame)
             case .save: CaptureDocument(image: selection.image).save()
+            case .quickSave: _ = CaptureDocument(image:selection.image).quickSave()
+            case .ocr, .edit: break
             }
             return
         }
-        switch action {
+        switch destination {
         case .captureScrolling:
-            let axis = StitchAxis(rawValue: UserDefaults.standard.string(forKey: "capture.scrollAxis") ?? "") ?? .vertical
-            let session = ScrollCaptureSession(selection: selection, service: service, axis: axis, permissions: permissions)
-            session.finished = { [weak self] image in
-                self?.scrollSession = nil
-                if let image { self?.accept(image, at: selection.presentationFrame) }
-            }
-            scrollSession = session; session.start()
+            let switched = selection.liveAction != nil
+            try startScrolling(selection, permissions: permissions, outputHandler: outputHandler, generation: generation,
+                               isAllowed: { !switched || allowsLiveAction(.captureScrolling) })
         case .captureRecording:
             guard #available(macOS 15, *) else { throw PluginError.invalid("录屏需要 macOS 15 或更高版本。") }
-            guard await CaptureRecordingCountdown.wait(seconds: UserDefaults.standard.integer(forKey: "capture.recordingDelay")),
-                  generation == captureGeneration, canUseFeatures() else { return }
-            var started = false
-            defer {
-                if !started { camera?.stop(); camera = nil; recordingAnnotations?.stop(); recordingAnnotations = nil }
+            try await startRecording(selection, permissions: permissions) { [self] in
+                generation == captureGeneration && canUseFeatures() &&
+                    (selection.liveAction == nil || allowsLiveAction(destination))
             }
-            if UserDefaults.standard.bool(forKey: "capture.camera") {
-                let overlay = CaptureCameraPair()
-                camera = overlay
-                try await overlay.start(in: selection, permissions: permissions)
-            }
-            let annotations = CaptureRecordingAnnotations()
-            annotations.start(in: selection); recordingAnnotations = annotations
-            let recordingSelection = try await service.includingOverlays(selection, windows: (camera?.windowIDs ?? []) + [annotations.windowID].compactMap { $0 })
-            guard canUseFeatures() else { throw PluginError.invalid("截图插件已停用。") }
-            let recorder = CaptureRecorder()
-            recorder.failed = { [weak self] message in
-                guard let self else { return }
-                self.errorMessage = message
-                Task {
-                    try? await self.stopRecording()
-                }
-            }
-            let url = directory.appendingPathComponent(UUID().uuidString + ".mp4")
-            try await recorder.start(selection: recordingSelection, url: url, permissions: permissions,
-                                     audio: UserDefaults.standard.bool(forKey: "capture.systemAudio"),
-                                     microphone: UserDefaults.standard.bool(forKey: "capture.microphone"),
-                                     cursor: UserDefaults.standard.object(forKey: "capture.cursor") as? Bool ?? true)
-            guard canUseFeatures() else {
-                _ = try? await recorder.stop()
-                throw PluginError.invalid("截图插件已停用。")
-            }
-            self.recorder = recorder; recordingStarted = Date()
-            started = true
-            let panel = CaptureRecordingPanel(contentRect: CGRect(x: 80, y: 80, width: 460, height: 68),
-                                styleMask: [.titled, .nonactivatingPanel], backing: .buffered, defer: false)
-            CaptureWindowPolicy.markControl(panel, name: "recordingControls")
-            panel.title = "正在录屏"; panel.level = .floating; panel.isReleasedWhenClosed = false
-            panel.contentView = NSHostingView(rootView: RecordingControls(controller: self, recorder: recorder, annotations: annotations))
-            panel.collectionBehavior = CaptureWindowPolicy.floatingBehavior
-            panel.center(); panel.makeKeyAndOrderFront(nil); recordingPanel = panel
         case .captureAndCopy:
-            _ = try storeImage(selection.image)
-            guard CaptureDocument(image: selection.image).copy() else { throw PluginError.invalid("无法复制截图。") }
+            try copyAndStore(selection.image)
             notice = "截图已复制并保存到历史。"
         default:
-            accept(selection.image, at: selection.presentationFrame)
+            accept(selection.image, at: selection.presentationFrame, presentation: selection.presentation,editableExport:selection.editableExport)
             if let tool = selection.initialTool { editors.last?.tool = tool }
+            if let initialAction=selection.initialAction { editors.last?.perform(initialAction) }
         }
     }
 
-    func stopRecording() async throws {
-        guard #available(macOS 15, *), let recorder = recorder as? CaptureRecorder else { return }
-        guard !stoppingRecording else { return }
+    private func startScrolling(_ selection: CaptureSelection, permissions: PluginPermissionClient,
+                                outputHandler: @escaping CaptureSelectionOutputHandler, generation: Int,
+                                isAllowed: @escaping @MainActor () -> Bool) throws {
+        let displayID = selection.display.displayID
+        guard let rect = selection.presentationFrame, let screen = NSScreen.screens.first(where: {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == displayID
+        }), screen.frame.contains(rect) else {
+            throw PluginError.invalid("长截图所在的显示器已变化，请重新框选。")
+        }
+
+        let filter = selection.filter, crop = selection.rect, scale = selection.scale
+        let displayOrigin = selection.display.frame.origin, screenFrame = screen.frame
+        let axis = StitchAxis(rawValue: UserDefaults.standard.string(forKey: "capture.scrollAxis") ?? "") ?? .vertical
+        let wheel = ScrollCaptureWheelDriver(selection: rect, pointer: { [weak self] in
+            guard let self, self.captureGeneration == generation, self.canUseFeatures(), isAllowed() else {
+                throw CancellationError()
+            }
+            return NSEvent.mouseLocation
+        }, authorize: {
+            try permissions.require([.accessibility])
+        }, post: { axis, step, mouse in
+            guard let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
+                                      wheel1: axis == .vertical ? -Int32(step) : 0,
+                                      wheel2: axis == .horizontal ? -Int32(step) : 0, wheel3: 0)
+            else { return false }
+            event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+            event.location = CGPoint(x: displayOrigin.x + mouse.x - screenFrame.minX,
+                                     y: displayOrigin.y + screenFrame.maxY - mouse.y)
+            event.post(tap: .cghidEventTap)
+            return true
+        })
+        let session = ScrollCaptureSession(image: selection.image, axis: axis, sampleFrame: { [weak self] in
+            guard let self, self.captureGeneration == generation, self.canUseFeatures(), isAllowed() else {
+                throw CancellationError()
+            }
+            return try await self.service.capture(filter: filter, rect: crop, scale: scale, permissions: permissions)
+        }, wheel: wheel) { [weak self] image, action, target in
+            guard let self, self.captureGeneration == generation, self.canUseFeatures(), isAllowed() else {
+                throw CancellationError()
+            }
+            if action == .edit {
+                let record = try self.storeImage(image)
+                self.openEditor(image, record: record, frame: rect)
+                return
+            }
+            let frame = action == .pin ? Self.scrollPinFrame(for: image, within: rect, visibleFrame: screen.visibleFrame) : rect
+            let result = CaptureSelectionExport(image: image, base: image, marks: [])
+            guard try await outputHandler(result, action, frame, target) else { throw CancellationError() }
+        }
+        session.finished = { [weak self, weak session] in
+            guard let self, self.scrollSession === session else { return }
+            self.scrollSession = nil
+        }
+        scrollSession = session
+        session.start(selection: rect, screen: screen, presentation: selection.presentation)
+    }
+
+    static func scrollPinFrame(for image: CGImage, within rect: CGRect, visibleFrame: CGRect) -> CGRect {
+        CapturePinPlacement.fit(CGSize(width: image.width, height: image.height),
+                                at: CGPoint(x: rect.minX, y: rect.maxY), limit: rect.size, on: visibleFrame)
+    }
+
+    @available(macOS 15, *)
+    private func startRecording(_ selection: CaptureSelection, permissions: PluginPermissionClient,
+                                isAllowed: @escaping @MainActor () -> Bool) async throws {
+        let displayID = selection.display.displayID
+        guard let region = selection.presentationFrame, let screen = NSScreen.screens.first(where: {
+            $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID == displayID
+        }), !region.isEmpty, screen.frame.contains(region) else {
+            throw PluginError.invalid("录屏所在的显示器已变化，请重新框选。")
+        }
+        let center = CGPoint(x: region.midX, y: region.midY)
+        let layout = CaptureRecordingLayout(region: region, screen: screen.frame, visible: screen.visibleFrame,
+                                            previousToolbar: selection.presentation?.toolbarFrame(at: center))
+        closeRecordingWindows()
+        let presentation = CaptureRecordingPresentation(layout: layout)
+        recordingPresentation = presentation
+        var started = false
+        defer {
+            if !started {
+                presentation.close()
+                if recordingPresentation === presentation { recordingPresentation = nil }
+                clearRecordingOverlays()
+            }
+        }
+        presentation.watchDisplay(displayID, frame: screen.frame) { [weak self, weak presentation] in
+            guard let self, let presentation, self.recordingPresentation === presentation else { return }
+            presentation.close()
+            if self.isRecording {
+                Task { [weak self] in
+                    do { try await self?.stopRecording(showReview: false) }
+                    catch { self?.errorMessage = error.localizedDescription }
+                }
+            }
+        }
+        presentation.showPreparing(seconds: UserDefaults.standard.integer(forKey: "capture.recordingDelay"))
+        selection.dismissPresentation()
+        let canStart = { !presentation.isClosed && isAllowed() && !Task.isCancelled }
+        guard await presentation.waitForStart(isAllowed: canStart) else { return }
+        if UserDefaults.standard.bool(forKey: "capture.camera") {
+            let overlay = CaptureCameraPair()
+            camera = overlay
+            try await overlay.start(in: selection, permissions: permissions)
+        }
+        guard canStart() else { return }
+        let annotations = CaptureRecordingAnnotations()
+        annotations.start(in: selection); recordingAnnotations = annotations
+        let recordingSelection = try await service.recordingSelection(selection, excluding: presentation.streamControlWindows)
+        guard canStart() else { return }
+        presentation.hideRecordingPopover()
+        let recorder = CaptureRecorder()
+        recorder.failed = { [weak self, weak recorder] message in
+            guard let self, let recorder, self.recorder === recorder else { return }
+            self.errorMessage = message
+            Task { [weak self, weak recorder] in
+                guard let self, let recorder, self.recorder === recorder else { return }
+                try? await self.stopRecording()
+            }
+        }
+        let url = directory.appendingPathComponent(UUID().uuidString + ".mp4")
+        try await recorder.start(selection: recordingSelection, url: url, permissions: permissions,
+                                 audio: UserDefaults.standard.bool(forKey: "capture.systemAudio"),
+                                 microphone: UserDefaults.standard.bool(forKey: "capture.microphone"),
+                                 cursor: UserDefaults.standard.object(forKey: "capture.cursor") as? Bool ?? true)
+        guard canStart() else {
+            let url = try await recorder.stop()
+            try completeRecording(url, warning: recorder.errorMessage, in: nil)
+            return
+        }
+        self.recorder = recorder; recordingStarted = Date()
+        started = true
+        presentation.showToolbar(RecordingControls(recorder: recorder, annotations: annotations, showAnnotations: { [weak presentation] in
+            presentation?.showRecordingPopover(RecordingAnnotationTools(annotations: annotations, close: { [weak presentation] in
+                presentation?.hideRecordingPopover()
+            }), size: CGSize(width: 322, height: 148))
+        }, confirmRestart: { [weak self, weak presentation, weak recorder] in
+            presentation?.showRecordingPopover(RecordingRestartConfirmation(close: { [weak presentation] in
+                presentation?.hideRecordingPopover()
+            }, restart: { [weak self, weak presentation, weak recorder] in
+                presentation?.hideRecordingPopover()
+                Task {
+                    guard let self, let recorder, self.recorder === recorder else { return }
+                    annotations.clear()
+                    do { try await recorder.restart() }
+                    catch { self.errorMessage = error.localizedDescription }
+                }
+            }), size: CGSize(width: 280, height: 84))
+        }, stop: { [weak self] in
+            do { try await self?.stopRecording() }
+            catch { self?.errorMessage = error.localizedDescription }
+        }, reportError: { [weak self] error in
+            self?.errorMessage = error.localizedDescription
+        }, pauseChanged: { [weak presentation] paused in
+            presentation?.setOutlineColor(paused ? .systemOrange : .systemRed)
+        }))
+    }
+
+    private func clearRecordingOverlays() {
+        camera?.stop(); camera = nil
+        recordingAnnotations?.stop(); recordingAnnotations = nil
+    }
+
+    func stopRecording(showReview: Bool = true) async throws {
+        guard #available(macOS 15, *), let recorder = recorder as? CaptureRecorder, !stoppingRecording else { return }
         stoppingRecording = true
+        let presentation = recordingPresentation
+        let generation = captureGeneration
+        if showReview { presentation?.showSaving() } else { presentation?.close() }
         defer {
             self.recorder = nil; recordingStarted = nil; stoppingRecording = false
-            recordingPanel?.close(); recordingPanel = nil
-            camera?.stop(); camera = nil
-            recordingAnnotations?.stop(); recordingAnnotations = nil
+            if presentation?.playback == nil {
+                presentation?.close()
+                if recordingPresentation === presentation { recordingPresentation = nil }
+            }
+            clearRecordingOverlays()
         }
         let url = try await recorder.stop()
-        let record = CaptureRecord(id: UUID(uuidString: url.deletingPathExtension().lastPathComponent)!, date: Date(),
-                                   filename: url.lastPathComponent, width: 0, height: 0)
-        history.insert(record, at: 0); try saveIndex()
-        notice = recorder.errorMessage ?? "录屏已保存，可在历史中编辑或导出 MP4、GIF、WebP。"
-        exportRecording(record)
+        try completeRecording(url, warning: recorder.errorMessage,
+                              in: showReview && generation == captureGeneration ? presentation : nil)
     }
 
-    func accept(_ image: CGImage, at frame: CGRect? = nil) {
-        guard canUseFeatures() else { return }
+    /// Index the movie before presenting it. No review or export UI is created on
+    /// teardown, and a failed stop leaves no orphaned on-screen chrome.
+    func completeRecording(_ url: URL, warning: String?, in presentation: CaptureRecordingPresentation?) throws {
+        guard Self.safeFilename(url.lastPathComponent), url.pathExtension == "mp4",
+              let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent) else {
+            throw PluginError.invalid("录屏文件名无效。")
+        }
+        let record = CaptureRecord(id: id, date: Date(), filename: url.lastPathComponent, width: 0, height: 0)
+        try saveIndex([record] + history)
+        history.insert(record, at: 0)
+        notice = warning ?? "录屏已保存，可在历史中编辑或导出。"
+        guard canUseFeatures(), let presentation, !presentation.isClosed else { return }
+        presentRecording(record, in: presentation)
+    }
+
+    func accept(_ image: CGImage, at frame: CGRect? = nil, presentation: CaptureSelectionPresentation? = nil, editableExport:CaptureSelectionExport? = nil) {
+        guard canUseFeatures() else { presentation?.dismiss(); return }
         do {
             let record = try storeImage(image)
-            openEditor(image, record: record, frame: frame)
-        } catch { errorMessage = error.localizedDescription }
+            if let editableExport { try CaptureEditableArchive.save(base:editableExport.base,marks:editableExport.marks,for:url(record)) }
+            let editor = openEditor(image, record: record, frame: frame)
+            if let presentation {
+                let previousClose = editor.onClose
+                editor.onClose = { [weak presentation] in presentation?.dismiss(); previousClose?() }
+                presentation.beginHandoff(above: [editor.canvasPanel, editor.toolsPanel,editor.stylesPanel])
+            }
+        } catch { presentation?.dismiss(); errorMessage = error.localizedDescription }
     }
-    @discardableResult func storeImage(_ image: CGImage) throws -> CaptureRecord {
+    private func clipboardDocument(_ image: CGImage) -> CaptureDocument {
+        CaptureDocument(image: image, writeClipboard: { [weak self] data in
+            guard let self, let count = self.writePNGToPasteboard(data) else { return false }
+            self.didCopyPNG(data, count)
+            return true
+        })
+    }
+    func copyAndStore(_ image: CGImage) throws {
+        let document = clipboardDocument(image)
+        document.commit = { [weak self] image, encodedPNG in
+            guard let self else { throw CancellationError() }
+            try self.storeImage(image, encodedPNG: encodedPNG)
+        }
+        guard document.copy() else { throw PluginError.invalid(document.error ?? "无法复制截图。") }
+    }
+    @discardableResult func storeImage(_ image: CGImage, encodedPNG: Data? = nil) throws -> CaptureRecord {
         let id = UUID()
         let record = CaptureRecord(id: id, date: Date(), filename: id.uuidString + ".png", width: image.width, height: image.height)
-        try CaptureImage.png(image).write(to: directory.appendingPathComponent(record.filename), options: .atomic)
+        try (encodedPNG ?? CaptureImage.png(image)).write(to: directory.appendingPathComponent(record.filename), options: .atomic)
         history.insert(record, at: 0)
         try saveIndex()
         return record
     }
     func open(_ record: CaptureRecord) {
         guard canUseFeatures() else { return }
-        if record.isVideo { exportRecording(record); return }
+        if record.isVideo { openRecording(record); return }
         do { openEditor(try CaptureImage.load(url(record)), record: record) }
         catch { errorMessage = error.localizedDescription }
     }
@@ -438,16 +731,6 @@ struct CaptureRecord: Codable, Identifiable {
             do { self?.accept(try CaptureImage.load(url)) }
             catch { self?.errorMessage = error.localizedDescription }
         }
-    }
-    func pinClipboard() throws {
-        let files = NSPasteboard.general.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
-        if !files.isEmpty { for file in files { try pinFile(file) }; return }
-        if let image = NSImage(pasteboard: .general), let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            guard cg.width <= CaptureImage.maximumPixels / max(1, cg.height) else { throw PluginError.invalid("剪贴板图片过大。") }
-            try pinManager.create(cg)
-        } else if let text = NSPasteboard.general.string(forType: .string), !text.isEmpty {
-            try pinManager.createText(text, html: NSPasteboard.general.data(forType: .html))
-        } else { throw PluginError.invalid("剪贴板里没有图片、文字或文件。") }
     }
     static func textCard(_ text: String, file: URL? = nil) throws -> CGImage {
         let size = CGSize(width: 480, height: file == nil ? 320 : 160)
@@ -506,17 +789,118 @@ struct CaptureRecord: Codable, Identifiable {
         return true
     }
     func remove(_ record: CaptureRecord) {
+        guard history.contains(where: { $0.id == record.id && $0.filename == record.filename }) else { return }
+        guard openHistoryRecords[record.id] == nil else {
+            errorMessage = "请先关闭这条记录的编辑或录屏预览窗口。"
+            return
+        }
+        do { try trashHistory([record]) }
+        catch { errorMessage = error.localizedDescription }
+    }
+
+    var historyRetentionGraceEnds: Date? {
+        guard historyRetentionDays > 0,
+              let date = historyDefaults.object(forKey: CaptureHistoryRetention.rolloutKey) as? Date,
+              history.contains(where: { $0.date < date }) else { return nil }
+        return date.addingTimeInterval(Double(CaptureHistoryRetention.defaultDays) * CaptureHistoryRetention.secondsPerDay)
+    }
+
+    func setHistoryRetentionDays(_ days: Int) {
+        guard days == 0 || CaptureHistoryRetention.customDays.contains(days),
+              days != historyRetentionDays else { return }
+        historyDefaults.set(days, forKey: CaptureHistoryRetention.daysKey)
+        historyRetentionDays = days
+        historyCleanupWarning = nil
+        scheduleHistoryCleanup()
+    }
+
+    func setHistoryCleanupActive(_ active: Bool) {
+        guard active != historyCleanupActive else { return }
+        if active, historyDefaults.object(forKey: CaptureHistoryRetention.rolloutKey) as? Date == nil {
+            historyDefaults.set(Date(), forKey: CaptureHistoryRetention.rolloutKey)
+        }
+        historyCleanupActive = active
+        scheduleHistoryCleanup()
+    }
+
+    deinit { historyCleanupTask?.cancel() }
+
+    private func scheduleHistoryCleanup(retryDelay: TimeInterval = 0) {
+        historyCleanupTask?.cancel()
+        historyCleanupTask = nil
+        guard historyCleanupActive, canUseFeatures(), historyRetentionDays > 0,
+              let rollout = historyDefaults.object(forKey: CaptureHistoryRetention.rolloutKey) as? Date else { return }
+        let next = history.lazy
+            .filter { self.openHistoryRecords[$0.id] == nil }
+            .compactMap { CaptureHistoryRetention.deadline(for: $0, days: self.historyRetentionDays, rollout: rollout) }
+            .min()
+        guard let next else { return }
+        // One cancellable check; consult the wall clock after wake or a date change.
+        let delay = max(1, retryDelay, min(next.timeIntervalSinceNow, CaptureHistoryRetention.secondsPerDay))
+        historyCleanupTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            guard !Task.isCancelled, let self else { return }
+            self.historyCleanupTask = nil
+            self.runScheduledHistoryCleanup()
+        }
+    }
+
+    private func runScheduledHistoryCleanup() {
+        guard historyCleanupActive, canUseFeatures() else { return }
+        // Moving a small batch is synchronous on the owner so that editing
+        // cannot reopen or change a record between moving it and saving the index.
+        guard !shouldIgnoreCaptureRequest(.captureRegion), !stoppingRecording else {
+            scheduleHistoryCleanup(retryDelay: 60)
+            return
+        }
         do {
-            try CaptureEditableArchive.trash(for:url(record))
-            try FileManager.default.trashItem(at: url(record), resultingItemURL: nil)
-            history.removeAll { $0.id == record.id }
-            try saveIndex()
-            if record.isVideo {
-                for sidecar in recordingSidecars(for: url(record)) where FileManager.default.fileExists(atPath: sidecar.path) {
-                    try FileManager.default.trashItem(at: sidecar, resultingItemURL: nil)
-                }
+            try pruneExpiredHistory(at: Date())
+            historyCleanupWarning = nil
+            scheduleHistoryCleanup()
+        } catch {
+            historyCleanupWarning = "历史记录清理未完成。请检查废纸篓及磁盘空间；应用稍后会重试。"
+            scheduleHistoryCleanup(retryDelay: 3600)
+        }
+    }
+
+    func pruneExpiredHistory(at now: Date) throws {
+        guard historyCleanupActive, canUseFeatures(), historyRetentionDays > 0,
+              let rollout = historyDefaults.object(forKey: CaptureHistoryRetention.rolloutKey) as? Date else { return }
+        let expired = history.reversed().lazy.filter { record in
+            self.openHistoryRecords[record.id] == nil &&
+                CaptureHistoryRetention.deadline(for: record, days: self.historyRetentionDays, rollout: rollout)
+                    .map { $0 <= now } == true
+        }.prefix(CaptureHistoryRetention.batchSize)
+        if !expired.isEmpty { try trashHistory(Array(expired)) }
+    }
+
+    private func trashHistory(_ records: [CaptureRecord]) throws {
+        let ids = Set(records.map(\.id))
+        let kept = history.filter { !ids.contains($0.id) }
+        guard history.count - kept.count == records.count,
+              try directory.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else {
+            throw PluginError.invalid("历史索引或文件夹不匹配，未移动文件。")
+        }
+        let files = try records.flatMap { record in
+            guard record.filename == record.id.uuidString + (record.isVideo ? ".mp4" : ".png") else {
+                throw PluginError.invalid("历史文件名不匹配，未移动文件。")
             }
-        } catch { errorMessage = error.localizedDescription }
+            let file = url(record)
+            return record.isVideo ? [file] + recordingSidecars(for: file) : [file, CaptureEditableArchive.url(for: file)]
+        }
+        try CaptureHistoryRetention.moveToTrash(files, move: trashHistoryFile) { try saveIndex(kept) }
+        history = kept
+    }
+
+    private func beginUsingHistory(_ id: UUID) {
+        openHistoryRecords[id, default: 0] += 1
+        scheduleHistoryCleanup()
+    }
+
+    private func endUsingHistory(_ id: UUID) {
+        if let count = openHistoryRecords[id], count > 1 { openHistoryRecords[id] = count - 1 }
+        else { openHistoryRecords[id] = nil }
+        scheduleHistoryCleanup()
     }
 
     private func recordingSidecars(for movie: URL) -> [URL] {
@@ -541,17 +925,26 @@ struct CaptureRecord: Codable, Identifiable {
         } catch { errorMessage = error.localizedDescription }
     }
     func deactivate() {
+        setHistoryCleanupActive(false)
         globalMouse.stop()
         objectWillChange.send()
         service.cancel()
-        let scrolling = scrollSession; scrollSession = nil
-        Task { await scrolling?.preserveAndClose() }
         captureGeneration += 1; delayCancelled = true; delayPanel?.orderOut(nil)
+        if let scrolling = scrollSession {
+            scrolling.suspendPresentation()
+            Task { [weak self] in
+                if !(await scrolling.preserveAndClose()) {
+                    self?.errorMessage = "长截图暂存失败，结果仍在内存中。请检查磁盘空间后再退出。"
+                }
+            }
+        }
         Array(editors).forEach { $0.close() }
+        closeRecordingWindows()
         pinManager.deactivate()
-        if isRecording { Task { try? await stopRecording() } }
+        if isRecording { Task { try? await stopRecording(showReview: false) } }
     }
     @discardableResult func prepareForQuit() async -> Bool {
+        setHistoryCleanupActive(false)
         if let scrolling = scrollSession {
             guard await scrolling.preserveAndClose() else {
                 errorMessage = "长截图尚未保存，已取消退出。请先导出或检查磁盘空间后重试。"
@@ -562,9 +955,9 @@ struct CaptureRecord: Codable, Identifiable {
         globalMouse.stop()
         Array(editors).forEach { $0.close() }
         pinManager.saveNow(); captureGeneration += 1; delayCancelled = true
-        service.cancel()
+        service.cancel(); closeRecordingWindows()
         if isRecording {
-            do { try await stopRecording() }
+            do { try await stopRecording(showReview: false) }
             catch { errorMessage = error.localizedDescription; return false }
         }
         while stoppingRecording {
@@ -572,26 +965,27 @@ struct CaptureRecord: Codable, Identifiable {
         }
         return true
     }
-    private func openEditor(_ image: CGImage, record: CaptureRecord?, pinID: UUID? = nil, recognition: RecognitionTab? = nil, frame: CGRect? = nil) {
+    @discardableResult private func openEditor(_ image: CGImage, record: CaptureRecord?, pinID: UUID? = nil, recognition: RecognitionTab? = nil, frame: CGRect? = nil) -> CaptureFloatingEditor {
         if let pinID, let existing = editors.first(where: { $0.canvasPanel.identifier?.rawValue == pinID.uuidString }) {
-            existing.show(recognition: recognition); return
+            existing.show(recognition: recognition); return existing
         }
         let preferred = pinID.flatMap { pinManager.beginEditing($0) } ?? frame
-        let document = CaptureDocument(image: image)
+        let document = clipboardDocument(image)
         let archiveURL=record.map(url) ?? pinID.flatMap { pinManager.record($0).map(pinManager.url) }
         let transformedPin = pinID.flatMap { pinManager.record($0)?.adjustments }.map { $0 != CapturePinAdjustments() } ?? false
         if let archiveURL, !transformedPin {
             do { try CaptureEditableArchive.restore(document,for:archiveURL) }
             catch { document.error="无法恢复可编辑标注，已打开导出的图片："+error.localizedDescription }
         }
-        let editor = CaptureFloatingEditor(document: document, controller: self, preferredFrame: preferred)
+        let editor = CaptureFloatingEditor(document: document, controller: self, preferredFrame: preferred,
+                                           preservesPresentationFrame: frame != nil)
         if let pinID { editor.canvasPanel.identifier = NSUserInterfaceItemIdentifier(pinID.uuidString) }
-        document.commit = { [weak self, weak editor, weak document] image in
+        document.commit = { [weak self, weak editor, weak document] image, encodedPNG in
             guard let self else { return }
             if let pinID { try self.pinManager.updateImage(image, id: pinID, frame: editor?.imageFrame) }
             if let archiveURL,let document { try CaptureEditableArchive.save(document,for:archiveURL) }
             guard let record else { return }
-            try CaptureImage.png(image).write(to: self.url(record), options: .atomic)
+            try (encodedPNG ?? CaptureImage.png(image)).write(to: self.url(record), options: .atomic)
             if let index = self.history.firstIndex(where: { $0.id == record.id }) {
                 self.history[index].width = image.width; self.history[index].height = image.height
                 self.history[index].revision = UUID()
@@ -607,71 +1001,156 @@ struct CaptureRecord: Codable, Identifiable {
             }
         }
         editors.append(editor)
+        if let record { beginUsingHistory(record.id) }
         editor.onClose = { [weak self, weak editor] in
             if let pinID { self?.pinManager.endEditing(pinID) }
+            if let record { self?.endUsingHistory(record.id) }
             self?.editors.removeAll { $0 === editor }
         }
         editor.show(recognition: recognition)
+        return editor
     }
-    func exportRecording(_ record: CaptureRecord) {
-        let window = OwnedCaptureWindow(contentRect: CGRect(x: 100, y: 100, width: 820, height: 700),
-                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false; window.title = "录屏编辑"
-        window.contentView = NSHostingView(rootView: RecordingReviewView(url: url(record)))
-        exportWindows.removeAll { !$0.isVisible }; exportWindows.append(window)
-        window.onClose = { [weak self, weak window] in self?.exportWindows.removeAll { $0 === window } }
-        window.center(); window.makeKeyAndOrderFront(nil)
+    private func closeRecordingWindows() {
+        historyReviewTask?.cancel(); historyReviewTask = nil
+        recordingPresentation?.close(); recordingPresentation = nil
     }
-    private func saveIndex() throws {
-        try JSONEncoder().encode(history).write(to: directory.appendingPathComponent("history.json"), options: .atomic)
-    }
-}
 
-private final class CaptureRecordingPanel: NSPanel {
-    override var canBecomeKey: Bool { true }
-}
+    private func presentRecording(_ record: CaptureRecord, in presentation: CaptureRecordingPresentation) {
+        guard !presentation.isClosed else { return }
+        if recordingPresentation !== presentation { recordingPresentation?.close(); recordingPresentation = presentation }
+        recordingReviewID = record.id
+        beginUsingHistory(record.id)
+        presentation.onClose = { [weak self, weak presentation] in
+            guard let self else { return }
+            self.endUsingHistory(record.id)
+            if self.recordingPresentation === presentation {
+                self.recordingPresentation = nil
+                self.recordingReviewID = nil
+            }
+        }
+        presentation.showReview(url: url(record))
+    }
 
-private final class OwnedCaptureWindow: NSWindow {
-    var onClose: (() -> Void)?
-    override func close() {
-        super.close()
-        let callback = onClose
-        onClose = nil
-        callback?()
+    private func openRecording(_ record: CaptureRecord) {
+        if recordingReviewID == record.id, let presentation = recordingPresentation, !presentation.isClosed {
+            presentation.focusReview()
+            return
+        }
+        guard !busy, !isRecording else { return }
+        historyReviewTask?.cancel()
+        let url = url(record)
+        historyReviewTask = Task { [weak self] in
+            do {
+                let media = try await CaptureRecordingPlayback.Media.read(AVURLAsset(url: url))
+                try Task.checkCancellation()
+                guard let self, self.canUseFeatures(), !self.busy, !self.isRecording,
+                      self.history.contains(where: { $0.id == record.id && $0.filename == record.filename }),
+                      let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else { return }
+                let visible = screen.visibleFrame
+                let safe = visible.insetBy(dx: 18, dy: 62)
+                let native = CGSize(width: media.size.width / screen.backingScaleFactor,
+                                    height: media.size.height / screen.backingScaleFactor)
+                let factor = min(1, safe.width / native.width, safe.height / native.height, 900 / native.width)
+                let size = CGSize(width: native.width * factor, height: native.height * factor)
+                let region = CGRect(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2,
+                                    width: size.width, height: size.height)
+                let layout = CaptureRecordingLayout(region: region, screen: screen.frame, visible: visible, previousToolbar: nil)
+                let presentation = CaptureRecordingPresentation(layout: layout)
+                if let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
+                    presentation.watchDisplay(id, frame: screen.frame) { [weak presentation] in presentation?.close() }
+                }
+                self.presentRecording(record, in: presentation)
+            } catch {
+                if !Task.isCancelled { self?.errorMessage = error.localizedDescription }
+            }
+        }
+    }
+
+    private func saveIndex(_ records: [CaptureRecord]? = nil) throws {
+        try JSONEncoder().encode(records ?? history)
+            .write(to: directory.appendingPathComponent("history.json"), options: .atomic)
     }
 }
 
 @available(macOS 15, *)
 private struct RecordingControls: View {
-    @ObservedObject var controller: ScreenshotController
     @ObservedObject var recorder: CaptureRecorder
     @ObservedObject var annotations: CaptureRecordingAnnotations
-    @ViewState private var confirmsRestart = false
+    let showAnnotations: () -> Void
+    let confirmRestart: () -> Void
+    let stop: () async -> Void
+    let reportError: (Error) -> Void
+    let pauseChanged: (Bool) -> Void
+    @ViewState private var hint: String?
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "record.circle.fill").foregroundStyle(.red)
-            TimelineView(.periodic(from: .now, by: 1)) { _ in
-                Text(Duration.seconds(recorder.elapsedTime).formatted(.time(pattern: .minuteSecond))).monospacedDigit()
+        HStack(spacing: 8) {
+            Image(systemName: recorder.isPaused ? "pause.circle.fill" : "record.circle.fill")
+                .foregroundStyle(recorder.isPaused ? .orange : .red)
+                .accessibilityLabel(recorder.isPaused ? "录制已暂停" : "正在录制")
+            if recorder.isPaused { elapsedTime }
+            else { TimelineView(.periodic(from: .now, by: 1)) { _ in elapsedTime } }
+            if let hint {
+                Text(hint).foregroundStyle(.secondary).lineLimit(1).accessibilityHidden(true)
             }
-            RecordingAnnotationMenu(annotations: annotations)
-            Button(recorder.isPaused ? "继续" : "暂停") {
-                Task { do { if recorder.isPaused { try await recorder.resume() } else { try await recorder.pause() } }
-                    catch { controller.errorMessage = error.localizedDescription }
-                }
-            }.disabled(recorder.isTransitioning)
-            Button("重新录制") { confirmsRestart = true }
-                .disabled(recorder.isTransitioning)
-                .confirmationDialog("舍弃本次录制并重新开始？", isPresented: $confirmsRestart) {
-                    Button("重新录制", role: .destructive) {
-                        Task { annotations.clear(); do { try await recorder.restart() } catch { controller.errorMessage = error.localizedDescription } }
-                    }
-                }
-            Button("停止录制") {
+            Spacer(minLength: 0)
+            let annotationTitle = annotations.tool?.title ?? "录屏标注"
+            Button(action: showAnnotations) {
+                Image(systemName: annotations.tool?.symbol ?? "pencil.tip").frame(width: 28, height: 28)
+            }
+            .modifier(CaptureToolbarControl(hint: annotationTitle, selected: annotations.tool != nil, inlineHint: setHint))
+            .accessibilityLabel(annotationTitle)
+            let pauseTitle = recorder.isPaused ? "继续录制" : "暂停录制"
+            Button {
                 Task {
-                    do { try await controller.stopRecording() }
-                    catch { controller.errorMessage = error.localizedDescription }
+                    do { if recorder.isPaused { try await recorder.resume() } else { try await recorder.pause() } }
+                    catch { reportError(error) }
                 }
-            }.buttonStyle(.borderedProminent).disabled(recorder.isTransitioning)
-        }.padding(16)
+            } label: {
+                Image(systemName: recorder.isPaused ? "play.fill" : "pause.fill")
+                    .frame(width: 28, height: 28).contentShape(Rectangle())
+            }
+            .modifier(CaptureToolbarControl(hint: pauseTitle, inlineHint: setHint))
+            .accessibilityLabel(pauseTitle).disabled(recorder.isTransitioning)
+            Button(action: confirmRestart) {
+                Image(systemName: "arrow.counterclockwise").frame(width: 28, height: 28).contentShape(Rectangle())
+            }
+            .modifier(CaptureToolbarControl(hint: "重新录制…", inlineHint: setHint))
+            .accessibilityLabel("重新录制…").disabled(recorder.isTransitioning)
+            Button {
+                Task { await stop() }
+            } label: {
+                Label("停止录制", systemImage: "stop.fill")
+                    .padding(.horizontal, 8).frame(height: 28).contentShape(Rectangle())
+            }
+            .modifier(CaptureToolbarControl(hint: "停止录制，在原位预览", prominent: true, inlineHint: setHint))
+            .disabled(recorder.isTransitioning)
+        }
+        .modifier(CaptureRecordingBarStyle())
+        .onChange(of: recorder.isPaused) { _, paused in pauseChanged(paused) }
+    }
+
+    private func setHint(_ text: String?) { hint = text }
+
+    private var elapsedTime: some View {
+        Text(Duration.seconds(recorder.elapsedTime).formatted(.time(pattern: .minuteSecond)))
+            .monospacedDigit().fixedSize()
+    }
+}
+
+private struct RecordingRestartConfirmation: View {
+    let close: () -> Void
+    let restart: () -> Void
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 12) {
+            Text("舍弃本次录制并重新开始？").frame(maxWidth: .infinity, alignment: .leading)
+            HStack {
+                Button("取消", action: close).keyboardShortcut(.cancelAction)
+                Button("重新录制", role: .destructive, action: restart).buttonStyle(.bordered)
+            }
+        }
+        .font(.system(size: 12)).padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .modifier(CaptureToolbarSurface())
     }
 }

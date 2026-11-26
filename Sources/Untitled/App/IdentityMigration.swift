@@ -34,7 +34,8 @@ enum IdentityMigration {
         return PluginManifest(schemaVersion: value.schemaVersion, id: id, name: value.name, version: value.version,
                               summary: value.summary, author: value.author, repository: value.repository,
                               minimumHostVersion: value.minimumHostVersion, actions: value.actions,
-                              templates: value.templates, ui: value.ui, permissions: value.permissions, icon: value.icon, storefront: value.storefront)
+                              templates: value.templates, ui: value.ui, permissions: value.permissions, icon: value.icon, storefront: value.storefront,
+                              shortcutInputs: value.shortcutInputs)
     }
 
     /// Keep published URLs, versions and SHA-256 intact; only the installed identity changes.

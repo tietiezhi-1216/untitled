@@ -28,6 +28,7 @@ struct UntitledApp: App {
                 .environmentObject(store)
                 .onAppear { [store, appDelegate] in
                     appDelegate.prepareForQuit = { [weak store] in await store?.prepareForQuit() ?? true }
+                    appDelegate.showMainWindow = { [weak store] in store?.showMainWindow() }
                     guard !appDelegate.handledLaunchArguments else { return }
                     appDelegate.handledLaunchArguments = true
                     if store.installed.contains(where: { $0.isEnabled && $0.manifest.hasCaptureCapability }) { store.screenshots.pinManager.activate() }
@@ -60,7 +61,7 @@ struct UntitledApp: App {
         }
 
         Settings {
-            SettingsView(store: store)
+            SettingsView(permissions: store.permissions)
         }
 
         MenuBarExtra(HostInfo.name, systemImage: "scribble") {
@@ -71,11 +72,15 @@ struct UntitledApp: App {
 
 @MainActor final class CaptureAppDelegate: NSObject, NSApplicationDelegate {
     var prepareForQuit: (() async -> Bool)?
+    var showMainWindow: (() -> Void)?
     var handledLaunchArguments = false
     private var finishing = false
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // An internal input-focus request must never reopen the main panel.
-        !SharingNativeCursorFocus.capturingForInput
+        guard let showMainWindow else { return true }
+        // Other windows (such as Settings) can keep the default reopen behavior
+        // from restoring the main scene. Always target the same scene as the menu.
+        showMainWindow()
+        return false
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let prepareForQuit else { return .terminateNow }
@@ -101,6 +106,7 @@ private struct AppMenuView: View {
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
         SettingsLink { Text("设置…") }
+        shortcutsMenu
         Button("权限管理…") {
             store.permissions.settingsPage = .permissions
             store.permissions.refresh()
@@ -115,8 +121,41 @@ private struct AppMenuView: View {
         Button("退出 Untitled") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
     }
-}
 
+    private var shortcutsMenu: some View {
+        Menu("快捷键") {
+            Button(store.hotKeysPaused ? "恢复插件快捷键" : "暂停插件快捷键") {
+                store.setHotKeysPaused(!store.hotKeysPaused)
+            }
+            Button(store.priorityHotKeysEnabled ? "不再优先使用插件快捷键" : "优先使用插件快捷键…") {
+                if store.priorityHotKeysEnabled {
+                    store.setPriorityHotKeysEnabled(false)
+                } else {
+                    confirmPriorityShortcuts()
+                }
+            }
+            if store.shortcutRecoveryNeeded {
+                Divider()
+                if store.permissions.hasShortcutRoutingAccess() {
+                    Button("重试快捷键") { store.retryHotKeys() }
+                } else {
+                    Button("前往辅助功能授权…") { store.permissions.revealShortcutRoutingPermissions() }
+                }
+            }
+        }
+    }
+
+    private func confirmPriorityShortcuts() {
+        let alert = NSAlert()
+        alert.messageText = "优先使用插件快捷键？"
+        alert.informativeText = "快捷键冲突时，Untitled 会尝试优先执行插件操作，其他应用或系统可能收不到这个快捷键。此选项需要辅助功能权限。"
+        alert.addButton(withTitle: "开启")
+        alert.addButton(withTitle: "取消").keyEquivalent = "\u{1b}"
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        store.setPriorityHotKeysEnabled(true)
+    }
+}
 
 private struct PluginMenuContributions: View {
     @EnvironmentObject private var store: PluginStore

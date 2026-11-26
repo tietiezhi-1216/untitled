@@ -22,39 +22,66 @@ private struct PluginContentHasInsetsKey: EnvironmentKey {
     static let defaultValue = false
 }
 
+private struct PluginHeaderUsesIconsKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+private struct PluginTrailingScrollGutterKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
 extension EnvironmentValues {
+    var pluginTrailingScrollGutter: CGFloat {
+        get { self[PluginTrailingScrollGutterKey.self] }
+        set { self[PluginTrailingScrollGutterKey.self] = newValue }
+    }
+
+    var pluginHeaderUsesIcons: Bool {
+        get { self[PluginHeaderUsesIconsKey.self] }
+        set { self[PluginHeaderUsesIconsKey.self] = newValue }
+    }
+
     var pluginContentHasInsets: Bool {
         get { self[PluginContentHasInsetsKey.self] }
         set { self[PluginContentHasInsetsKey.self] = newValue }
     }
 }
 
-/// The host owns the content rectangle, including clipping. A provider's fixed
-/// size, offset or background cannot consume the surrounding workspace gutters.
+/// The host owns the content rectangle, including clipping. By default, providers
+/// cannot draw into the gutters. A native, single-component root can use a
+/// bounded trailing gutter for an overlay scroller, without moving its content.
 /// Nested tabs/inline layouts inherit the rectangle instead of adding margins again.
 struct PluginContentViewport<Content: View>: View {
     @Environment(\.pluginContentHasInsets) private var hasInsets
     let forceInsets: Bool
     let region: String
+    let usesTrailingScrollGutter: Bool
     let content: Content
 
-    init(forceInsets: Bool = false, region: String = "plugin.content", @ViewBuilder content: () -> Content) {
-        self.forceInsets = forceInsets; self.region = region; self.content = content()
+    init(forceInsets: Bool = false, region: String = "plugin.content", usesTrailingScrollGutter: Bool = false,
+         @ViewBuilder content: () -> Content) {
+        self.forceInsets = forceInsets
+        self.region = region
+        self.usesTrailingScrollGutter = usesTrailingScrollGutter
+        self.content = content()
     }
 
     var body: some View {
         let inset = forceInsets || !hasInsets
         let horizontal: CGFloat = inset ? PanelLayout.contentInset : 0
         let vertical: CGFloat = inset ? PanelLayout.contentVerticalInset : 0
+        let trailing = usesTrailingScrollGutter ? 0 : horizontal
         GeometryReader { geometry in
             content
                 .environment(\.pluginContentHasInsets, true)
-                .frame(width: max(0, geometry.size.width - 2 * horizontal),
+                .environment(\.pluginTrailingScrollGutter, horizontal - trailing)
+                .frame(width: max(0, geometry.size.width - horizontal - trailing),
                        height: max(0, geometry.size.height - 2 * vertical), alignment: .topLeading)
                 .contentShape(Rectangle())
                 .clipped()
                 .panelRegion("\(region).bounds")
-                .padding(.horizontal, horizontal)
+                .padding(.leading, horizontal)
+                .padding(.trailing, trailing)
                 .padding(.vertical, vertical)
         }
         .panelRegion("\(region).viewport")
@@ -80,7 +107,7 @@ struct PluginUILayoutView: View {
     var body: some View {
         VStack(spacing: 0) {
             if !items(.headerLeading).isEmpty || !items(.headerTrailing).isEmpty {
-                row(.headerLeading, .headerTrailing, spacing: 16)
+                heading
                     .panelRegion(root ? "panel.heading" : "plugin.panel.heading")
                     .padding(.horizontal, horizontalInset)
                     .padding(.vertical, 24)
@@ -94,7 +121,8 @@ struct PluginUILayoutView: View {
                     .padding(.bottom, 8)
                     .panelRegion(root ? "plugin.toolbar" : "plugin.panel.toolbar")
             }
-            PluginContentViewport(forceInsets: root, region: root ? "plugin.content" : "plugin.panel.content") {
+            PluginContentViewport(forceInsets: root, region: root ? "plugin.content" : "plugin.panel.content",
+                                  usesTrailingScrollGutter: usesTrailingScrollGutter) {
                 VStack(spacing: 0) {
                     if root, let panelID = navigation.inlinePanel {
                         HStack {
@@ -127,6 +155,44 @@ struct PluginUILayoutView: View {
         .panelRegion(root ? "plugin.workspace" : "plugin.panel")
     }
 
+    private var usesTrailingScrollGutter: Bool {
+        let content = items(.content)
+        guard root, navigation.inlinePanel == nil, content.count == 1,
+              content[0].kind == .component, let name = content[0].component else { return false }
+        return context.store.uiRegistry.components[name]?.usesTrailingScrollGutter == true
+    }
+
+    private var headerActions: [PluginUIItem] {
+        let trailing = items(.headerTrailing)
+        let more = trailing.filter { $0.component == "host.more" }
+        let hasManagement = !more.isEmpty || items(.headerLeading).contains { $0.component == "host.more" }
+        // Existing manifests may declare a separate switch next to More.
+        // Keep the same lifecycle action, without putting two controls in the header.
+        return trailing.filter {
+            $0.component != "host.more" && (!hasManagement || $0.component != "host.enabled")
+        } + more
+    }
+
+    @ViewBuilder private var heading: some View {
+        if root {
+            HStack(spacing: 16) {
+                ForEach(items(.headerLeading)) { PluginSlotItemView(item: $0, context: context) }
+                Spacer(minLength: 8)
+                if !headerActions.isEmpty {
+                    HStack(spacing: PanelLayout.headerActionSpacing) {
+                        ForEach(headerActions) {
+                            PluginSlotItemView(item: $0, context: context, headerAction: true)
+                        }
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    .panelRegion("plugin.header.actions")
+                }
+            }
+        } else {
+            row(.headerLeading, .headerTrailing, spacing: 16)
+        }
+    }
+
     private func row(_ leading: PluginUISlot, _ trailing: PluginUISlot, spacing: CGFloat) -> some View {
         HStack(spacing: spacing) {
             ForEach(items(leading)) { PluginSlotItemView(item: $0, context: context) }
@@ -141,6 +207,7 @@ struct PluginSlotItemView: View {
     let item: PluginUIItem
     let context: PluginUIContext
     var menuItem = false
+    var headerAction = false
 
     var body: some View {
         rendered.panelRegion("plugin.ui.\(item.id)")
@@ -148,16 +215,30 @@ struct PluginSlotItemView: View {
     private var rendered: AnyView {
         switch item.kind {
         case .component:
-            return store.uiRegistry.components[item.component ?? ""]?.makeView(context) ?? AnyView(EmptyView())
+            let view = store.uiRegistry.components[item.component ?? ""]?.makeView(context) ?? AnyView(EmptyView())
+            return AnyView(view.environment(\.pluginHeaderUsesIcons, headerAction))
         case .button:
-            return AnyView(PluginSlotButton(item: item, context: context, menuItem: menuItem))
+            return AnyView(PluginSlotButton(item: item, context: context, menuItem: menuItem, headerAction: headerAction))
         case .menu:
             let menu = Menu {
                 ForEach(item.items ?? []) { PluginSlotItemView(item: $0, context: context, menuItem: true) }
             } label: {
-                PluginItemLabel(title: item.title ?? "", symbol: item.symbol)
+                if headerAction {
+                    Image(systemName: item.symbol ?? "list.bullet")
+                } else {
+                    PluginItemLabel(title: item.title ?? "", symbol: item.symbol)
+                }
             }
             if menuItem { return AnyView(menu) }
+            if headerAction {
+                let title = item.title ?? "更多操作"
+                return AnyView(menu
+                    .menuStyle(.button)
+                    .menuIndicator(.hidden)
+                    .buttonStyle(PluginHeaderIconStyle(prominent: item.style == .prominent))
+                    .accessibilityLabel(title)
+                    .pluginHeaderHint(title))
+            }
             return AnyView(menu.panelGlassButton(prominent: item.style == .prominent).fixedSize())
         case .panel:
             return AnyView(PluginPanelContent(panelID: item.panel ?? "", context: context))
@@ -197,13 +278,15 @@ private struct PluginSlotButton: View {
     let item: PluginUIItem
     let context: PluginUIContext
     let menuItem: Bool
+    let headerAction: Bool
     @StateObject private var observation: PluginCommandObservation
     @ViewState private var showingPopover = false
 
-    init(item: PluginUIItem, context: PluginUIContext, menuItem: Bool) {
+    init(item: PluginUIItem, context: PluginUIContext, menuItem: Bool, headerAction: Bool) {
         self.item = item
         self.context = context
         self.menuItem = menuItem
+        self.headerAction = headerAction
         _observation = StateObject(wrappedValue: PluginCommandObservation(commandID: item.command, context: context))
     }
     private var state: PluginCommandPresentation? {
@@ -215,15 +298,19 @@ private struct PluginSlotButton: View {
         return item.panel.flatMap { context.interface?.panel($0)?.title } ?? state?.title ?? "插件操作"
     }
     var body: some View {
-        styledButton
+        let control = styledButton
             .disabled(item.command != nil && (store.installed.first { $0.id == context.pluginID }?.isEnabled != true || state?.isEnabled == false))
-            .help(accessibleTitle)
             .accessibilityLabel(accessibleTitle)
             .popover(isPresented: $showingPopover) {
                 if let panelID = item.panel {
                     PluginPanelSheet(panelID: panelID, context: context)
                 }
             }
+        if headerAction {
+            control.pluginHeaderHint(accessibleTitle)
+        } else {
+            control.help(accessibleTitle)
+        }
     }
     private var button: some View {
         Button {
@@ -241,12 +328,18 @@ private struct PluginSlotButton: View {
                 }
             }
         } label: {
-            PluginItemLabel(title: title, symbol: item.symbol ?? state?.symbol)
+            if headerAction {
+                Image(systemName: item.symbol ?? state?.symbol ?? (item.panel == nil ? "bolt" : "slider.horizontal.3"))
+            } else {
+                PluginItemLabel(title: title, symbol: item.symbol ?? state?.symbol)
+            }
         }
     }
     @ViewBuilder private var styledButton: some View {
         if menuItem {
             button
+        } else if headerAction {
+            button.buttonStyle(PluginHeaderIconStyle(prominent: item.style == .prominent))
         } else if item.style == .plain {
             button.buttonStyle(.plain).fixedSize()
         } else {
@@ -272,18 +365,32 @@ private struct PluginSlotTabs: View {
             set: { navigation.selectedTabs[item.id] = $0 })
     }
     var body: some View {
-        let ui = store.installed.first { $0.id == context.pluginID }.map { store.uiRegistry.interface(for: $0.manifest) }
-        VStack(spacing: 16) {
-            Picker(item.title ?? "插件页面", selection: selected) {
-                ForEach(item.panels ?? [], id: \.self) { id in
-                    Text(ui?.panel(id)?.title ?? id).tag(id)
+        VStack(spacing: item.style == .plain ? 12 : 16) {
+            if item.style == .plain {
+                ViewThatFits(in: .horizontal) {
+                    picker.fixedSize(horizontal: true, vertical: false)
+                    picker
                 }
-            }.pickerStyle(.segmented).labelsHidden()
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, hasInsets ? 0 : PanelLayout.contentInset)
-                .panelRegion("plugin.ui.\(item.id).tabs")
+            } else {
+                picker.padding(.horizontal, hasInsets ? 0 : PanelLayout.contentInset)
+            }
             PluginPanelContent(panelID: selected.wrappedValue, context: context)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var picker: some View {
+        let ui = store.installed.first { $0.id == context.pluginID }.map { store.uiRegistry.interface(for: $0.manifest) }
+        return Picker(item.title ?? "插件页面", selection: selected) {
+            ForEach(item.panels ?? [], id: \.self) { id in
+                Text(ui?.panel(id)?.title ?? id).tag(id)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .panelRegion("plugin.ui.\(item.id).tabs")
     }
 }
 

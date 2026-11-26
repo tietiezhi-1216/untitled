@@ -19,6 +19,9 @@ struct HostPluginUIProvider: PluginUIProvider {
         registry.component("host.commandHeading") { _ in AnyView(Text("操作").font(.headline)) }
         registry.component("host.addCommand") { context in AnyView(PluginAddCommandView(pluginID: context.pluginID)) }
         registry.component("host.commands") { context in AnyView(PluginDetailView(pluginID: context.pluginID)) }
+        registry.component("host.compactCommands") { context in
+            AnyView(PluginDetailView(pluginID: context.pluginID, compact: true))
+        }
         registry.component("host.commandStatus") { _ in
             AnyView(Text("关闭主窗口后快捷键仍然有效，退出应用后停止。").font(.caption).foregroundStyle(.secondary))
         }
@@ -41,6 +44,16 @@ private struct PluginIdentityView: View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text(plugin.map { store.presentation(for: $0.manifest).name } ?? "")
                 .font(.system(size: 22, weight: .semibold)).lineLimit(1)
+            if plugin?.isEnabled == false {
+                Text("已停用")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(.quaternary, in: Capsule())
+                    .fixedSize()
+                    .panelRegion("plugin.header.disabledStatus")
+            }
             Text(plugin?.manifest.author ?? "")
                 .font(.caption).foregroundStyle(.secondary).lineLimit(1)
         }

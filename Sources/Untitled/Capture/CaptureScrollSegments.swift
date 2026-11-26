@@ -22,6 +22,8 @@ enum CaptureScrollSegmentError:LocalizedError {
     var errorDescription:String? { "已回到封存分段边界。先暂停并返回最后成功画面，再继续沿原方向滚动；之前分段保持不变。" }
 }
 
+enum ScrollCaptureAppendResult { case appended, unchanged, unmatched }
+
 /// Only the active stitched raster is retained in memory. Closed segments are PNG files on disk.
 struct SegmentedScrollCapture {
     private(set) var stitcher:ImageStitcher
@@ -42,21 +44,30 @@ struct SegmentedScrollCapture {
         stitcher=ImageStitcher(image:image,axis:axis,pixelLimit:pixelLimit)
         self.directory=directory ?? Self.recoveryDirectory.appendingPathComponent(UUID().uuidString,isDirectory:true)
     }
-    mutating func append(_ next:CGImage,trimOnReverse:Bool=false) throws -> Bool {
-        guard next.width==stitcher.lastFrame.width,next.height==stitcher.lastFrame.height else { throw PluginError.invalid("截图区域的分辨率已变化，请重新开始。") }
-        guard let shift=ImageStitcher.displacement(stitcher.lastFrame,next,axis:axis),shift != 0 else { return false }
+    mutating func append(_ next: CGImage, trimOnReverse: Bool = false) throws -> Bool {
+        try appendFrame(next, trimOnReverse: trimOnReverse) == .appended
+    }
+
+    mutating func appendFrame(_ next: CGImage, trimOnReverse: Bool = false) throws -> ScrollCaptureAppendResult {
+        guard next.width == stitcher.lastFrame.width, next.height == stitcher.lastFrame.height else {
+            throw PluginError.invalid("截图区域的分辨率已变化，请重新开始。")
+        }
+        guard let alignment = CaptureScrollMatcher.align(stitcher.lastFrame, next, axis: axis) else { return .unmatched }
+        guard alignment.shift != 0 else { return .unchanged }
+        let shift = alignment.shift
         let frameOffset=axis == .vertical ? Int(viewport.minY):Int(viewport.minX)
         let nextOrigin=origin+frameOffset+shift
         if let boundary,(direction>0 && nextOrigin<boundary || direction<0 && nextOrigin>boundary) { throw CaptureScrollSegmentError.sealedBoundary }
         var trial=stitcher
         do {
-            let changed=try trial.append(next,trimOnReverse:trimOnReverse)
-            origin += trial.imageOrigin-stitcher.imageOrigin;stitcher=trial;return changed
+            _ = try trial.append(next, alignment: alignment, trimOnReverse: trimOnReverse)
+            origin += trial.imageOrigin - stitcher.imageOrigin; stitcher = trial
+            return .appended
         } catch ImageStitcherCapacity.exceeded {
             // The whole previous viewport is kept as overlap whenever two frames fit in the budget.
             var following=ImageStitcher(image:stitcher.lastFrame,axis:axis,pixelLimit:stitcher.pixelLimit)
             var followingOrigin=origin+frameOffset
-            do { _ = try following.append(next);followingOrigin += following.imageOrigin }
+            do { _ = try following.append(next, alignment: alignment); followingOrigin += following.imageOrigin }
             catch ImageStitcherCapacity.exceeded {
                 // A huge viewport may itself consume most of the budget. Matching already proves
                 // that the two full frames overlap, so retain the next frame without allocating both.
@@ -73,7 +84,7 @@ struct SegmentedScrollCapture {
             try writeIndex(segments+[descriptor,active],direction:nextDirection,active:true)
             segments.append(descriptor);direction=nextDirection;boundary=origin+frameOffset
             origin=followingOrigin;stitcher=following
-            return true
+            return .appended
         }
     }
     func croppedImage(start:Double=0,end:Double=1) -> (CGImage,Int) {

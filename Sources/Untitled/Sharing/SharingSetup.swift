@@ -30,12 +30,7 @@ struct SharingSetupProfile: Decodable {
     private var timer: Timer?
     private var phase = "awaiting-confirmation"
     private var setupError = ""
-    private var peerHost: String?
-    private var peerPort = String(SharingTransport.defaultPort)
     private var peerName = ""
-    private var lastAttempt = Date.distantPast
-    private var connectDeadline = Date.distantPast
-    private var hasConnected = false
 
     static func readProfile(_ url: URL, caches: URL) throws -> SharingSetupProfile {
         let root = caches.appendingPathComponent("com.untitled.app/SharingSetup", isDirectory: true).standardizedFileURL
@@ -65,7 +60,7 @@ struct SharingSetupProfile: Decodable {
         self.store = store
         directory = profileURL.deletingLastPathComponent()
         controller = store.peripheralSharing(for: PeripheralSharingController.pluginID)
-        peerName = profile.peerName; peerHost = profile.peerHost; peerPort = profile.peerPort ?? peerPort
+        peerName = profile.peerName
         try report()
     }
     func confirmAndStart(profileURL: URL) throws {
@@ -83,17 +78,18 @@ struct SharingSetupProfile: Decodable {
             throw PluginError.invalid("请先安装键鼠共享插件。")
         }
         try SharingPairingKey.save(profile.pairingKey)
+        controller.stopUserSession()
+        controller.forgetReconnectRoute()
         store.setEnabled(true, pluginID: PeripheralSharingController.pluginID)
         controller.edge = profile.edge
         UserDefaults.standard.set(profile.peerName, forKey: "sharing.lastPeerName")
         UserDefaults.standard.set(true, forKey: "sharing.inputDesired")
         UserDefaults.standard.set(profile.peerHost ?? "", forKey: "sharing.lastPeerHost")
-        UserDefaults.standard.set(peerPort, forKey: "sharing.lastPeerPort")
+        UserDefaults.standard.set(profile.peerPort ?? String(SharingTransport.defaultPort), forKey: "sharing.lastPeerPort")
         store.requestedPluginID = PeripheralSharingController.pluginID
         phase = "starting"
         do { try controller.startUserSession() }
         catch { setupError = error.localizedDescription; store.handleExecutionError(error) }
-        connectDeadline = Date().addingTimeInterval(120)
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -101,16 +97,11 @@ struct SharingSetupProfile: Decodable {
     }
     func stopReporting() { timer?.invalidate(); timer = nil }
     private func tick() {
-        if controller.peerName != nil { hasConnected = true; phase = controller.keyboardMouseEnabled ? "ready" : "connected-needs-input-permission" }
-        else if controller.isRunning { phase = "waiting-for-peer" }
+        if controller.peerName != nil {
+            phase = controller.inputRecovering ? "connected-recovering-input"
+                : (controller.keyboardMouseEnabled ? "ready" : "connected-needs-input-permission")
+        } else if controller.isRunning { phase = "waiting-for-peer" }
         else { phase = "stopped" }
-        // Only one side dials, and only during this explicitly requested startup.
-        // Never resume automatically after sleep/lock/disconnect.
-        if !hasConnected, controller.isRunning, controller.transport.port != nil,
-           let peerHost, !peerHost.isEmpty, Date() < connectDeadline, Date().timeIntervalSince(lastAttempt) > 4 {
-            lastAttempt = Date()
-            do { try controller.connect(host: peerHost, port: peerPort) } catch { /* Native status explains waiting/failure. */ }
-        }
         try? report()
     }
     private func report() throws {

@@ -103,7 +103,7 @@ struct PluginTests {
         #expect(throws: PluginError.self) { try ActionKind.openURL.validateTarget("file:///etc/passwd") }
         #expect(throws: PluginError.self) { try ActionKind.openURL.validateTarget("javascript:alert(1)") }
         #expect(throws: PluginError.self) { try ActionKind.openApplication.validateTarget("/bin/sh") }
-        #expect(throws: PluginError.self) { try HotKey(keyCode: 0, modifiers: UInt32(shiftKey), key: "A").validate() }
+        #expect(throws: PluginError.self) { try HotKey(keyCode: 128, modifiers: 0, key: "A").validate() }
         try ActionKind.openURL.validateTarget("https://example.com")
     }
 
@@ -128,6 +128,127 @@ struct PluginTests {
         #expect(command.title == "显示主面板")
         command.target = ""
         try command.validate(allowedActions: [.showMainWindow])
+    }
+
+    @Test func shortcutWireFormatSeparatesKeyboardFromMouseAndRetainsOldIdentities() throws {
+        let old = try JSONDecoder().decode(HotKey.self, from: Data(#"{"keyCode":3,"modifiers":0,"key":"F"}"#.utf8))
+        let mouse = HotKey(mouseButton: 3)
+        try old.validate(); try mouse.validate()
+        #expect(old.identity == "3:0" && old.identity != mouse.identity)
+        #expect(old.display == "F" && mouse.display == "鼠标侧键 1")
+        let modified = HotKey(mouseButton: 4, modifiers: UInt32(shiftKey))
+        try modified.validate()
+        #expect(modified.display == "⇧鼠标侧键 2")
+        try HotKey(keyCode: 0, modifiers: UInt32(shiftKey), key: "A").validate()
+        let bytes = try JSONEncoder().encode(mouse)
+        let fields = try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Int])
+        #expect(fields == ["mouseButton": 3, "modifiers": 0])
+        #expect(try JSONDecoder().decode(HotKey.self, from: bytes) == mouse)
+        for json in [#"{"keyCode":3,"key":"F","mouseButton":3,"modifiers":0}"#, #"{"modifiers":0}"#,
+                     #"{"mouseButton":2,"modifiers":0}"#, #"{"mouseButton":32,"modifiers":0}"#, #"{"mouseButton":3,"modifiers":1}"#] {
+            #expect(throws: PluginError.self) { try JSONDecoder().decode(HotKey.self, from: Data(json.utf8)).validate() }
+        }
+    }
+
+    @Test @MainActor func pluginSelectsShortcutTypesWithoutErasingAnExistingUserBinding() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let ordinary = HotKeyManager.Driver(register: { _, _ in {} })
+        let store = PluginStore(directory: dir, ordinaryHotKeyDriver: ordinary)
+        var plugin = PluginManifest(schemaVersion: 2, id: "com.example.allowed-bindings", name: "Test", version: "1.0.0",
+            summary: "", author: "Test", repository: HostInfo.repository, minimumHostVersion: "0.13.29",
+            actions: [.showMainWindow], templates: [], ui: PluginUIRegistry.legacyCommands, permissions: [])
+        try store.installManifest(plugin)
+        let command = PluginCommand(action: .showMainWindow, hotKey: .init(keyCode: 0, modifiers: 0, key: "A"))
+        try store.saveCommand(command, pluginID: plugin.id)
+        plugin.shortcutInputs = [.keyCombination]
+        try store.installManifest(plugin)
+        #expect(store.installed.first?.commands == [command] && store.hotKeyErrors[command.id] != nil)
+        let reopened = PluginStore(directory: dir, ordinaryHotKeyDriver: ordinary)
+        #expect(reopened.installed.first?.commands == [command] && reopened.hotKeyErrors[command.id] != nil)
+        #expect(throws: PluginError.self) { try reopened.saveCommand(command, pluginID: plugin.id) }
+        var cleared = command; cleared.hotKey = nil
+        try reopened.saveCommand(cleared, pluginID: plugin.id)
+        #expect(reopened.hotKeyErrors.isEmpty)
+    }
+
+    @Test @MainActor func recorderCapturesSingleKeyAndSideButtonOnMatchingRelease() throws {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 200, height: 60), styleMask: [.titled], backing: .buffered, defer: true)
+        let recorder = ShortcutRecorder.RecorderButton()
+        window.contentView = recorder
+        defer { recorder.stopRecording(); window.orderOut(nil) }
+        var recorded: [HotKey] = []; recorder.onRecord = { recorded.append($0) }
+        func side(_ type: CGEventType, _ code: Int64) throws -> NSEvent {
+            let e = try #require(CGEvent(source: nil)); e.type = type; e.flags = []
+            e.setIntegerValueField(.mouseEventButtonNumber, value: code)
+            return try #require(NSEvent(cgEvent: e))
+        }
+        func f8(_ down: Bool) throws -> NSEvent {
+            let e = try #require(CGEvent(keyboardEventSource: nil, virtualKey: UInt16(kVK_F8), keyDown: down)); e.flags = []
+            return try #require(NSEvent(cgEvent: e))
+        }
+        recorder.startRecording()
+        #expect(recorder.consume(try f8(true)) && HotKeyRecordingSession.isRecording)
+        #expect(recorded.isEmpty)
+        #expect(recorder.consume(try f8(false)))
+        #expect(recorded == [.init(keyCode: UInt32(kVK_F8), modifiers: 0, key: "F8")] && !HotKeyRecordingSession.isRecording)
+        recorder.startRecording()
+        #expect(!recorder.consume(try side(.otherMouseDown, 2)))
+        #expect(recorder.consume(try side(.otherMouseDown, 4)))
+        #expect(recorder.consume(try side(.otherMouseUp, 3)) && recorded.count == 1)
+        #expect(recorder.consume(try side(.otherMouseUp, 4)))
+        #expect(recorded.last == .init(mouseButton: 4) && !HotKeyRecordingSession.isRecording)
+        recorder.allowedInputs = [.keyCombination]
+        recorder.startRecording(); _ = recorder.consume(try f8(true)); _ = recorder.consume(try f8(false))
+        #expect(recorded.count == 2 && HotKeyRecordingSession.isRecording)
+        func right(_ down: Bool) throws -> NSEvent {
+            let e = try #require(CGEvent(keyboardEventSource: nil, virtualKey: 54, keyDown: down))
+            e.type = .flagsChanged; e.flags = down ? [.maskCommand, .init(rawValue: 16)] : []
+            return try #require(NSEvent(cgEvent: e))
+        }
+        _ = recorder.consume(try right(true)); _ = recorder.consume(try right(false))
+        #expect(recorded.count == 2 && HotKeyRecordingSession.isRecording) // Disallowed by plugin.
+        recorder.allowedInputs = ShortcutInputKind.all
+        _ = recorder.consume(try right(true)); #expect(recorded.count == 2)
+        _ = recorder.consume(try right(false))
+        #expect(recorded.last == .rightCommand && !HotKeyRecordingSession.isRecording)
+        recorder.startRecording()
+        _ = recorder.consume(try right(true))
+        let c = try #require(CGEvent(keyboardEventSource: nil, virtualKey: 8, keyDown: true)); c.flags = [.maskCommand]
+        _ = recorder.consume(try #require(NSEvent(cgEvent: c))); _ = recorder.consume(try right(false))
+        c.type = .keyUp; _ = recorder.consume(try #require(NSEvent(cgEvent: c)))
+        #expect(recorded.last?.identity == "8:256" && recorded.count == 4 && !HotKeyRecordingSession.isRecording)
+        recorder.stopRecording()
+
+        recorder.allowedInputs = ShortcutInputKind.all
+        recorder.startRecording()
+        func rightControl(_ down: Bool) throws -> NSEvent {
+            let e = try #require(CGEvent(keyboardEventSource: nil, virtualKey: UInt16(kVK_RightControl), keyDown: down))
+            e.type = .flagsChanged; e.flags = down ? [.maskControl] : []
+            return try #require(NSEvent(cgEvent: e))
+        }
+        _ = recorder.consume(try rightControl(true)); _ = recorder.consume(try rightControl(false))
+        #expect(recorded.last == .rightControl && !HotKeyRecordingSession.isRecording)
+
+        recorder.startRecording()
+        _ = recorder.consume(try rightControl(true))
+        let controlC = try #require(CGEvent(keyboardEventSource: nil, virtualKey: 8, keyDown: true))
+        controlC.type = .keyDown; controlC.flags = [.maskControl]
+        _ = recorder.consume(try #require(NSEvent(cgEvent: controlC)))
+        controlC.type = .keyUp; _ = recorder.consume(try #require(NSEvent(cgEvent: controlC)))
+        _ = recorder.consume(try rightControl(false))
+        #expect(recorded.last?.identity == "8:4096" && !HotKeyRecordingSession.isRecording)
+
+        recorder.startRecording()
+        func draggedSide(_ type: CGEventType) throws -> NSEvent {
+            let e = try #require(CGEvent(source: nil)); e.type = type; e.flags = []
+            e.setIntegerValueField(.mouseEventButtonNumber, value: 5)
+            return try #require(NSEvent(cgEvent: e))
+        }
+        _ = recorder.consume(try draggedSide(.otherMouseDragged))
+        _ = recorder.consume(try draggedSide(.otherMouseUp))
+        #expect(recorded.last == .init(mouseButton: 5) && !HotKeyRecordingSession.isRecording)
     }
 
     @Test func legacyNamesAreIgnoredWithoutChangingBindings() throws {
@@ -303,7 +424,7 @@ struct PluginTests {
                     let heading = try #require(frames["panel.heading"])
                     let title = try #require(frames["panel.title"])
                     let icon = try #require(frames["plugin.header.icon"])
-                    let enabled = try #require(frames["plugin.header.enabled"])
+                    let actions = try #require(frames["plugin.header.actions"])
                     let more = try #require(frames["plugin.header.more"])
                     let info = try #require(frames["plugin.header.info"])
                     let settings = try #require(frames["panel.settings"])
@@ -323,18 +444,21 @@ struct PluginTests {
                     #expect(icon.maxX + 15 <= title.minX)
                     #expect(frames["plugin.summary"] == nil)
                     #expect(header.height <= 100)
-                    #expect(heading.contains(enabled))
-                    #expect(heading.contains(more))
-                    #expect(heading.contains(info))
+                    #expect(frames["plugin.header.enabled"] == nil)
+                    #expect(heading.contains(actions))
+                    #expect(actions.contains(more))
+                    #expect(actions.contains(info))
                     #expect(sidebar.contains(settings))
-                    #expect(enabled.maxX + 15 <= more.minX)
-                    #expect(more.maxX + 15 <= info.minX)
+                    #expect(abs(more.minX - info.maxX - PanelLayout.headerActionSpacing) < 1)
+                    #expect(abs(more.midY - info.midY) < 1)
                     #expect(settings.minY > navigation.maxY)
-                    #expect(abs(more.width - 28) < 1)
-                    #expect(abs(more.height - 28) < 1)
+                    for button in [more, info] {
+                        #expect(abs(button.width - PanelLayout.headerActionSize) < 1)
+                        #expect(abs(button.height - PanelLayout.headerActionSize) < 1)
+                    }
                     #expect(header.maxY <= toolbar.minY + 1)
                     #expect(toolbar.maxY <= row.minY + 1)
-                    for region in [sidebar, controls, navigation, header, heading, title, icon, enabled, more, info, settings, toolbar, row] {
+                    for region in [sidebar, controls, navigation, header, heading, title, icon, actions, more, info, settings, toolbar, row] {
                         #expect(bounds.contains(region))
                     }
                     #expect(window.styleMask.contains(.fullSizeContentView))

@@ -3,20 +3,21 @@ import Carbon
 import Combine
 import SwiftUI
 
-enum CaptureShortcutScope { case editor, pin }
+enum CaptureShortcutScope { case selection, editor, pin }
 
 enum CaptureShortcutAction: String, CaseIterable, Identifiable {
     case close, copy, copyAndClose, save, quickSave, printImage, undo, redo, clearMarks, pin
     case ocr, translation, document, table, formula, rectangle, line, arrow, number, pen, highlight
     case mosaic, text, erase, spotlight, magnify, watermark, autoMosaic, selectMarks, hideToolbar, copyColor
-    case pinLock, pinTop, pinShadow, pinNext, pinOthers, pinGroup, pinAnnotate
+    case pinLock, pinTop, pinShadow, pinNext, pinOthers, pinAnnotate
     case moveUp, moveDown, moveLeft, moveRight
+    case scrollSelection, recordSelection
     var id: String { rawValue }
     var title: String {
         switch self {
         case .close: "关闭"
         case .copy: "复制图像"
-        case .copyAndClose: "完成并复制"
+        case .copyAndClose: "复制并关闭"
         case .save: "保存到文件"
         case .quickSave: "快速保存"
         case .printImage: "打印"
@@ -50,20 +51,22 @@ enum CaptureShortcutAction: String, CaseIterable, Identifiable {
         case .pinShadow: "贴图阴影"
         case .pinNext: "切换到下一张贴图"
         case .pinOthers: "隐藏 / 显示其他贴图"
-        case .pinGroup: "移动到新贴图组"
         case .pinAnnotate: "编辑 / 标注贴图"
         case .moveUp: "贴图向上微移"
         case .moveDown: "贴图向下微移"
         case .moveLeft: "贴图向左微移"
         case .moveRight: "贴图向右微移"
+        case .scrollSelection: "选区长截图"
+        case .recordSelection: "选区录屏"
         }
     }
     var scopes: [CaptureShortcutScope] {
         switch self {
-        case .close, .copy, .save, .quickSave, .printImage, .ocr, .translation, .document, .table, .formula: [.editor, .pin]
-        case .pinLock, .pinTop, .pinShadow, .pinNext, .pinOthers, .pinGroup, .pinAnnotate,
+        case .close, .copy, .save, .quickSave, .printImage, .ocr, .translation, .document, .table, .formula: [.selection, .editor, .pin]
+        case .pinLock, .pinTop, .pinShadow, .pinNext, .pinOthers, .pinAnnotate,
              .moveUp, .moveDown, .moveLeft, .moveRight: [.pin]
-        default: [.editor]
+        case .scrollSelection, .recordSelection: [.selection]
+        default: [.selection, .editor]
         }
     }
     var defaultKey: HotKey {
@@ -105,11 +108,12 @@ enum CaptureShortcutAction: String, CaseIterable, Identifiable {
         case .pinShadow: (16, 0, "Y")
         case .pinNext: (48, 0, "⇥")
         case .pinOthers: (9, 0, "V")
-        case .pinGroup: (5, 0, "G")
         case .moveUp: (126, 0, "↑")
         case .moveDown: (125, 0, "↓")
         case .moveLeft: (123, 0, "←")
         case .moveRight: (124, 0, "→")
+        case .scrollSelection: (37, 0, "L")
+        case .recordSelection: (5, 0, "G")
         }
         return HotKey(keyCode: values.0, modifiers: values.1, key: values.2)
     }
@@ -144,11 +148,16 @@ enum CaptureShortcutAction: String, CaseIterable, Identifiable {
     }
     func binding(_ action: CaptureShortcutAction) -> HotKey? {
         if let override = overrides[action.rawValue] { return override.key }
-        return action.defaultKey
+        let key = action.defaultKey
+        // New defaults must not take over a key that was already customized.
+        if action.scopes == [.selection], CaptureShortcutAction.allCases.contains(where: {
+            $0 != action && $0.scopes.contains(.selection) && overrides[$0.rawValue]?.key?.identity == key.identity
+        }) { return nil }
+        return key
     }
     func set(_ key: HotKey?, for action: CaptureShortcutAction) throws {
         if let key {
-            try key.validateLocal()
+            try key.validate(allowedInputs: ShortcutInputKind.keyboard)
             if let other = CaptureShortcutAction.allCases.first(where: {
                 $0 != action && $0.scopes.contains(where: action.scopes.contains) && binding($0)?.identity == key.identity
             }) { throw PluginError.invalid("\(key.display) 已用于「\(other.title)」。") }
@@ -233,6 +242,60 @@ struct CaptureInputWindowFocus: NSViewRepresentable {
     }
 }
 
+struct CaptureGlobalShortcutSettingsView: View {
+    @EnvironmentObject private var store: PluginStore
+    let pluginID: String
+    @ViewState private var error: String?
+
+    var body: some View {
+        Form {
+            Section {
+                if let plugin = store.installed.first(where: { $0.id == pluginID }) {
+                    ForEach(plugin.manifest.templates.filter { CaptureShortcutProfile.actions.contains($0.action) }) { template in
+                        let command = plugin.commands.first { $0.templateID == template.id }
+                        LabeledContent {
+                            ShortcutRecorder(hotKey: Binding(get: { command?.hotKey }, set: { set($0, for: template) }),
+                                             error: $error, allowedInputs: plugin.manifest.allowedShortcutInputs)
+                                .frame(width: 165, height: 26)
+                                .disabled(!plugin.isEnabled)
+                                .accessibilityLabel("修改\(template.title)快捷键")
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(template.title)
+                                if let id = command?.id, let message = store.hotKeyErrors[id] {
+                                    Text(message).font(.caption).foregroundStyle(.red)
+                                }
+                            }
+                        }
+                        .panelRegion("capture.settings.shortcut.\(template.id)")
+                    }
+                    if let error { Text(error).font(.caption).foregroundStyle(.red) }
+                    Button("恢复默认快捷键") {
+                        do { try store.restoreDefaultCommands(pluginID: pluginID); error = nil }
+                        catch { self.error = error.localizedDescription }
+                    }
+                    .disabled(!plugin.isEnabled)
+                }
+            } footer: {
+                Text("先框选，再按贴图快捷键。没有选区时不会贴图。恢复贴图按关闭时间从近到远逐张恢复。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .panelRegion("capture.settings.shortcuts")
+    }
+
+    private func set(_ key: HotKey?, for template: CommandTemplate) {
+        guard let plugin = store.installed.first(where: { $0.id == pluginID }) else { return }
+        var command = plugin.commands.first(where: { $0.templateID == template.id })
+            ?? PluginCommand(action: template.action, templateID: template.id)
+        command.hotKey = key
+        command.isEnabled = true
+        do { try store.saveCommand(command, pluginID: pluginID); error = nil }
+        catch { self.error = error.localizedDescription }
+    }
+}
+
 struct CaptureLocalShortcutSettingsView: View {
     @ObservedObject private var settings = CaptureShortcutSettings.shared
     @ViewState private var error: String?
@@ -243,12 +306,12 @@ struct CaptureLocalShortcutSettingsView: View {
                 Spacer()
                 Button("恢复 PixPin 默认") { settings.restoreDefaults(); error = nil }
             }
-            Text("仅在截图编辑或贴图窗口生效；输入文字时保留正常编辑按键。").font(.caption).foregroundStyle(.secondary)
+            Text("仅在截图选区、编辑或贴图窗口生效；输入文字时保留正常编辑按键。").font(.caption).foregroundStyle(.secondary)
             ForEach(CaptureShortcutAction.allCases) { action in
                 LabeledContent(action.title) {
                     ShortcutRecorder(hotKey: Binding(get: { settings.binding(action) }, set: { key in
                         do { try settings.set(key, for: action); error = nil } catch { self.error = error.localizedDescription }
-                    }), error: $error, allowsUnmodified: true).frame(width: 165, height: 26)
+                    }), error: $error, allowedInputs: ShortcutInputKind.keyboard).frame(width: 165, height: 26)
                     Button("清除") { try? settings.set(nil, for: action) }.disabled(settings.binding(action) == nil)
                 }
             }

@@ -53,10 +53,26 @@ struct HostPermissionDescriptor: Identifiable {
 enum HostSettingsPage: String, CaseIterable { case general, permissions }
 
 struct HostPermissionRequest: Identifiable, Equatable {
-    let pluginID: String
-    let pluginName: String
+    enum Source: Equatable { case plugin(id: String, name: String), hostShortcutRouting }
+    let source: Source
     let permissions: Set<HostPermissionID>
-    var id: String { pluginID }
+    var pluginID: String? {
+        if case .plugin(let id, _) = source { return id }
+        return nil
+    }
+    var name: String {
+        switch source {
+        case .plugin(_, let name): name
+        case .hostShortcutRouting: "全局快捷键"
+        }
+    }
+    var id: String { pluginID ?? "host.shortcutRouting" }
+    init(pluginID: String, pluginName: String, permissions: Set<HostPermissionID>) {
+        source = .plugin(id: pluginID, name: pluginName); self.permissions = permissions
+    }
+    init(hostShortcutRouting permissions: Set<HostPermissionID>) {
+        source = .hostShortcutRouting; self.permissions = permissions
+    }
 }
 
 enum HostPermissionError: LocalizedError {
@@ -128,6 +144,11 @@ enum HostPermissionError: LocalizedError {
         reveal()
         throw HostPermissionError.missing
     }
+    /// Optional capabilities must not present permission management or steal the user's
+    /// insertion focus. Check the live driver, declaration and plugin state without prompting.
+    func isAuthorized(_ id: HostPermissionID, for plugin: InstalledPlugin) -> Bool {
+        plugin.isEnabled && declarations(for: plugin.manifest).contains { $0.id == id } && byID[id]?.status() == .authorized
+    }
     func request(_ id: HostPermissionID) async {
         guard requesting == nil, let driver = byID[id] else { return }
         refresh()
@@ -140,9 +161,27 @@ enum HostPermissionError: LocalizedError {
         messages[id] = status(id) == .authorized ? nil : "请在系统隐私设置中允许 \(HostInfo.name)；部分权限更改后需要重新启动应用。"
     }
     func openSettings(_ id: HostPermissionID) { byID[id]?.openSettings() }
+
+    static let shortcutRoutingPermissions: Set<HostPermissionID> = [.accessibility]
+
+    /// This grant is for the host's explicit shortcut-routing mode, not plugin input access.
+    /// Query without publishing from a tap callback; plugins still use declaration-checked require.
+    func hasShortcutRoutingAccess() -> Bool {
+        Self.shortcutRoutingPermissions.allSatisfy { byID[$0]?.status() == .authorized }
+    }
+    func revealShortcutRoutingPermissions() {
+        refresh(Self.shortcutRoutingPermissions)
+        pendingRequest = .init(hostShortcutRouting: Self.shortcutRoutingPermissions)
+        reveal()
+    }
 }
 
 /// A plugin receives this client from the host; it cannot manufacture an OS grant.
 @MainActor struct PluginPermissionClient {
+    let isAuthorized: (HostPermissionID) -> Bool
     let require: (Set<HostPermissionID>) throws -> Void
+    init(isAuthorized: @escaping (HostPermissionID) -> Bool = { _ in false },
+         require: @escaping (Set<HostPermissionID>) throws -> Void) {
+        self.isAuthorized = isAuthorized; self.require = require
+    }
 }

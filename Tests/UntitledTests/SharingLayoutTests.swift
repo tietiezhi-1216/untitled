@@ -119,6 +119,7 @@ import Testing
         #expect(!source.contains("边缘穿越") && !source.contains("edgeSwitching"))
         #expect(!source.contains("键盘与鼠标") && !source.contains("返回本机") && !source.contains("麦克风"))
         #expect(source.components(separatedBy: "Toggle(").count - 1 == 1)
+        #expect(source.contains("Toggle(\"共享\"") && !source.contains("setClipboardSharing"))
     }
     @Test func publicAndRuntimeIdentitiesUseUntitled() throws {
         let plist = try #require(PropertyListSerialization.propertyList(from: Data(contentsOf: URL(fileURLWithPath: "Resources/Info.plist")), format: nil) as? [String: Any])

@@ -2,7 +2,7 @@ import Foundation
 
 enum HostInfo {
     static let name = "Untitled"
-    static let version = "0.12.0"
+    static let version = "0.13.47"
     static let bundleIdentifier = "com.untitled.app"
     static let repository = URL(string: "https://github.com/tietiezhi-1216/untitled")!
     static let catalog = URL(string: "https://raw.githubusercontent.com/tietiezhi-1216/untitled/main/Plugins/catalog.json")!
@@ -58,6 +58,8 @@ struct PluginManifest: Codable, Equatable, Sendable, Identifiable {
     var permissions: [PluginPermissionDeclaration]?
     var icon: PluginIcon? = nil
     var storefront: PluginStorefront? = nil
+    var shortcutInputs: [ShortcutInputKind]? = nil
+    var allowedShortcutInputs: Set<ShortcutInputKind> { shortcutInputs.map { Set($0) } ?? ShortcutInputKind.all }
 
     func validate() throws {
         try icon?.validate()
@@ -105,10 +107,24 @@ struct PluginManifest: Codable, Equatable, Sendable, Identifiable {
         if templates.contains(where: { $0.defaultHotKey != nil || $0.installByDefault != nil }) {
             guard minimum >= Version("0.6.0")! else { throw PluginError.invalid("默认动作声明需要 0.6.0 或更高版本宿主。") }
         }
+        if let shortcutInputs {
+            guard schemaVersion == 2, minimum >= Version("0.13.29")!, Set(shortcutInputs).count == shortcutInputs.count else {
+                throw PluginError.invalid("快捷键类型声明需要 0.13.29 或更高版本宿主，且类型不能重复。")
+            }
+        }
         var defaultKeys = Set<String>()
         for template in templates {
             if let key = template.defaultHotKey {
-                try key.validate()
+                try key.validate(allowedInputs: allowedShortcutInputs)
+                if key.isRightCommand, minimum < Version("0.13.31")! {
+                    throw PluginError.invalid("右 ⌘ 默认快捷键需要 0.13.31 或更高版本宿主。")
+                }
+                if key.isRightControl, minimum < Version("0.13.32")! {
+                    throw PluginError.invalid("右 ⌃ 默认快捷键需要 0.13.32 或更高版本宿主。")
+                }
+                if !key.supportsLegacyHosts, minimum < Version("0.13.29")! {
+                    throw PluginError.invalid("此默认快捷键需要 0.13.29 或更高版本宿主。")
+                }
                 guard template.installByDefault == true, defaultKeys.insert(key.identity).inserted else {
                     throw PluginError.invalid("默认快捷键必须属于默认动作，且不能重复。")
                 }
@@ -141,7 +157,8 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
     case sharePeripherals, switchPeripheralControl, stopPeripheralSharing
     case toggleDoubaoDictation, holdDoubaoDictation, cancelDoubaoDictation
     case captureRegion, captureWindow, captureScreen, captureScrolling, captureRecording
-    case pinClipboard, togglePins, captureHistory
+    case pinSelection, togglePins, captureHistory
+    case pinClipboard // Legacy action ID; it now pins only a confirmed selection.
     case captureDelayed, captureAndCopy, captureLastRegion
     case restorePin, closePins, hideOtherPins, togglePinClickThrough, cyclePinGroup, pinFiles, toggleCaptureHotKeys
 
@@ -170,7 +187,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
         case .captureScreen: "全屏截图"
         case .captureScrolling: "滚动长截图"
         case .captureRecording: "开始或停止录屏"
-        case .pinClipboard: "剪贴板贴图"
+        case .pinSelection, .pinClipboard: "贴图（当前选区）"
         case .togglePins: "隐藏或显示贴图"
         case .captureHistory: "打开截图历史"
         case .captureDelayed: "自定义 / 延时截图"
@@ -203,7 +220,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
         case .captureScreen: "display"
         case .captureScrolling: "scroll"
         case .captureRecording: "record.circle"
-        case .pinClipboard: "pin"
+        case .pinSelection, .pinClipboard: "pin"
         case .togglePins: "eye"
         case .captureHistory: "clock"
         case .captureDelayed: "timer"

@@ -5,8 +5,8 @@ struct SettingsView: View {
     @ObservedObject private var permissions: HostPermissionCenter
     @AppStorage("appearance") private var appearance: AppAppearance = .system
 
-    init(store: PluginStore) {
-        permissions = store.permissions
+    init(permissions: HostPermissionCenter) {
+        self.permissions = permissions
     }
 
     var body: some View {
@@ -49,7 +49,7 @@ struct PermissionManagementView: View {
             HStack(spacing: 12) {
                 if let request = permissions.pendingRequest {
                     let missing = request.permissions.contains { permissions.status($0) != .authorized }
-                    Text(missing ? "「\(request.pluginName)」需要授权" : "已就绪，请返回「\(request.pluginName)」重试")
+                    Text(missing ? "「\(request.name)」需要授权" : "已就绪，请返回「\(request.name)」重试")
                         .font(.callout).foregroundStyle(.secondary).lineLimit(1)
                     Button {
                         permissions.pendingRequest = nil

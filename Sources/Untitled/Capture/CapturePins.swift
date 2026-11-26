@@ -4,16 +4,11 @@ import SwiftUI
 import ImageIO
 import UniformTypeIdentifiers
 
-struct CapturePinGroup: Codable, Equatable, Identifiable {
-    var id = UUID()
-    var name: String
-    static let defaultID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
-}
-
 struct CapturePinRecord: Codable, Identifiable {
     var id = UUID()
     let filename: String
-    var groupID: UUID
+    // v1 disk field retained for compatibility with earlier local builds.
+    var groupID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
     var date = Date()
     var isOpen = true
     var closedAt: Date?
@@ -31,16 +26,35 @@ struct CapturePinRecord: Codable, Identifiable {
     var adjustments: CapturePinAdjustments?
 }
 
+enum CapturePinPlacement {
+    static func fit(_ pixels: CGSize, at topLeft: CGPoint, limit: CGSize, on visibleFrame: CGRect) -> CGRect {
+        let safe = visibleFrame.insetBy(dx: min(24, visibleFrame.width / 4), dy: min(24, visibleFrame.height / 4))
+        let scale = min(limit.width / pixels.width, limit.height / pixels.height,
+                        safe.width / pixels.width, safe.height / pixels.height)
+        let size = CGSize(width: pixels.width * scale, height: pixels.height * scale)
+        let x = min(max(safe.minX, topLeft.x), safe.maxX - size.width)
+        let y = min(max(safe.minY, topLeft.y - size.height), safe.maxY - size.height)
+        return CGRect(x: x, y: y, width: size.width, height: size.height)
+    }
+}
+
 @MainActor final class CapturePinManager: ObservableObject {
     private struct Archive: Codable {
-        let version: Int
-        var groups: [CapturePinGroup]
-        var records: [CapturePinRecord]
-        var activeGroupID: UUID
+        private struct LegacyGroup: Codable {
+            let id: UUID
+            let name: String
+        }
+        private static let defaultID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        var version = 1
+        private var groups = [LegacyGroup(id: Archive.defaultID, name: "默认分组")]
+        var records: [CapturePinRecord] = []
+        private var activeGroupID = Archive.defaultID
+
+        init() {}
     }
-    @Published private(set) var groups = [CapturePinGroup(id: CapturePinGroup.defaultID, name: "默认分组")]
+    // Keep the original v1 metadata for rollback, but never select or filter by it.
+    private var archive = Archive()
     @Published private(set) var records: [CapturePinRecord] = []
-    @Published private(set) var activeGroupID = CapturePinGroup.defaultID
     @Published private(set) var hidden = false
     var isAllowed: () -> Bool = { true }
     var edit: ((CGImage, UUID, RecognitionTab?) -> Void)?
@@ -72,23 +86,19 @@ struct CapturePinRecord: Codable, Identifiable {
             if FileManager.default.fileExists(atPath: file.path) {
                 let data = try Data(contentsOf: file)
                 guard data.count <= 32 * 1024 * 1024 else { throw PluginError.invalid("贴图索引过大。") }
-                let archive = try JSONDecoder().decode(Archive.self, from: data)
-                guard archive.version == 1, !archive.groups.isEmpty,
-                      Set(archive.groups.map(\.id)).count == archive.groups.count,
-                      archive.groups.contains(where: { $0.id == CapturePinGroup.defaultID }),
-                      Set(archive.records.map(\.id)).count == archive.records.count else { throw PluginError.invalid("贴图索引格式无效。") }
-                groups = archive.groups
-                let ids = Set(groups.map(\.id))
-                records = archive.records.filter {
-                    ScreenshotController.safeFilename($0.filename) && $0.filename.hasSuffix(".png") && ids.contains($0.groupID)
+                var stored = try JSONDecoder().decode(Archive.self, from: data)
+                guard stored.version == 1, Set(stored.records.map(\.id)).count == stored.records.count else {
+                    throw PluginError.invalid("贴图索引格式无效。")
+                }
+                records = stored.records.filter {
+                    ScreenshotController.safeFilename($0.filename) && $0.filename.hasSuffix(".png")
                     && FileManager.default.fileExists(atPath: directory.appendingPathComponent($0.filename).path)
                 }
-                activeGroupID = ids.contains(archive.activeGroupID) ? archive.activeGroupID : CapturePinGroup.defaultID
+                stored.records = []
+                archive = stored
             }
         } catch { loadError = "无法读取贴图历史：\(error.localizedDescription)" }
     }
-    var currentRecords: [CapturePinRecord] { records.filter { $0.groupID == activeGroupID } }
-    var currentGroupName: String { groups.first { $0.id == activeGroupID }?.name ?? "默认分组" }
     func url(_ record: CapturePinRecord) -> URL { directory.appendingPathComponent(record.filename) }
     func record(_ id: UUID) -> CapturePinRecord? { records.first { $0.id == id } }
     func image(_ id: UUID) -> CGImage? { renderedImages[id] ?? images[id] }
@@ -96,7 +106,7 @@ struct CapturePinRecord: Codable, Identifiable {
         guard !active, isAllowed() else { return }
         active = true
         if let loadError { reportError?(loadError); self.loadError = nil }
-        for item in currentRecords where item.isOpen { show(item) }
+        for item in records where item.isOpen { show(item) }
         refreshVisibility()
     }
     func deactivate() {
@@ -107,7 +117,7 @@ struct CapturePinRecord: Codable, Identifiable {
     @discardableResult func create(_ image: CGImage, text: String? = nil, sourceFile: URL? = nil, frame: CGRect? = nil, payload: CapturePinPayload? = nil) throws -> UUID {
         guard isAllowed() else { throw PluginError.invalid("截图插件已停用。") }
         let id = UUID()
-        let record = CapturePinRecord(id: id, filename: id.uuidString + ".png", groupID: activeGroupID, frame: frame, text: text, sourceFile: sourceFile, payload: payload)
+        let record = CapturePinRecord(id: id, filename: id.uuidString + ".png", frame: frame, text: text, sourceFile: sourceFile, payload: payload)
         try CaptureImage.png(image).write(to: url(record), options: .atomic)
         records.append(record); images[id] = image
         selectedIDs = [id]
@@ -134,32 +144,41 @@ struct CapturePinRecord: Codable, Identifiable {
         if let panel = panels[id] {
             panel.aspectRatio = CGSize(width: image.width, height: image.height)
             panel.contentView = content(id)
-            if let frame { panel.setFrame(frame, display: true) }
+            if let frame { panel.positionPin(frame) }
         }
         saveNow()
         if displaysWindows { recognizeText(id) }
     }
-    func restoreLastClosed() throws {
-        guard let item = currentRecords.filter({ !$0.isOpen }).max(by: { ($0.closedAt ?? $0.date) < ($1.closedAt ?? $1.date) }) else {
-            throw PluginError.invalid("当前分组没有可恢复的贴图。")
+    func restoreLastClosed() {
+        let item = records.lazy.filter { !$0.isOpen }.max { lhs, rhs in
+            (lhs.closedAt ?? lhs.date, lhs.date) < (rhs.closedAt ?? rhs.date, rhs.date)
         }
-        restore(item.id)
+        if let item { restore(item.id) }
     }
     func restore(_ id: UUID) {
         guard isAllowed(), let index = records.firstIndex(where: { $0.id == id }) else { return }
-        if activeGroupID != records[index].groupID { selectGroup(records[index].groupID) }
         records[index].isOpen = true; records[index].closedAt = nil
         hidden = false; keepOnly = nil; show(records[index]); refreshVisibility()
-        focusedID=id;selectedIDs=[id];panels[id]?.makeKeyAndOrderFront(nil);saveNow()
+        focusedID = id; selectedIDs = [id]
+        if let panel = panels[id] {
+            // “定位 / 恢复” is an explicit request to find the pin. Normal dragging,
+            // visibility changes, and startup never pull an offscreen pin back.
+            if !NSScreen.screens.contains(where: { !$0.visibleFrame.intersection(panel.frame).isEmpty }) {
+                panel.center()
+            }
+            panel.makeKeyAndOrderFront(nil)
+        }
+        saveNow()
     }
     func close(_ id: UUID) {
         if let panel = panels[id] { panel.close() } else { didClose(id) }
     }
-    func closeAll() { currentRecords.filter(\.isOpen).forEach { close($0.id) } }
+    func closeAll() { records.filter(\.isOpen).forEach { close($0.id) } }
     fileprivate func didClose(_ id: UUID) {
         panels.removeValue(forKey: id); images.removeValue(forKey: id); renderedImages[id] = nil
         animations[id]?.stop(); animations[id] = nil; recognitionTasks[id]?.cancel(); recognitionTasks[id] = nil; selectedIDs.remove(id);selectedTexts[id]=nil
-        guard !closingForLifecycle, let index = records.firstIndex(where: { $0.id == id }) else { return }
+        guard !closingForLifecycle, let index = records.firstIndex(where: { $0.id == id }),
+              records[index].isOpen else { return }
         records[index].isOpen = false; records[index].closedAt = Date()
         if keepOnly == id { keepOnly = nil; refreshVisibility() }
         saveNow()
@@ -177,42 +196,6 @@ struct CapturePinRecord: Codable, Identifiable {
             for index in records.indices { records[index].clickThrough = false; apply(records[index]) }
         }
         saveNow()
-    }
-    func selectGroup(_ id: UUID) {
-        guard groups.contains(where: { $0.id == id }) else { return }
-        activeGroupID = id; keepOnly = nil; hidden = false; selectedIDs = []
-        if isAllowed() { for item in currentRecords where item.isOpen { show(item) } }
-        refreshVisibility(); saveNow()
-    }
-    func cycleGroup() {
-        guard let index = groups.firstIndex(where: { $0.id == activeGroupID }), groups.count > 1 else { return }
-        selectGroup(groups[(index + 1) % groups.count].id)
-    }
-    @discardableResult func createGroup(name: String? = nil) -> UUID {
-        var title = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if title.isEmpty {
-            var number = 2
-            while groups.contains(where: { $0.name == "贴图组\(number)" }) { number += 1 }
-            title = "贴图组\(number)"
-        }
-        let group = CapturePinGroup(name: String(title.prefix(80)))
-        groups.append(group); selectGroup(group.id)
-        return group.id
-    }
-    func renameGroup(_ id: UUID, name: String) throws {
-        let value = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, value.count <= 80, !groups.contains(where: { $0.id != id && $0.name.caseInsensitiveCompare(value) == .orderedSame }),
-              let index = groups.firstIndex(where: { $0.id == id }) else { throw PluginError.invalid("分组名称不能为空或重复，且不超过 80 个字。") }
-        groups[index].name = value; saveNow()
-    }
-    func mergeGroupIntoDefault(_ id: UUID) {
-        guard id != CapturePinGroup.defaultID else { return }
-        for index in records.indices where records[index].groupID == id { records[index].groupID = CapturePinGroup.defaultID }
-        groups.removeAll { $0.id == id }; selectGroup(CapturePinGroup.defaultID)
-    }
-    func move(_ id: UUID, to groupID: UUID) {
-        guard groups.contains(where: { $0.id == groupID }), let index = records.firstIndex(where: { $0.id == id }) else { return }
-        records[index].groupID = groupID; refreshVisibility(); saveNow()
     }
     func remove(_ id: UUID) {
         guard let item = record(id) else { return }
@@ -255,10 +238,10 @@ struct CapturePinRecord: Codable, Identifiable {
         records[index][keyPath: key].toggle(); apply(records[index]); saveNow()
     }
     func resetSize(_ id: UUID) {
-        guard let panel = panels[id], let image = images[id] else { return }
+        guard let panel = panels[id], let pixels = viewportSize(id) else { return }
         let screen = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1400, height: 900)
-        let factor = min(1, min(screen.width / CGFloat(image.width), screen.height / CGFloat(image.height)))
-        panel.setContentSize(CGSize(width: CGFloat(image.width) * factor, height: CGFloat(image.height) * factor))
+        let topLeft = CGPoint(x: panel.frame.minX, y: panel.frame.maxY)
+        panel.positionPin(CapturePinPlacement.fit(pixels, at: topLeft, limit: pixels, on: screen))
         if let index = records.firstIndex(where: { $0.id == id }) { records[index].opacity = 1; apply(records[index]) }
         saveNow()
     }
@@ -267,10 +250,20 @@ struct CapturePinRecord: Codable, Identifiable {
         if opacity {
             records[index].opacity = min(1, max(0.1, records[index].opacity + Double(delta) * 0.015)); apply(records[index])
         } else {
-            let width = min(3000, max(60, panel.frame.width * (1 + delta * 0.015)))
-            let ratio = panel.aspectRatio.height / max(1, panel.aspectRatio.width)
-            panel.setFrame(CGRect(x: panel.frame.midX - width / 2, y: panel.frame.midY - width * ratio / 2,
-                                  width: width, height: width * ratio), display: true)
+            let ratio = panel.aspectRatio.height / panel.aspectRatio.width
+            guard ratio.isFinite, ratio > 0, delta.isFinite, delta != 0 else { return }
+            // Use the long side: rounding the short side to a point must not
+            // change the pin's scale. A 60 pt width floor can also stop tall pins from shrinking.
+            let frame = panel.frame
+            let tall = ratio > 1
+            let current = tall ? frame.height : frame.width
+            let minimum = min(current, 300, 60 * max(1, ratio))
+            let maximum = max(current, 3000)
+            let length = min(maximum, max(minimum, current * (1 + delta * 0.015)))
+            let size = tall ? CGSize(width: length / ratio, height: length)
+                            : CGSize(width: length, height: length * ratio)
+            panel.positionPin(CGRect(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2,
+                                    width: size.width, height: size.height))
         }
         saveSoon()
     }
@@ -314,9 +307,8 @@ struct CapturePinRecord: Codable, Identifiable {
         case .pinTop: toggle(id, \.floating)
         case .pinShadow: toggle(id, \.shadow)
         case .pinOthers: focusedID = id; toggleOthers()
-        case .pinGroup: let items = selection(id); let group = createGroup(); items.forEach { move($0,to:group) }
         case .pinNext:
-            let items = currentRecords.filter { $0.isOpen && !$0.clickThrough }
+            let items = records.filter { $0.isOpen && !$0.clickThrough }
             if let index = items.firstIndex(where: { $0.id == id }), !items.isEmpty {
                 let next = items[(index + 1) % items.count].id
                 focusedID = next; panels[next]?.makeKeyAndOrderFront(nil)
@@ -325,12 +317,13 @@ struct CapturePinRecord: Codable, Identifiable {
             guard let panel = panels[id], record(id)?.locked == false else { return }
             let dx: CGFloat = action == .moveLeft ? -1 : action == .moveRight ? 1 : 0
             let dy: CGFloat = action == .moveDown ? -1 : action == .moveUp ? 1 : 0
-            panel.setFrameOrigin(CGPoint(x: panel.frame.minX + dx, y: panel.frame.minY + dy))
+            panel.positionPin(panel.frame.offsetBy(dx: dx, dy: dy))
         default: break
         }
     }
     fileprivate func frameChanged(_ id: UUID, frame: CGRect) {
-        guard !closingForLifecycle, let index = records.firstIndex(where: { $0.id == id }) else { return }
+        guard !closingForLifecycle, let index = records.firstIndex(where: { $0.id == id }),
+              records[index].frame != frame else { return }
         records[index].frame = frame; saveSoon()
     }
     fileprivate func focus(_ id: UUID) { focusedID = id }
@@ -347,18 +340,30 @@ struct CapturePinRecord: Codable, Identifiable {
         let prevent=UserDefaults.standard.object(forKey:"capture.pin.lockPreventsClose") as? Bool ?? true
         selection(id).filter { !prevent || record($0)?.locked != true }.forEach { close($0) }
     }
-    func moveSelection(_ id: UUID,to group:UUID) { selection(id).forEach { move($0,to:group) } }
     func dragSelection(_ id:UUID,delta:CGSize) {
         for key in selection(id) where record(key)?.locked == false {
-            if let panel = panels[key] { panel.setFrameOrigin(CGPoint(x:panel.frame.minX+delta.width,y:panel.frame.minY+delta.height)) }
+            if let panel = panels[key] { panel.positionPin(panel.frame.offsetBy(dx: delta.width, dy: delta.height)) }
         }
     }
     func refreshContent(_ id:UUID) { panels[id]?.contentView = content(id) }
-    func sizeForViewport(_ id:UUID) {
-        guard let panel=panels[id], let image=image(id) else { return }; let rect=record(id)?.viewport ?? CGRect(x:0,y:0,width:1,height:1)
-        let ratio=CGFloat(image.height)*rect.height/max(1,CGFloat(image.width)*rect.width)
-        panel.aspectRatio=CGSize(width:1,height:ratio)
-        panel.setContentSize(CGSize(width:panel.frame.width,height:panel.frame.width*ratio))
+    private func viewportSize(_ id: UUID) -> CGSize? {
+        guard let image = image(id) else { return nil }
+        let fraction = record(id)?.viewport?.size ?? CGSize(width: 1, height: 1)
+        let size = CGSize(width: CGFloat(image.width) * fraction.width, height: CGFloat(image.height) * fraction.height)
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return nil }
+        return size
+    }
+    func sizeForViewport(_ id: UUID) {
+        guard let panel = panels[id], let pixels = viewportSize(id) else { return }
+        panel.aspectRatio = pixels
+        let frame = panel.frame
+        let ratio = pixels.height / pixels.width
+        let height = frame.width * ratio
+        // AppKit rounds window sizes. For very tall/narrow images, one point
+        // of width rounding must not resize the pin every time it is reopened.
+        let shortSideError = ratio > 1 ? abs(frame.width - frame.height / ratio) : abs(frame.height - height)
+        guard shortSideError > 1 else { return }
+        panel.positionPin(CGRect(x: frame.minX, y: frame.maxY - height, width: frame.width, height: height))
     }
     private func pinUnderMouse() -> UUID? {
         NSApp.orderedWindows.compactMap { $0 as? CapturePinWindow }
@@ -366,12 +371,12 @@ struct CapturePinRecord: Codable, Identifiable {
     }
     private func focusedPin() -> UUID? {
         let id = pinUnderMouse() ?? (NSApp.keyWindow as? CapturePinWindow)?.pinID ?? focusedID
-        if let id, let item = record(id), item.isOpen, item.groupID == activeGroupID { return id }
-        return currentRecords.first { $0.isOpen }?.id
+        if let id, record(id)?.isOpen == true { return id }
+        return records.first { $0.isOpen }?.id
     }
     private func refreshVisibility() {
         for (id, panel) in panels {
-            if let item = record(id), !editingIDs.contains(id), item.isOpen, item.groupID == activeGroupID, !hidden, keepOnly == nil || keepOnly == id {
+            if let item = record(id), !editingIDs.contains(id), item.isOpen, !hidden, keepOnly == nil || keepOnly == id {
                 panel.orderFrontRegardless()
             } else { panel.orderOut(nil) }
         }
@@ -389,10 +394,12 @@ struct CapturePinRecord: Codable, Identifiable {
             panel.aspectRatio = CGSize(width: image.width, height: image.height)
             panel.contentView = content(item.id)
             panels[item.id] = panel
-            if item.frame == nil { panel.center() }
-            else if !NSScreen.screens.contains(where: { $0.visibleFrame.intersects(panel.frame) }) { panel.center() }
-            apply(item); panel.orderFrontRegardless(); focusedID = item.id
-            sizeForViewport(item.id); startAnimation(item.id); recognizeText(item.id)
+            if let frame = item.frame {
+                panel.positionPin(frame, display: false)
+            } else { panel.center() }
+            apply(item); sizeForViewport(item.id)
+            panel.orderFrontRegardless(); focusedID = item.id
+            startAnimation(item.id); recognizeText(item.id)
         } catch { reportError?(error.localizedDescription) }
     }
     private func content(_ id: UUID) -> NSView { NSHostingView(rootView: CapturePinnedContent(manager: self, id: id)) }
@@ -412,8 +419,9 @@ struct CapturePinRecord: Codable, Identifiable {
     func saveNow() {
         saveTask?.cancel(); saveTask = nil
         do {
-            let archive = Archive(version: 1, groups: groups, records: records, activeGroupID: activeGroupID)
-            try JSONEncoder().encode(archive).write(to: directory.appendingPathComponent("pins.json"), options: .atomic)
+            var output = archive
+            output.records = records
+            try JSONEncoder().encode(output).write(to: directory.appendingPathComponent("pins.json"), options: .atomic)
         } catch { reportError?(error.localizedDescription) }
     }
 }
@@ -430,6 +438,17 @@ private final class CapturePinWindow: NSPanel, NSWindowDelegate {
         collectionBehavior = CaptureWindowPolicy.floatingBehavior
         delegate = self
     }
+    override func constrainFrameRect(_ frameRect: CGRect, to screen: NSScreen?) -> CGRect {
+        // Pins may extend beyond any display, even when AppKit reorders them.
+        frameRect
+    }
+
+    func positionPin(_ frame: CGRect, display: Bool = true) {
+        guard frame != self.frame else { return }
+        if frame.size == self.frame.size { setFrameOrigin(frame.origin) }
+        else { setFrame(frame, display: display) }
+    }
+
     func windowWillClose(_ notification: Notification) { manager?.didClose(pinID) }
     func windowDidMove(_ notification: Notification) { manager?.frameChanged(pinID, frame: frame) }
     func windowDidResize(_ notification: Notification) { manager?.frameChanged(pinID, frame: frame) }
@@ -491,10 +510,6 @@ private struct CapturePinnedContent: View {
                         Button("切换阴影") { manager.toggle(id, \.shadow) }
                         Button("恢复原始大小与透明度") { manager.resetSize(id) }
                         Button("鼠标穿透") { manager.toggle(id, \.clickThrough) }
-                        Menu("移动到贴图组") {
-                            ForEach(manager.groups) { group in Button(group.name) { manager.moveSelection(id, to: group.id) } }
-                            Button("新贴图组") { let items=manager.selection(id);let group = manager.createGroup();items.forEach { manager.move($0,to:group) } }
-                        }
                         Button("隐藏其他贴图") { manager.perform(.pinOthers, id: id) }
                         Divider()
                         Button("关闭所选贴图") { manager.closeSelection(id) }
@@ -511,61 +526,96 @@ private struct CapturePinnedContent: View {
 struct CapturePinsView: View {
     @Environment(\.pluginContentHasInsets) private var hasInsets
     @ObservedObject var manager: CapturePinManager
-    @ViewState private var name = ""
-    @ViewState private var error: String?
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Picker("贴图组", selection: Binding(get: { manager.activeGroupID }, set: { manager.selectGroup($0) })) {
-                    ForEach(manager.groups) { group in Text(group.name).tag(group.id) }
-                }.frame(maxWidth: 260)
-                Button("新建分组") { manager.createGroup() }
-                Spacer()
-                Button("显示 / 隐藏") { manager.toggleAll() }
-                Button("关闭本组贴图") { manager.closeAll() }
-            }
-            HStack {
-                TextField("分组名称", text: $name).textFieldStyle(.roundedBorder).frame(maxWidth: 260)
-                Button("重命名") {
-                    do { try manager.renameGroup(manager.activeGroupID, name: name); error = nil } catch { self.error = error.localizedDescription }
-                }.disabled(name == manager.currentGroupName)
-                if manager.activeGroupID != CapturePinGroup.defaultID {
-                    Button("合并到默认分组") { manager.mergeGroupIntoDefault(manager.activeGroupID) }
-                }
-            }
-            if !manager.selectedIDs.isEmpty {
-                HStack {
-                    Text("已选 \(manager.selectedIDs.count) 项").font(.caption)
-                    Button("恢复所选") { manager.selectedIDs.forEach { manager.restore($0) } }
-                    Button("关闭所选") { Array(manager.selectedIDs).forEach { manager.close($0) } }
-                    Menu("移动到") { ForEach(manager.groups) { group in Button(group.name) { Array(manager.selectedIDs).forEach { manager.move($0,to:group.id) } } } }
-                    Button("取消选择") { manager.selectedIDs=[] }
-                }
-            }
-            if let error { Text(error).font(.caption).foregroundStyle(.red) }
-            ScrollView {
-                LazyVStack(spacing: 12) {
-                    ForEach(manager.currentRecords.reversed()) { record in
-                        HStack(spacing: 12) {
-                            Toggle("选择",isOn:Binding(get:{manager.selectedIDs.contains(record.id)},set:{ _ in manager.select(record.id,extending:true) })).labelsHidden()
-                            CaptureThumbnail(url: manager.url(record), video: false, revision: record.revision)
-                                .frame(width: 90, height: 60).background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(record.sourceFile?.lastPathComponent ?? record.text.map { String($0.prefix(30)) } ?? "图像贴图").lineLimit(1)
-                                Text(record.isOpen ? "未关闭" : "已关闭 · 可恢复").font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button(record.isOpen ? "定位" : "恢复") { manager.restore(record.id) }
-                            if record.isOpen { Button("关闭") { manager.close(record.id) } }
-                            Menu {
-                                ForEach(manager.groups) { group in Button("移至 \(group.name)") { manager.move(record.id, to: group.id) } }
-                                Button("移到废纸篓", role: .destructive) { manager.remove(record.id) }
-                            } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).fixedSize()
+        let records = manager.records
+        let selected = records.filter { manager.selectedIDs.contains($0.id) }
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Text(selected.isEmpty ? "\(records.count) 项" : "已选 \(selected.count) 项")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                if !selected.isEmpty {
+                    Menu("所选贴图") {
+                        Button("恢复所选") {
+                            for record in selected where !record.isOpen { manager.restore(record.id) }
                         }
+                        .disabled(!manager.isAllowed() || selected.allSatisfy(\.isOpen))
+                        if let open = selected.first(where: \.isOpen) {
+                            Button("关闭所选") { manager.closeSelection(open.id) }
+                        }
+                        Divider()
+                        Button("取消选择") { manager.selectedIDs.removeAll() }
                     }
                 }
-            }.overlay { if manager.currentRecords.isEmpty { ContentUnavailableView("还没有贴图", systemImage: "pin", description: Text("使用 ⌃2 贴出剪贴板内容，关闭后可按 ⌃3 恢复。")) } }
-        }.padding(.horizontal, hasInsets ? 0 : PanelLayout.contentInset)
-            .onChange(of: manager.activeGroupID, initial: true) { _, _ in name = manager.currentGroupName }
+            }
+            .panelRegion("capture.pins.toolbar")
+            if records.isEmpty {
+                ContentUnavailableView("还没有贴图", systemImage: "pin",
+                    description: Text("截图框选后，在工具栏点「贴图」。"))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(records.reversed()) { record in
+                            pinRow(record)
+                            if record.id != records.first?.id { Divider().opacity(0.65) }
+                        }
+                    }
+                    .padding(.trailing, 12)
+                }
+            }
+        }
+        .padding(.horizontal, hasInsets ? 0 : PanelLayout.contentInset)
+        .panelRegion("capture.pins")
+    }
+
+    private func pinRow(_ record: CapturePinRecord) -> some View {
+        let title = record.sourceFile?.lastPathComponent ?? record.text.map { String($0.prefix(30)) } ?? "图像贴图"
+        let action = record.isOpen ? "定位" : "恢复"
+        return HStack(spacing: 10) {
+            Toggle("选择 \(title)", isOn: Binding(
+                get: { manager.selectedIDs.contains(record.id) },
+                set: { _ in manager.select(record.id, extending: true) }
+            ))
+            .labelsHidden()
+            Button {
+                manager.restore(record.id)
+            } label: {
+                HStack(spacing: 10) {
+                    CaptureThumbnail(url: manager.url(record), video: false, revision: record.revision)
+                        .frame(width: 52, height: 36)
+                        .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(title).font(.callout.weight(.medium)).lineLimit(1)
+                        Text(record.isOpen ? "未关闭" : "已关闭 · 可恢复").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    Text(record.date, format: .dateTime.month().day())
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!manager.isAllowed())
+            .help("\(action) \(title)")
+            .accessibilityHint("\(action)这条贴图")
+        }
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button(action) { manager.restore(record.id) }.disabled(!manager.isAllowed())
+            if record.isOpen {
+                Button("关闭") { manager.close(record.id) }
+            }
+            Divider()
+            Button("移到废纸篓", role: .destructive) { manager.remove(record.id) }
+        }
     }
 }

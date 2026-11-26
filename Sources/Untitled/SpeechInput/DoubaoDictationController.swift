@@ -2,20 +2,16 @@ import Combine
 import Foundation
 
 struct DictationPreferences: Codable, Equatable, Sendable {
-    var liveInput: Bool
     var maximumSeconds: Int
-    var experimentalRealtimeInput: Bool
     var inputDeviceUID: String?
-    init(liveInput: Bool = true, maximumSeconds: Int = 180, experimentalRealtimeInput: Bool = false, inputDeviceUID: String? = nil) {
-        self.liveInput = liveInput; self.maximumSeconds = maximumSeconds
-        self.experimentalRealtimeInput = experimentalRealtimeInput; self.inputDeviceUID = inputDeviceUID
+    init(maximumSeconds: Int = 180, inputDeviceUID: String? = nil) {
+        self.maximumSeconds = maximumSeconds; self.inputDeviceUID = inputDeviceUID
     }
-    private enum CodingKeys: String, CodingKey { case liveInput, maximumSeconds, experimentalRealtimeInput, inputDeviceUID }
+    // Ignore obsolete input-mode switches in older preferences.
+    private enum CodingKeys: String, CodingKey { case maximumSeconds, inputDeviceUID }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        liveInput = try values.decodeIfPresent(Bool.self, forKey: .liveInput) ?? true
         maximumSeconds = try values.decodeIfPresent(Int.self, forKey: .maximumSeconds) ?? 180
-        experimentalRealtimeInput = try values.decodeIfPresent(Bool.self, forKey: .experimentalRealtimeInput) ?? false
         inputDeviceUID = try values.decodeIfPresent(String.self, forKey: .inputDeviceUID)
     }
     func validate() throws {
@@ -45,51 +41,62 @@ enum DictationPhase: String { case idle, connecting, listening, finishing
 
 @MainActor final class DoubaoDictationController: ObservableObject {
     static let pluginID = "com.untitled.doubao-speech-input"
-    private static let previewNotice = "仅预览，不向当前应用写入文字。"
-    static let realtimeInputUnavailable = "实时上屏尚未完成验收；如需自行测试，请在插件面板开启“实验性实时输入”，否则使用试音（仅预览）。"
-    let realtimeInputVerified: Bool
-    var realtimeInputAvailable: Bool { realtimeInputVerified || preferences.experimentalRealtimeInput }
+    let history: DictationHistory
+    private(set) var finalResultID: UUID?
     @Published private(set) var phase: DictationPhase = .idle
     @Published private(set) var transcript = ""
+    @Published private(set) var captionSlice = DictationCaptionSlice("")
+    var bubblePreview: String { captionSlice.summary }
     @Published private(set) var lastResult = ""
     @Published private(set) var notice = ""
-    @Published private(set) var level: Float = 0
+    // Only the waveform observes this channel: audio packets must not re-layout the caption or panel.
+    let waveReadings = CurrentValueSubject<DictationMeterReading, Never>(.quiet)
+    private var meterReader: Task<Void, Never>?
     @Published private(set) var seconds = 0
     @Published private(set) var acknowledgedTextLength = 0
-    @Published private(set) var isPreviewing = false
     @Published private(set) var audioDiagnostics: DictationAudioDiagnostics?
     @Published private(set) var recognitionUpdates = 0
     @Published private(set) var preferences = DictationPreferences()
     var isBusy: Bool { phase != .idle }
+    var statusTitle: String { phase == .finishing && finalTextToWrite != nil ? "正在更新输入框" : phase.title }
     var resultText: String { transcript.isEmpty ? lastResult : transcript }
     var isAllowed: () -> Bool = { false }
     var requirePermissions: (Set<HostPermissionID>) throws -> Void = { _ in throw PluginError.invalid("听写权限客户端尚未绑定。") }
+    var hasInsertionAccess: () -> Bool = { false }
+    var registerEscape: (DictationGesture, @escaping () -> Void) -> (() -> Void)? = { _, _ in nil }
+    private var removeEscape: (() -> Void)?
     private let preferencesURL: URL?
     private let makeSession: () -> any DoubaoSpeechSession
     private let makeMicrophone: () -> any DictationAudioSource
-    private let makeTarget: () throws -> any DictationTextInserting
+    private let makeTarget: () throws -> any DictationFinalInserting
+    private let copyFinal: (String) throws -> Void
     private let showsHUD: Bool
     private var session: (any DoubaoSpeechSession)?
     private var microphone: (any DictationAudioSource)?
-    private var target: (any DictationTextInserting)?
-    private var hud: DictationHUD?
+    private var target: (any DictationFinalInserting)?
+    private var hud: DictationHUD?, receipt: DictationHUD?
+    private var receiptTimer: Task<Void, Never>?
     private var task: Task<Void, Never>?
     private var monitor: Task<Void, Never>?
     private var textWriter: Task<Void, Never>?
     private var generation: UUID?
     private var gesture: DictationGesture?
-    private var pendingWrite = false
     private var finalTextToWrite: String?
-    private var lastWrite: TimeInterval = 0
-    isolated deinit { releaseResources() }
+    private var finalDeliveryWaiter: CheckedContinuation<Void, Never>?
+    private var finishTimer: Task<Void, Never>?
+    private let recognitionBudget: Duration, deliveryBudget: Duration
+    isolated deinit { dismissReceipt(); releaseResources() }
 
-    init(preferencesURL: URL? = nil, showsHUD: Bool = true, realtimeInputVerified: Bool = false,
+    init(preferencesURL: URL? = nil, showsHUD: Bool = true,
+         recognitionBudget: Duration = .seconds(18), deliveryBudget: Duration = .seconds(4),
          makeSession: @escaping () -> any DoubaoSpeechSession = { DoubaoASRClient() },
          makeMicrophone: @escaping () -> any DictationAudioSource = { DictationMicrophone() },
-         makeTarget: @escaping () throws -> any DictationTextInserting = { try DictationTextTarget.capture() }) {
+         makeTarget: @escaping () throws -> any DictationFinalInserting = { try DictationTextTarget.capture() },
+         copyFinal: @escaping (String) throws -> Void = { try DictationClipboard.putFinal($0) }) {
         self.preferencesURL = preferencesURL; self.showsHUD = showsHUD
-        self.realtimeInputVerified = realtimeInputVerified
-        self.makeSession = makeSession; self.makeMicrophone = makeMicrophone; self.makeTarget = makeTarget
+        self.recognitionBudget = recognitionBudget; self.deliveryBudget = deliveryBudget
+        history = DictationHistory(preferencesURL: preferencesURL)
+        self.makeSession = makeSession; self.makeMicrophone = makeMicrophone; self.makeTarget = makeTarget; self.copyFinal = copyFinal
         if let preferencesURL, FileManager.default.fileExists(atPath: preferencesURL.path) {
             do {
                 let data = try Data(contentsOf: preferencesURL)
@@ -110,16 +117,9 @@ enum DictationPhase: String { case idle, connecting, listening, finishing
         preferences = value
     }
 
-    func setExperimentalRealtimeInput(_ enabled: Bool) throws {
-        var value = preferences
-        value.experimentalRealtimeInput = enabled
-        if enabled { value.liveInput = true }
-        try savePreferences(value)
-    }
-
-    func toggle(previewOnly: Bool = false) throws {
+    func toggle() throws {
         if isBusy { stopRecording() }
-        else { try start(.toggle, previewOnly: previewOnly) }
+        else { try start(.toggle) }
     }
     func holdPressed(_ commandID: UUID) throws {
         guard !isBusy else { return }
@@ -130,25 +130,17 @@ enum DictationPhase: String { case idle, connecting, listening, finishing
         stopRecording()
     }
 
-    private func start(_ gesture: DictationGesture, previewOnly: Bool = false) throws {
+    func holdCancelled(_ commandID: UUID) {
+        guard gesture == .hold(commandID) else { return }
+        cancel(message: "按住说话已取消。")
+    }
+
+    private func start(_ gesture: DictationGesture) throws {
         guard isAllowed() else { throw PluginError.invalid("请先启用语音输入插件。") }
-        let liveInput = preferences.liveInput && !previewOnly
-        guard !liveInput || realtimeInputAvailable else {
-            notice = Self.realtimeInputUnavailable
-            throw PluginError.invalid(Self.realtimeInputUnavailable)
-        }
-        var needed: Set<HostPermissionID> = [.microphone]
-        if liveInput { needed.insert(.accessibility) }
-        target = nil
-        notice = ""
-        do {
-            try requirePermissions(needed)
-            if liveInput {
-                // Realtime means realtime: never silently run a preview when capture failed.
-                target = try makeTarget()
-            } else { notice = Self.previewNotice }
-        } catch { notice = error.localizedDescription; throw error }
-        isPreviewing = !liveInput
+        dismissReceipt(); notice = ""
+        // No editor/AX or clipboard access on start, during capture, or while waiting for ASR.
+        do { try requirePermissions([.microphone]) }
+        catch { notice = error.localizedDescription; throw error }
         let id = UUID(), session = makeSession(), microphone = makeMicrophone()
         // Capture immediately on the user's gesture, including a short utterance released
         // before networking is ready. Startup has its own strictly bounded PCM allowance.
@@ -157,34 +149,38 @@ enum DictationPhase: String { case idle, connecting, listening, finishing
             try microphone.start()
         } catch {
             audioDiagnostics = microphone.diagnostics
-            microphone.stop(); session.cancel(); target?.cancel(); target = nil
+            microphone.stop(); session.cancel()
             notice = error.localizedDescription
             throw error
         }
         self.session = session; self.microphone = microphone
         audioDiagnostics = microphone.diagnostics; recognitionUpdates = 0
         generation = id; self.gesture = gesture
-        transcript = ""; seconds = 0; level = 0; acknowledgedTextLength = 0; pendingWrite = false; finalTextToWrite = nil; lastWrite = 0
+        transcript = ""; lastResult = ""; finalResultID = nil; captionSlice = DictationCaptionSlice("")
+        seconds = 0; acknowledgedTextLength = 0; finalTextToWrite = nil
         phase = .connecting
+        refreshEscapeShortcut()
+        if let readings = microphone.meterReadings {
+            meterReader = Task { [weak self] in
+                for await reading in readings {
+                    guard !Task.isCancelled, let self, self.generation == id,
+                          self.phase == .connecting || self.phase == .listening else { return }
+                    self.waveReadings.send(reading)
+                }
+            }
+        }
         if showsHUD {
             let hud = DictationHUD()
             self.hud = hud; hud.show(controller: self)
         }
         session.onTranscript = { [weak self] text in
             guard let self, self.generation == id, self.finalTextToWrite == nil else { return }
-            self.transcript = text; self.recognitionUpdates += 1
-            if !text.isEmpty {
-                self.lastResult = text
-                // EndASR may emit several revisions. Observe them in the panel, but do
-                // not apply any while finishing: finish() supplies one authoritative final.
-                if self.phase == .connecting || self.phase == .listening {
-                    self.pendingWrite = true
-                    self.scheduleTextWrite()
-                }
-            }
+            // Partials (also during EndASR) are display-only. Replace the prior hypothesis;
+            // never enqueue a target write from a callback, a UI redraw or a microphone tick.
+            self.display(text); self.recognitionUpdates += 1
         }
         session.onFailure = { [weak self] error in
-            guard let self, self.generation == id else { return }
+            guard let self, self.generation == id, self.finalTextToWrite == nil else { return }
             self.cancel(message: error.localizedDescription)
         }
         let started = ProcessInfo.processInfo.systemUptime
@@ -193,26 +189,19 @@ enum DictationPhase: String { case idle, connecting, listening, finishing
                 while !Task.isCancelled {
                     try await Task.sleep(for: .seconds(1))
                     guard let self, self.generation == id else { return }
-                    guard self.phase == .connecting || self.phase == .listening else { continue }
-                    self.seconds = Int(ProcessInfo.processInfo.systemUptime - started)
-                    try self.microphone?.validateBuffer()
-                    if let microphone = self.microphone { self.refreshAudioDiagnostics(microphone) }
-                    if self.seconds >= 5, let audio = self.audioDiagnostics, audio.capturedBytes == 0 {
-                        throw PluginError.invalid(audio.emptyResultReason)
-                    }
-                    try self.requirePermissions(liveInput ? [.microphone, .accessibility] : [.microphone])
-                    if let target = self.target {
-                        do { try await target.validate() }
-                        catch {
-                            guard self.generation == id, !Task.isCancelled else { return }
-                            self.detachTarget(error); self.stopRecording()
+                    if self.phase == .connecting || self.phase == .listening {
+                        self.seconds = Int(ProcessInfo.processInfo.systemUptime - started)
+                        try self.microphone?.validateBuffer()
+                        if let microphone = self.microphone { self.refreshAudioDiagnostics(microphone) }
+                        if self.seconds >= 5, let audio = self.audioDiagnostics, audio.capturedBytes == 0 {
+                            throw PluginError.invalid(audio.emptyResultReason)
                         }
-                        guard self.generation == id, !Task.isCancelled else { return }
+                        try self.requirePermissions([.microphone])
                     }
                     if self.seconds >= self.preferences.maximumSeconds { self.stopRecording() }
                 }
             } catch {
-                guard let self, self.generation == id else { return }
+                guard let self, self.generation == id, !Task.isCancelled else { return }
                 self.cancel(message: error is HostPermissionError ? "权限已失效，听写已停止。" : error.localizedDescription)
             }
         }
@@ -234,9 +223,7 @@ enum DictationPhase: String { case idle, connecting, listening, finishing
                 guard generation == id, isAllowed() else { throw CancellationError() }
                 let packet = try microphone.read()
                 refreshAudioDiagnostics(microphone)
-                level = packet.level
                 try await transmit(packet.pcm, session: session)
-                scheduleTextWrite()
                 if phase == .listening { try await Task.sleep(for: .milliseconds(50)) }
             }
             try Task.checkCancellation()
@@ -248,32 +235,29 @@ enum DictationPhase: String { case idle, connecting, listening, finishing
             let final = try await session.finish()
             try Task.checkCancellation()
             guard generation == id, isAllowed() else { throw CancellationError() }
-            if final.isEmpty {
-                if notice.isEmpty || notice == Self.previewNotice {
+            if final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if notice.isEmpty {
                     notice = transcript.isEmpty ? (audioDiagnostics?.emptyResultReason ?? "本次没有识别到语音。") : "最终结果为空，已保留中间草稿；请核对后使用。"
                 }
             } else {
-                transcript = final; lastResult = final; finalTextToWrite = final; pendingWrite = true
-                scheduleTextWrite()
-                await flushTextWrites(id: id)
-                try Task.checkCancellation()
-                guard generation == id else { throw CancellationError() }
-                if notice.isEmpty { notice = target == nil ? "已定稿，可复制识别文字。" : "已确认输入最终识别结果。" }
+                finalTextToWrite = final
+                disarmEscape()
+                display(final)
+                finishTimer?.cancel(); finishTimer = nil
+                try await completeFinal(final, id: id)
+                return
             }
             releaseResources()
         } catch {
             guard generation == id else { return }
-            let message = error is CancellationError ? "已取消，已输入的文字保留。" :
+            let message = error is CancellationError ? "听写已取消。" :
                 (error is HostPermissionError ? "权限已失效，听写已停止；请到宿主权限管理中处理。" : error.localizedDescription)
             cancel(message: message)
         }
     }
 
     private func refreshAudioDiagnostics(_ microphone: any DictationAudioSource) {
-        if let value = microphone.diagnostics {
-            audioDiagnostics = value
-            if phase == .connecting { level = value.currentLevel }
-        }
+        if let value = microphone.diagnostics { audioDiagnostics = value }
     }
 
     private func transmit(_ pcm: Data, session: any DoubaoSpeechSession) async throws {
@@ -282,79 +266,143 @@ enum DictationPhase: String { case idle, connecting, listening, finishing
             try await session.send(pcm.subdata(in: offset..<min(offset + 3200, pcm.count)))
         }
     }
+    func refreshEscapeShortcut() {
+        disarmEscape()
+        guard let id = generation, let gesture, finalTextToWrite == nil else { return }
+        removeEscape = registerEscape(gesture) { [weak self] in
+            guard let self, self.generation == id, self.finalTextToWrite == nil, self.isAllowed() else { return }
+            self.cancel()
+        }
+    }
+
+    private func disarmEscape() {
+        let remove = removeEscape; removeEscape = nil; remove?()
+    }
+
     func stopRecording() {
         guard phase == .connecting || phase == .listening else { return }
-        pendingWrite = false
-        level = 0; phase = .finishing
-        microphone?.stop()
+        phase = .finishing; stopMeter()
+        microphone?.stop(); monitor?.cancel(); monitor = nil
+        if let id = generation { armFinishTimer(id: id, delivery: false) }
     }
-    func cancel(message: String = "已取消，已输入的文字保留。") {
-        notice = message
+    func cancel(message: String = "听写已取消。") {
+        // Lifecycle events and the cancel shortcut can also arrive while idle.
+        dismissReceipt(); guard isBusy else { return }
+        notice = finalTextToWrite == nil ? message : message + " 本次定稿仍可在面板复制。"
         releaseResources()
     }
     func clearResult() {
         guard !isBusy else { return }
-        transcript = ""; lastResult = ""; notice = ""
+        transcript = ""; lastResult = ""; finalResultID = nil; notice = ""
     }
 
-    private func scheduleTextWrite() {
-        guard pendingWrite, let target, let id = generation, textWriter == nil else { return }
-        textWriter = Task { [weak self, target] in
-            guard let self else { return }
-            defer {
-                if self.generation == id {
-                    self.textWriter = nil
-                    if self.pendingWrite { self.scheduleTextWrite() }
-                }
-            }
-            do {
-                while self.generation == id, self.pendingWrite, self.target != nil {
-                    let delay = self.finalTextToWrite == nil ? 0.15 - (ProcessInfo.processInfo.systemUptime - self.lastWrite) : 0
-                    if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
-                    try Task.checkCancellation()
-                    guard self.generation == id, self.isAllowed() else { throw CancellationError() }
-                    guard self.pendingWrite else { return }
-                    if self.phase == .finishing, self.finalTextToWrite == nil {
-                        self.pendingWrite = false
-                        return
-                    }
-                    try self.requirePermissions([.accessibility])
-                    // Coalesce partials, but freeze finishing output until the final is ready.
-                    let final = self.finalTextToWrite
-                    let text = final ?? self.transcript
-                    self.pendingWrite = false
-                    if final != nil { try await target.commitFinal(text) }
-                    else { try await target.update(text) }
-                    try Task.checkCancellation()
-                    guard self.generation == id else { return }
-                    self.acknowledgedTextLength = text.utf16.count
-                    self.lastWrite = ProcessInfo.processInfo.systemUptime
-                }
-            } catch {
-                guard self.generation == id else { return }
-                self.detachTarget(error)
-                self.stopRecording()
+    private func display(_ text: String) {
+        transcript = text
+        if !text.isEmpty { lastResult = text }
+        let slice = DictationCaptionSlice(text)
+        if slice != captionSlice { captionSlice = slice }
+    }
+
+    /// Resolve the destination once, at the authoritative final (not key-up or the first draft).
+    /// If focus changes after capture, never resolve a second field or synthesize a paste.
+    private func completeFinal(_ text: String, id: UUID) async throws {
+        try Task.checkCancellation()
+        guard generation == id, isAllowed() else { throw CancellationError() }
+        if hasInsertionAccess() {
+            do { target = try makeTarget() }
+            catch { notice = error.localizedDescription }
+        } else { notice = "未获辅助功能授权，无法直接插入。" }
+        let attempted = target != nil
+        if let target { await deliverFinal(text, to: target, id: id) }
+        try Task.checkCancellation()
+        guard generation == id, isAllowed() else { throw CancellationError() }
+        // Only the owning run completes the result, after the worker has acknowledged,
+        // failed or been revoked. No suspension between fallback and closing this session.
+        if target == nil { copyUndeliveredFinal(text, wasAttempted: attempted) }
+        finalResultID = id
+        releaseResources()
+        await history.record(id: id, text: text)
+    }
+    private func copyUndeliveredFinal(_ text: String, wasAttempted: Bool) {
+        let message: String
+        do {
+            try copyFinal(text) // Only this path writes the clipboard; timer/worker/cancel never do.
+            message = wasAttempted ? "定稿已复制，粘贴前请核对输入框" : "定稿已复制到剪贴板"
+        } catch { message = "未能复制定稿，可在语音输入面板手动复制" }
+        notice += (notice.isEmpty ? "" : " ") + message + "。"
+        if let hud {
+            hud.showReceipt(message); receipt = hud; self.hud = nil
+            receiptTimer = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                self?.dismissReceipt()
             }
         }
     }
-    private func flushTextWrites(id: UUID) async {
-        while generation == id, target != nil {
-            if pendingWrite { scheduleTextWrite() }
-            guard let writer = textWriter else { return }
-            await writer.value
+    private func dismissReceipt() {
+        receiptTimer?.cancel(); receiptTimer = nil; receipt?.close(); receipt = nil
+    }
+
+    /// Called only by the single finish() result. A stalled AX read/ACK must not stall
+    /// resource cleanup; the timer revokes this specific target and never resends its text.
+    private func deliverFinal(_ text: String, to target: any DictationFinalInserting, id: UUID) async {
+        await withCheckedContinuation { continuation in
+            finalDeliveryWaiter = continuation
+            armFinishTimer(id: id, delivery: true)
+            textWriter = Task { [weak self, target] in
+                guard let self, self.generation == id else { return }
+                defer { if self.generation == id { self.textWriter = nil; self.resolveDelivery() } }
+                do {
+                    try Task.checkCancellation()
+                    guard self.isAllowed(), self.target === target else { throw CancellationError() }
+                    guard self.hasInsertionAccess() else { throw PluginError.invalid("辅助功能授权已失效，无法直接插入。") }
+                    try await target.commitFinal(text)
+                    try Task.checkCancellation()
+                    guard self.generation == id, self.target === target else { return }
+                    self.acknowledgedTextLength = target.acknowledgedLength ?? text.utf16.count
+                } catch {
+                    guard self.generation == id, self.target === target else { return }
+                    self.detachTarget(error)
+                }
+            }
+        }
+    }
+    private func resolveDelivery() {
+        let waiter = finalDeliveryWaiter; finalDeliveryWaiter = nil; waiter?.resume()
+    }
+
+    // Never await a stalled editor Task.value to leave finishing. Revoke the actual
+    // target first; a late worker cannot post to the editor or complete a new session.
+    private func armFinishTimer(id: UUID, delivery: Bool) {
+        finishTimer?.cancel()
+        let budget = delivery ? deliveryBudget : recognitionBudget
+        finishTimer = Task { [weak self] in
+            do { try await Task.sleep(for: budget) } catch { return }
+            guard let self, self.generation == id, self.phase == .finishing else { return }
+            if delivery, self.finalDeliveryWaiter != nil {
+                self.detachTarget(PluginError.invalid("输入框未及时确认，已停止自动写入。"))
+                self.textWriter?.cancel()
+                self.resolveDelivery()
+            } else if !delivery, self.finalTextToWrite == nil {
+                self.cancel(message: "等待语音定稿超时，已停止；未定稿的文字可在面板核对。")
+            }
         }
     }
     private func detachTarget(_ error: Error) {
-        target?.cancel(); target = nil; pendingWrite = false
+        target?.cancel(); target = nil
         notice = error.localizedDescription
     }
+    private func stopMeter() {
+        meterReader?.cancel(); meterReader = nil
+        if waveReadings.value != .quiet { waveReadings.send(.quiet) }
+    }
     private func releaseResources() {
-        generation = nil; gesture = nil
+        generation = nil; gesture = nil; disarmEscape(); stopMeter()
+        finishTimer?.cancel(); finishTimer = nil; resolveDelivery()
         if let microphone { microphone.stop(); refreshAudioDiagnostics(microphone) }
         microphone = nil
         session?.cancel(); session = nil
         task?.cancel(); task = nil; monitor?.cancel(); monitor = nil
-        target?.cancel(); target = nil; pendingWrite = false; finalTextToWrite = nil; level = 0
+        target?.cancel(); target = nil; finalTextToWrite = nil; captionSlice = DictationCaptionSlice("")
         textWriter?.cancel(); textWriter = nil
         hud?.close(); hud = nil
         phase = .idle

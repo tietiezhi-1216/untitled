@@ -14,8 +14,8 @@ struct CapturePinSurface: NSViewRepresentable {
         weak var manager:CapturePinManager?
         var id:UUID?
         var image:CGImage?
+        var mouseSettings = CapturePinMouseSettings.shared
         private var anchor:CGPoint?
-        private var lastScreen:CGPoint?
         private var selecting=false
         private var dragText=false
         private var dragImage=false
@@ -85,10 +85,10 @@ struct CapturePinSurface: NSViewRepresentable {
             window?.makeKey();window?.makeFirstResponder(self)
             let point=convert(event.locationInWindow,from:nil)
             let selectingWord=event.clickCount==2 && lineAt(point) != nil && !event.modifierFlags.contains(.option) && (UserDefaults.standard.object(forKey:"capture.pin.selectText") as? Bool ?? true)
-            if !selectingWord,let action=CapturePinMouseSettings.shared.action(event,phase:"click"),handle(action,event:event) { return }
+            if !selectingWord,let action=mouseSettings.action(event,phase:"click"),handle(action,event:event) { return }
             manager.select(id,extending:false)
-            anchor=point;lastScreen=NSEvent.mouseLocation
-            let dragAction=CapturePinMouseSettings.shared.action(event,phase:"drag")
+            anchor=point
+            let dragAction=mouseSettings.action(event,phase:"drag")
             dragImage=dragAction == .export;dragText=false
             if dragImage { return }
             if dragAction != .moveIgnoringText,(UserDefaults.standard.object(forKey:"capture.pin.selectText") as? Bool ?? true),let index=lineAt(point) {
@@ -129,14 +129,16 @@ struct CapturePinSurface: NSViewRepresentable {
             if event.modifierFlags.contains(.shift),manager.record(id)?.viewport != nil {
                 let v=viewport;let dx=(point.x-anchor.x)/max(1,bounds.width)*v.width,dy=(point.y-anchor.y)/max(1,bounds.height)*v.height
                 manager.setViewport(id,CGRect(x:min(1-v.width,max(0,v.minX-dx)),y:min(1-v.height,max(0,v.minY-dy)),width:v.width,height:v.height));self.anchor=point
-            } else if let lastScreen {
-                let screen=NSEvent.mouseLocation;manager.dragSelection(id,delta:CGSize(width:screen.x-lastScreen.x,height:screen.y-lastScreen.y));self.lastScreen=screen
+            } else {
+                // Follow the drag's motion even when the pointer's absolute
+                // position has stopped changing at a physical display edge.
+                manager.dragSelection(id, delta: CGSize(width: event.deltaX, height: -event.deltaY))
             }
         }
-        override func mouseUp(with event:NSEvent) { anchor=nil;lastScreen=nil;selecting=false;dragImage=false;dragText=false }
+        override func mouseUp(with event:NSEvent) { anchor=nil;selecting=false;dragImage=false;dragText=false }
         override func rightMouseDown(with event:NSEvent) {
-            if let action=CapturePinMouseSettings.shared.action(event,phase:"click"),action != .menu,handle(action,event:event) { return }
-            if CapturePinMouseSettings.shared.action(event,phase:"drag") != nil { mouseDown(with:event);return }
+            if let action=mouseSettings.action(event,phase:"click"),action != .menu,handle(action,event:event) { return }
+            if mouseSettings.action(event,phase:"drag") != nil { mouseDown(with:event);return }
             rightDragOrigin=convert(event.locationInWindow,from:nil)
         }
         override func rightMouseDragged(with event:NSEvent) {
@@ -159,7 +161,7 @@ struct CapturePinSurface: NSViewRepresentable {
         }
         override func scrollWheel(with event:NSEvent) {
             guard let id else { return }
-            let action=CapturePinMouseSettings.shared.action(event,phase:"wheel")
+            let action=mouseSettings.action(event,phase:"wheel")
             if action == .zoom || action == .opacity { manager?.scroll(id,delta:event.scrollingDeltaY,opacity:action == .opacity) }
             else if event.modifierFlags == .option { manager?.scroll(id,delta:event.scrollingDeltaY*0.1,opacity:false) }
         }

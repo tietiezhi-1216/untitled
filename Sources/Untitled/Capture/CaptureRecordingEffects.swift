@@ -13,6 +13,7 @@ struct RecordingEffectOptions: Codable, Equatable, Sendable {
     var keySize = 24.0
     var keyDuration = 1.5
     var background = "dark"
+    var isEnabled: Bool { cursor || clicks || keys }
 }
 
 struct RecordingEffectsControls: View {

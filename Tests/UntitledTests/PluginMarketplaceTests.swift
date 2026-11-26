@@ -125,22 +125,25 @@ struct PluginMarketplaceTests {
         defer { application.appearance = previousAppearance }
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = PluginStore(directory: directory)
         let presentations = PluginPresentationIndex.bundled.plugins
         #expect(presentations.count == 4)
-        for (index, appearance) in presentations.enumerated() {
-            var plugin = manifest(id: "dev.test.card-\(index)", name: appearance.name,
-                                  author: index == 0 ? String(repeating: "Long author ", count: 30) : "tietiezhi-1216",
-                                  minimumHostVersion: HostInfo.version)
-            plugin.icon = appearance.icon
-            plugin.storefront = appearance.storefront
-            try store.installManifest(plugin, readme: "# \(appearance.name)\n\n可离线阅读的插件文档。\n\n## 使用\n\n1. 打开插件。\n2. 根据说明使用。\n\n```text\n示例内容\n```")
+        let catalog = presentations.enumerated().map { index, appearance in
+            CatalogEntry(id: "dev.test.card-\(index)", name: appearance.name, version: "1.0.0",
+                         summary: "简洁的功能说明。",
+                         author: index == 0 ? String(repeating: "Long author ", count: 30) : "tietiezhi-1216",
+                         downloadURL: URL(string: "https://github.com/alice/plugin/releases/download/v1.0.0/plugin.zip")!,
+                         sha256: String(repeating: "a", count: 64), icon: appearance.icon, storefront: appearance.storefront)
+        }
+        let store = PluginStore(directory: directory, initialCatalog: catalog)
+        for entry in catalog {
+            let plugin = manifest(id: entry.id, name: entry.name, author: entry.author)
+            try store.installManifest(plugin, readme: "# \(entry.name)\n\n可离线阅读的插件文档。\n\n## 使用\n\n1. 打开插件。\n2. 根据说明使用。\n\n```text\n示例内容\n```")
         }
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             application.appearance = NSAppearance(named: appearance)
             for width in [655.0, 815.0, 1055.0] {
                 let observation = MarketplaceBounds()
-                let navigation = PluginMarketplaceNavigation(scope: .installed)
+                let navigation = PluginMarketplaceNavigation()
                 let root = PluginStoreView(navigation: navigation) { _ in }
                     .environment(\.colorScheme, appearance == .darkAqua ? .dark : .light)
                     .background(PanelPalette.store(appearance == .darkAqua ? .dark : .light))
@@ -151,18 +154,13 @@ struct PluginMarketplaceTests {
                 let host = NSHostingView(rootView: root)
                 let window = makeWindow(host, width: width)
                 await settle(host, window: window)
-                let controls = try #require(observation.frames["store.controls"])
+                let controls = try #require(observation.frames["panel.header"])
                 let title = try #require(observation.frames["panel.title"])
-                let scope = try #require(observation.frames["store.scope"])
                 let filter = try #require(observation.frames["store.filter"])
-                #expect(title.maxY < controls.minY)
-                #expect(abs(title.minX - scope.minX) < 1)
+                #expect(observation.frames["store.scope"] == nil)
                 #expect(filter.maxX <= width - 27)
-                for control in [scope, filter] {
-                    #expect(controls.insetBy(dx: -1, dy: -1).contains(control))
-                    #expect(abs(control.midY - scope.midY) < 1)
-                }
-                #expect(scope.maxX < filter.minX)
+                #expect(title.maxX < filter.minX)
+                #expect(title.minY < filter.maxY && filter.minY < title.maxY)
                 let cards = try store.installed.map { plugin in
                     let card = try #require(observation.frames["store.card.\(plugin.id)"])
                     let header = try #require(observation.frames["store.card.\(plugin.id).header"])
@@ -179,26 +177,41 @@ struct PluginMarketplaceTests {
                 #expect(cards.allSatisfy { $0.minY >= controls.maxY && $0.minX >= 27 && $0.maxX <= width - 27 })
                 let firstRow = cards.filter { abs($0.minY - (cards.first?.minY ?? 0)) < 1 }
                 #expect(firstRow.count == 2)
+                let scroll = try #require(galleryScroll(in: host))
+                let indicator = try #require(scroll.verticalScroller as? PanelGalleryScroller)
+                let indicatorFrame = indicator.convert(indicator.bounds, to: host)
+                let lastCardEdge = try #require(cards.map(\.maxX).max())
+                #expect(abs(host.bounds.maxX - indicatorFrame.maxX - 8) < 1)
+                #expect(indicatorFrame.minX - lastCardEdge >= 7)
+                #expect(scroll.scrollerStyle == .legacy && !scroll.autohidesScrollers)
+                if appearance == .darkAqua && width == 815 {
+                    try await Task.sleep(for: .milliseconds(1250))
+                }
+                #expect(indicator.isEnabled && !indicator.isHiddenOrHasHiddenAncestor && indicator.alphaValue == 1)
                 try snapshot(host, filename: "store-\(appearance.rawValue)-\(Int(width)).png")
                 navigation.search = "语音输入"
                 await settle(host, window: window)
                 let matches = observation.frames.keys.filter { $0.hasPrefix("store.card.") && !$0.hasSuffix(".header") && !$0.hasSuffix(".identity") && !$0.hasSuffix(".action") && !$0.hasSuffix(".preview") }
                 #expect(matches.count == 1)
+                #expect(!indicator.isEnabled)
                 if appearance == .darkAqua && width == 815 {
-                    let legacy = manifest(id: "dev.test.legacy", name: "Legacy")
-                    try store.installManifest(legacy)
-                    navigation.search = ""
-                    navigation.category = "效率工具"
+                    navigation.search = "效率工具"
                     await settle(host, window: window)
-                    let genreMatches = observation.frames.keys.filter { $0.hasPrefix("store.card.") && !$0.hasSuffix(".header") && !$0.hasSuffix(".identity") && !$0.hasSuffix(".action") && !$0.hasSuffix(".preview") }
-                    #expect(genreMatches.count == 2)
-                    store.uninstall(legacy.id)
+                    #expect(!observation.frames.keys.contains { $0.hasPrefix("store.card.") })
+                    navigation.search = ""
+                    navigation.onlyUninstalled = true
+                    await settle(host, window: window)
+                    #expect(!observation.frames.keys.contains { $0.hasPrefix("store.card.") })
                 }
                 window.close()
             }
         }
-        let plugin = try #require(store.installed.first)
-        let detail = PluginStoreDetailView(item: .installed(plugin, store: store), goBack: {}, openPlugin: { _ in })
+        let entry = try #require(catalog.first)
+        let detail = PluginStoreDetailView(
+            item: PluginStoreItem(id: entry.id, entry: entry, plugin: store.installed.first { $0.id == entry.id },
+                                  presentation: store.presentation(for: entry), author: entry.author),
+            goBack: {}, openPlugin: { _ in }
+        )
             .environment(\.colorScheme, .dark).background(PanelPalette.content(.dark))
             .environmentObject(store)
         let host = NSHostingView(rootView: detail)
@@ -207,21 +220,26 @@ struct PluginMarketplaceTests {
         try snapshot(host, filename: "detail.png")
         window.close()
 
-        // The stress snapshots above keep the long author; the shareable preview uses ordinary metadata.
-        for plugin in store.installed where plugin.manifest.author.hasPrefix("Long author") {
-            var json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(plugin.manifest)) as? [String: Any])
-            json["author"] = "tietiezhi-1216"
-            let cleaned = try JSONDecoder().decode(PluginManifest.self, from: JSONSerialization.data(withJSONObject: json))
-            try store.installManifest(cleaned, readme: plugin.readme)
-        }
-        let fullRoot = ContentView(initialStoreScope: .installed).environmentObject(store)
+        let local = manifest(id: "dev.test.local-only", name: "Local Only")
+        try store.installManifest(local)
+        let sidebarObservation = MarketplaceBounds()
+        let fullRoot = ContentView().environmentObject(store)
             .environment(\.colorScheme, .dark)
+            .onPreferenceChange(PanelLayoutBoundsKey.self) { frames in
+                MainActor.assumeIsolated { sidebarObservation.frames = frames }
+            }
         let fullHost = NSHostingView(rootView: fullRoot)
         let fullWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         fullWindow.isReleasedWhenClosed = false
         fullWindow.contentView = fullHost
         await settle(fullHost, window: fullWindow)
+        #expect(sidebarObservation.frames["navigation.__store__"] != nil)
+        #expect(sidebarObservation.frames["navigation.__installed__"] == nil)
+        for plugin in store.installed {
+            #expect(sidebarObservation.frames["navigation.\(plugin.id)"] != nil)
+        }
+        #expect(sidebarObservation.frames["store.card.\(local.id)"] == nil)
         try snapshot(fullHost, filename: "window-dark.png")
         fullWindow.close()
     }
@@ -230,6 +248,11 @@ struct PluginMarketplaceTests {
                           minimumHostVersion: String = "0.2.0") -> PluginManifest {
         PluginManifest(schemaVersion: 1, id: id, name: name, version: version, summary: "简洁的功能说明。", author: author,
                        repository: HostInfo.repository, minimumHostVersion: minimumHostVersion, actions: [.showMainWindow], templates: [])
+    }
+
+    @MainActor private func galleryScroll(in view: NSView) -> NSScrollView? {
+        if let scroll = view as? NSScrollView, scroll.verticalScroller is PanelGalleryScroller { return scroll }
+        return view.subviews.lazy.compactMap { galleryScroll(in: $0) }.first
     }
 
     @MainActor private func makeWindow(_ host: NSView, width: CGFloat) -> NSWindow {

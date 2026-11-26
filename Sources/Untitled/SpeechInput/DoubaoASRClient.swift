@@ -9,6 +9,26 @@ import Foundation
     func cancel()
 }
 
+/// ASREnded is the recognition barrier. SessionFinished acknowledges cleanup, not text.
+/// A segment final alongside an outstanding partial is not a complete transcript.
+struct DoubaoASREnding {
+    private(set) var asrEnded = false
+    var cleanupSubmitted = false
+    var sessionFinished = false
+    mutating func endASR() -> Bool {
+        guard !asrEnded else { return false }
+        asrEnded = true; return true
+    }
+    func result(_ transcript: DoubaoTranscript, skipCleanup: Bool = false) -> String? {
+        // Flat legacy segments have no whole-session final bit. Keep their original
+        // terminal barrier; a single confirmed segment must not truncate the rest.
+        guard asrEnded, cleanupSubmitted || sessionFinished || skipCleanup,
+              transcript.hasWholeSessionFinal || sessionFinished,
+              transcript.finalCount > 0, transcript.pending.isEmpty else { return nil }
+        return transcript.confirmed
+    }
+}
+
 /// One bounded session. No retries: reconnecting must never silently resend a recording.
 @MainActor final class DoubaoASRClient: DoubaoSpeechSession {
     var onTranscript: ((String) -> Void)?
@@ -19,6 +39,9 @@ import Foundation
     private var watchdog: Task<Void, Never>?
     private var waiter: (event: String, continuation: CheckedContinuation<DoubaoASRProtocol.Message, Error>)?
     private var operationStarted: TimeInterval?
+    private var ending: DoubaoASREnding?
+    private var endWaiter: CheckedContinuation<String, Error>?
+    private var endSend: Task<Void, Never>?
     private var closed = false
     private var ready = false
     private var taskID = ""
@@ -41,8 +64,13 @@ import Foundation
             do {
                 while !Task.isCancelled {
                     try await Task.sleep(for: .seconds(1))
-                    if let start = self?.operationStarted, ProcessInfo.processInfo.systemUptime - start > 15 {
-                        self?.fail(PluginError.invalid("豆包语音响应超时，已停止录音；可重新开始。"))
+                    guard let self else { return }
+                    // Even local flow-control on FinishSession must not hold sealed text
+                    // past this tick. Without the recognition barrier this resolves nothing.
+                    if self.resolveEnding(skipCleanup: true) { return }
+                    if let start = self.operationStarted, ProcessInfo.processInfo.systemUptime - start > 15 {
+                        let message = self.ending == nil ? "豆包语音响应超时，已停止录音；可重新开始。" : "等待豆包定稿超时，已停止；中间草稿保留在面板。"
+                        self.transportFailed(PluginError.invalid(message))
                         return
                     }
                 }
@@ -68,11 +96,13 @@ import Foundation
                         @unknown default: throw PluginError.invalid("豆包返回了未知语音消息。")
                         }
                         try self?.receive(message)
-                        if message.event == "SessionFinished" { break }
+                        if self?.closed != false { break } // A cleanup ACK is not necessarily the final ASRResponse.
                     }
                 } catch {
                     guard !Task.isCancelled else { return }
-                    self?.fail(error is PluginError ? error : PluginError.invalid("豆包语音连接中断，请检查网络后重新开始。"))
+                    if error is PluginError { self?.fail(error) }
+                    else if error is DecodingError { self?.fail(PluginError.invalid("豆包语音响应无法解析，已停止听写。")) }
+                    else { self?.transportFailed(PluginError.invalid("豆包语音连接中断；未定稿的草稿保留在面板。")) }
                 }
             }
             let task = try await command("StartTask", expecting: "TaskStarted")
@@ -103,17 +133,51 @@ import Foundation
     }
 
     func finish() async throws -> String {
-        guard ready, !closed else { throw CancellationError() }
-        ready = false
-        _ = try await command("EndASR", expecting: "ASREnded")
-        _ = try await command("FinishSession", expecting: "SessionFinished")
-        guard transcript.finalCount > 0 else {
-            cancel()
-            throw PluginError.invalid("豆包未返回最终识别结果；已保留中间文字，请重试。")
+        try Task.checkCancellation()
+        guard ready, !closed, socket != nil else { throw CancellationError() }
+        ready = false; ending = DoubaoASREnding(); operationStarted = ProcessInfo.processInfo.systemUptime
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                endWaiter = continuation
+                sendEnding("EndASR")
+            }
+        } onCancel: { Task { @MainActor [weak self] in self?.cancel() } }
+    }
+
+    private func sendEnding(_ event: String) {
+        guard let socket else { return }
+        let packet = DoubaoASRProtocol.request(event, taskID: taskID)
+        endSend = Task { [weak self, socket] in
+            do {
+                try Task.checkCancellation()
+                try await socket.send(.data(packet))
+                guard !Task.isCancelled, let self, !self.closed else { return }
+                if event == "FinishSession" {
+                    self.ending?.cleanupSubmitted = true
+                    self.resolveEnding()
+                }
+            } catch {
+                guard !Task.isCancelled, let self, !self.closed else { return }
+                if event == "EndASR", self.ending?.asrEnded == true { return } // Already acknowledged.
+                self.transportFailed(PluginError.invalid("豆包语音结束请求未能送达；请在面板核对已保留的文字。"))
+            }
         }
-        let text = transcript.confirmed
+    }
+
+    @discardableResult private func resolveEnding(skipCleanup: Bool = false) -> Bool {
+        guard let value = ending?.result(transcript, skipCleanup: skipCleanup), let endWaiter else { return false }
+        self.endWaiter = nil
         close(code: .normalClosure)
-        return text
+        endWaiter.resume(returning: value)
+        return true
+    }
+
+    private func transportFailed(_ error: Error) {
+        // A failure to close a connection cannot invalidate an already sealed result.
+        guard !resolveEnding(skipCleanup: true) else { return }
+        if ending?.asrEnded == true {
+            fail(PluginError.invalid("豆包已结束识别，但没有返回完整定稿；中间草稿保留在面板。"))
+        } else { fail(error) }
     }
 
     func cancel() { close(code: .goingAway) }
@@ -153,6 +217,11 @@ import Foundation
             try transcript.consume(message.payload)
             onTranscript?(transcript.text)
         }
+        if ending != nil {
+            if message.event == "ASREnded", ending?.endASR() == true { sendEnding("FinishSession") }
+            if message.event == "SessionFinished", ending?.asrEnded == true { ending?.sessionFinished = true }
+            resolveEnding()
+        }
         if let waiter, waiter.event == message.event {
             self.waiter = nil
             waiter.continuation.resume(returning: message)
@@ -173,6 +242,8 @@ import Foundation
         socket?.cancel(with: code, reason: nil); socket = nil
         session?.invalidateAndCancel(); session = nil
         let pending = waiter; waiter = nil; pending?.continuation.resume(throwing: error)
+        endSend?.cancel(); endSend = nil; ending = nil
+        let completion = endWaiter; endWaiter = nil; completion?.resume(throwing: error)
         operationStarted = nil; recentIDs.removeAll(); taskID = ""; transcript = DoubaoTranscript()
         onTranscript = nil; onFailure = nil
     }

@@ -59,6 +59,12 @@ final class CaptureScrollView: NSScrollView {
 final class CaptureDrawingView: NSView {
     var image: CGImage?
     var floating = false
+    var captureOverlay = false
+    var coordinateOrigin = CGPoint.zero
+    var captureClip: CGPath?
+    var captureCursorOverride: ((CGPoint) -> CaptureInteractionCursor?)?
+    var captureRangeEvent: ((NSEvent) -> Void)?
+    private var forwardingRange = false
     var bitmap: NSBitmapImageRep?
     var tool = CaptureTool.move {
         didSet { if tool != oldValue { points=[];hover=nil;editing=nil;windowDrag=nil;window?.invalidateCursorRects(for:self) } }
@@ -84,7 +90,7 @@ final class CaptureDrawingView: NSView {
     var pixel: ((String) -> Void)?
     private var points: [CGPoint] = []
     private var hover: CGPoint?
-    private var imageRect = CGRect.zero
+    private(set) var imageRect = CGRect.zero
     private var windowDrag: (start:CGPoint,origin:CGPoint)?
     private var editing: (mark:CaptureMark,handle:CaptureMarkHandle?,start:CGPoint)?
     private var scale: CGFloat { guard let image else { return 1 };return max(0.0001,imageRect.width/CGFloat(image.width)) }
@@ -93,9 +99,9 @@ final class CaptureDrawingView: NSView {
     override func acceptsFirstMouse(for event:NSEvent?) -> Bool { true }
     func sizeCanvas(_ available:CGSize) {
         guard let image else { return }
-        let inset:CGFloat = floating ? 0:48
+        let inset:CGFloat = floating || captureOverlay ? 0:48
         let fit=min((available.width-inset)/CGFloat(image.width),(available.height-inset)/CGFloat(image.height))
-        let factor=zoom == 0 ? (floating ? fit:min(fit,1)):zoom
+        let factor=zoom == 0 ? (floating || captureOverlay ? fit:min(fit,1)):zoom
         let size=CGSize(width:CGFloat(image.width)*max(0.0001,factor),height:CGFloat(image.height)*max(0.0001,factor))
         setFrameSize(CGSize(width:max(available.width,size.width+inset),height:max(available.height,size.height+inset)))
         imageRect=CGRect(x:(bounds.width-size.width)/2,y:(bounds.height-size.height)/2,width:size.width,height:size.height)
@@ -103,17 +109,25 @@ final class CaptureDrawingView: NSView {
     }
     override func updateTrackingAreas() {
         trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect:.zero,options:[.mouseMoved,.activeAlways,.inVisibleRect],owner:self))
+        addTrackingArea(NSTrackingArea(rect:.zero,options:[.mouseMoved,.cursorUpdate,.activeAlways,.inVisibleRect],owner:self))
         super.updateTrackingAreas()
     }
-    override func resetCursorRects() { addCursorRect(imageRect,cursor:tool == .move ? .openHand:tool == .select ? .arrow:.crosshair) }
-    private func display(_ p:CGPoint) -> CGPoint { CGPoint(x:imageRect.minX+p.x*scale,y:imageRect.minY+p.y*scale) }
+    override func resetCursorRects() { addCursorRect(imageRect,cursor:CaptureInteractionCursor.tool(tool).native) }
+    override func cursorUpdate(with event:NSEvent) { interactionCursor(at:convert(event.locationInWindow,from:nil),modifiers:event.modifierFlags).native.set() }
+    override func flagsChanged(with event:NSEvent) { super.flagsChanged(with:event);cursorUpdate(with:event) }
+    private func display(_ p:CGPoint) -> CGPoint { CGPoint(x:imageRect.minX+(p.x-coordinateOrigin.x)*scale,y:imageRect.minY+(p.y-coordinateOrigin.y)*scale) }
     override func draw(_ dirtyRect:NSRect) {
-        if !floating { NSColor(calibratedWhite:0.12,alpha:1).setFill();bounds.fill() }
+        if !floating && !captureOverlay { NSColor(calibratedWhite:0.12,alpha:1).setFill();bounds.fill() }
         guard let image else { return }
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        if let captureClip { NSBezierPath(cgPath:captureClip).addClip() }
+        let draft=draft()
         var output=image
-        if let draft=draft() { output=(try? CaptureImage.render(image,marks:[draft])) ?? image }
-        NSImage(cgImage:output,size:.zero).draw(in:imageRect,from:.zero,operation:.sourceOver,fraction:1,respectFlipped:true,hints:nil)
+        if let draft { output=(try? CaptureImage.render(image,marks:[draft.moving(by:CGSize(width:-coordinateOrigin.x,height:-coordinateOrigin.y))])) ?? image }
+        // The live selector already paints the source-aligned document below.
+        // Its always-available hit/handle canvas must not draw a second copy.
+        if !captureOverlay || draft != nil { NSImage(cgImage:output,size:.zero).draw(in:imageRect,from:.zero,operation:.sourceOver,fraction:1,respectFlipped:true,hints:nil) }
         if let mark=marks.first(where: { $0.id == selectedID }) {
             let handles=mark.handles(scale:scale)
             if ![.arrow,.line].contains(mark.tool) {
@@ -131,18 +145,30 @@ final class CaptureDrawingView: NSView {
             }
         }
     }
-    private func point(_ event:NSEvent,clamped:Bool=false) -> CGPoint? {
+    private func sourcePoint(at location:CGPoint,clamped:Bool=false) -> CGPoint? {
         guard image != nil else { return nil }
-        var p=convert(event.locationInWindow,from:nil)
+        var p=location
         if clamped { p.x=min(imageRect.maxX,max(imageRect.minX,p.x));p.y=min(imageRect.maxY,max(imageRect.minY,p.y)) }
         guard imageRect.contains(p) || clamped else { return nil }
-        return CGPoint(x:(p.x-imageRect.minX)/scale,y:(p.y-imageRect.minY)/scale)
+        if captureOverlay,!clamped,let captureClip,!captureClip.contains(p) { return nil }
+        return CGPoint(x:(p.x-imageRect.minX)/scale+coordinateOrigin.x,y:(p.y-imageRect.minY)/scale+coordinateOrigin.y)
+    }
+    private func point(_ event:NSEvent,clamped:Bool=false) -> CGPoint? { sourcePoint(at:convert(event.locationInWindow,from:nil),clamped:clamped) }
+    func interactionCursor(at location:CGPoint,modifiers:NSEvent.ModifierFlags=[]) -> CaptureInteractionCursor {
+        if let override=captureCursorOverride?(location) { return override }
+        if windowDrag != nil { return .closedHand }
+        if let editing { return editing.handle == nil ? .closedHand:.crosshair }
+        guard let p=sourcePoint(at:location) else { return .arrow }
+        if floating,modifiers.contains(.option) { return .openHand }
+        if let mark=marks.first(where:{ $0.id == selectedID }),mark.handles(scale:scale).contains(where:{ hypot($0.point.x-p.x,$0.point.y-p.y)<=9/scale }) { return .crosshair }
+        if tool.isDefaultInteraction,(floating || captureOverlay) { return .openHand }
+        return CaptureInteractionCursor.tool(tool)
     }
     override func mouseMoved(with event:NSEvent) {
         guard let p=point(event) else { return }
         if tool == .line,style.polyline,!points.isEmpty { hover=p;needsDisplay=true }
-        if let mark=marks.first(where: { $0.id == selectedID }),mark.handles(scale:scale).contains(where: { hypot($0.point.x-p.x,$0.point.y-p.y)<8/scale }) { NSCursor.crosshair.set() }
-        if let bitmap,let c=bitmap.colorAt(x:min(bitmap.pixelsWide-1,max(0,Int(p.x))),y:min(bitmap.pixelsHigh-1,max(0,Int(p.y))))?.usingColorSpace(.deviceRGB) {
+        cursorUpdate(with:event)
+        if let bitmap,let c=bitmap.colorAt(x:min(bitmap.pixelsWide-1,max(0,Int(p.x-coordinateOrigin.x))),y:min(bitmap.pixelsHigh-1,max(0,Int(p.y-coordinateOrigin.y))))?.usingColorSpace(.deviceRGB) {
             func byte(_ v:CGFloat)->Int { min(255,max(0,Int((v*255).rounded()))) }
             pixel?(String(format:"#%02X%02X%02X",byte(c.redComponent),byte(c.greenComponent),byte(c.blueComponent)))
         }
@@ -151,21 +177,25 @@ final class CaptureDrawingView: NSView {
     override func mouseDown(with event:NSEvent) {
         window?.makeKey();window?.makeFirstResponder(self)
         guard let p=point(event) else { return }
-        if floating,(tool == .move || event.modifierFlags.contains(.option)) { beginWindowDrag(event);return }
+        if floating,event.modifierFlags.contains(.option) { beginWindowDrag(event);return }
         if tool == .deleteMarks { erase(at:p);return }
         if let mark=marks.first(where: { $0.id == selectedID }),let handle=mark.handles(scale:scale).reversed().first(where: { hypot($0.point.x-p.x,$0.point.y-p.y)<=9/scale }) {
-            beginEdit?(mark.id);editing=(mark,handle.kind,p);return
+            beginEdit?(mark.id);editing=(mark,handle.kind,p);cursorUpdate(with:event);return
         }
         if let mark=marks.reversed().first(where: {
-            guard tool == .select || $0.tool == tool else { return false }
+            guard tool.isDefaultInteraction || $0.tool == tool else { return false }
             return $0.hit(p,tolerance:6/scale) || ($0.id == selectedID && $0.selectionBounds.contains($0.rotated(p,inverse:true)) && ![.arrow,.line,.pen,.highlight].contains($0.tool))
         }) {
             select(mark.id)
             if event.clickCount==2,[.text,.watermark,.arrow,.number].contains(mark.tool) { editText?(mark.id);return }
-            beginEdit?(mark.id);editing=(mark,nil,p);return
+            beginEdit?(mark.id);editing=(mark,nil,p);cursorUpdate(with:event);return
         }
         select(nil)
-        if tool == .select { if floating { beginWindowDrag(event) };return }
+        if tool.isDefaultInteraction {
+            if captureOverlay,let captureRangeEvent { forwardingRange=true;captureRangeEvent(event) }
+            else if floating { beginWindowDrag(event) }
+            return
+        }
         if tool == .line,style.polyline {
             if points.last.map({ hypot($0.x-p.x,$0.y-p.y)>1/scale }) ?? true { points.append(p) }
             if event.clickCount>=2 { completeDraft() };return
@@ -177,6 +207,7 @@ final class CaptureDrawingView: NSView {
         windowDrag=(window.convertPoint(toScreen:event.locationInWindow),window.frame.origin);NSCursor.closedHand.set()
     }
     override func mouseDragged(with event:NSEvent) {
+        if forwardingRange { captureRangeEvent?(event);return }
         if let drag=windowDrag,let window {
             let p=window.convertPoint(toScreen:event.locationInWindow)
             window.setFrameOrigin(CGPoint(x:drag.origin.x+p.x-drag.start.x,y:drag.origin.y+p.y-drag.start.y));return
@@ -186,10 +217,10 @@ final class CaptureDrawingView: NSView {
         if let edit=editing {
             let mark=edit.handle.map { edit.mark.adjusting($0,to:p,constrained:event.modifierFlags.contains(.shift)) }
                 ?? edit.mark.moving(by:CGSize(width:p.x-edit.start.x,height:p.y-edit.start.y))
-            preview?(mark);return
+            preview?(mark);cursorUpdate(with:event);return
         }
         guard !points.isEmpty else { return }
-        if [.pen,.highlight].contains(tool) || (tool == .mosaic && style.coverage == .brush) { points.append(p) }
+        if [.pen,.highlight].contains(tool) || (tool == .mosaic && style.coverage == .brush) { if points.count < 8192 { points.append(p) } }
         else if !(tool == .line && style.polyline) {
             var end=p
             if event.modifierFlags.contains(.shift),let a=points.first {
@@ -201,10 +232,11 @@ final class CaptureDrawingView: NSView {
         needsDisplay=true
     }
     override func mouseUp(with event:NSEvent) {
-        if windowDrag != nil { windowDrag=nil;window?.invalidateCursorRects(for:self);if tool == .move { NSCursor.openHand.set() };return }
-        if editing != nil { editing=nil;finishEdit?();needsDisplay=true;return }
+        if forwardingRange { forwardingRange=false;captureRangeEvent?(event);return }
+        if windowDrag != nil { windowDrag=nil;window?.invalidateCursorRects(for:self);cursorUpdate(with:event);return }
+        if editing != nil { editing=nil;finishEdit?();needsDisplay=true;cursorUpdate(with:event);return }
         if tool == .line,style.polyline { return }
-        completeDraft()
+        completeDraft();cursorUpdate(with:event)
     }
     private func draft() -> CaptureMark? {
         guard !points.isEmpty,![.move,.select,.deleteMarks].contains(tool) else { return nil }
@@ -215,10 +247,10 @@ final class CaptureDrawingView: NSView {
         mark.style=style
         if tool == .watermark {
             mark.text=text.isEmpty ? "水印":text
-            if style.watermarkTiled,let image { mark.points=[.zero,CGPoint(x:image.width,y:image.height)] }
+            if style.watermarkTiled,let image { mark.points=[coordinateOrigin,CGPoint(x:coordinateOrigin.x+CGFloat(image.width),y:coordinateOrigin.y+CGFloat(image.height))] }
         }
         if tool == .magnify,style.detachedMagnifier,let image {
-            let area=mark.calloutRect(in:CGRect(x:0,y:0,width:image.width,height:image.height));mark.control=CGPoint(x:area.midX,y:area.midY)
+            let area=mark.calloutRect(in:CGRect(origin:coordinateOrigin,size:CGSize(width:image.width,height:image.height)));mark.control=CGPoint(x:area.midX,y:area.midY)
         }
         if tool == .number { mark.numberValue=number }
         return mark
@@ -238,7 +270,14 @@ final class CaptureDrawingView: NSView {
         if let mark=marks.first(where: { $0.id == selectedID }),mark.tool == .arrow,let p=point(event),hypot(p.x-mark.curveMidpoint.x,p.y-mark.curveMidpoint.y)<12/scale {
             var straight=mark;straight.control=nil;beginEdit?(mark.id);preview?(straight);finishEdit?();return
         }
-        guard let p=point(event),let mark=marks.reversed().first(where:{ $0.hit(p,tolerance:8/scale) }) else { select(nil);return }
+        guard let p=point(event),let mark=marks.reversed().first(where:{ $0.hit(p,tolerance:8/scale) }) else {
+            select(nil)
+            if captureOverlay {
+                _ = cancelActiveInteraction();editing=nil;windowDrag=nil;forwardingRange=false
+                captureRangeEvent?(event)
+            }
+            return
+        }
         select(mark.id)
         let menu=NSMenu()
         for (title,selector) in [("复制标注",#selector(duplicateSelected)),("置于顶层",#selector(frontSelected)),("置于底层",#selector(backSelected)),("删除标注",#selector(deleteSelected))] {
