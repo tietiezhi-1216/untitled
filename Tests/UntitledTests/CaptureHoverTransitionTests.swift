@@ -62,53 +62,89 @@ struct CaptureHoverTransitionTests {
     }
 
     @Test func nativePresentationHasAMiddlePoseAndRetargetsFromThatVisiblePose() async throws {
-        let fixture=try Fixture();defer { fixture.close() }
+        let fixture=try Fixture()
+        let (gate, releaseCleanup) = AsyncStream<Void>.makeStream()
+        defer { fixture.close(); releaseCleanup.finish() }
+        // This test controls the compositor timeline. The separate expiration
+        // tests keep the real wall clock, including with rendering suspended.
+        fixture.backdrop.sleepForHoverCleanup = { _ in
+            for await _ in gate {}
+            try Task.checkCancellation()
+        }
         fixture.panel.orderFrontRegardless()
-        fixture.move(to:CGPoint(x:100,y:100));CATransaction.flush()
-        try await Task.sleep(for:.milliseconds(35))
-        try await fixture.expandToWindow();CATransaction.flush()
-        try await Task.sleep(for:.milliseconds(35))
-        let layer=try #require(fixture.backdrop.layer)
-        let visible=try #require(fixture.outline.presentation()?.path?.boundingBoxOfPath)
-        #expect(visible != Fixture.leaf && visible != Fixture.area && Fixture.area.contains(visible))
-        // Freeze before reading both layers: two independent presentation()
-        // calls can otherwise straddle a WindowServer display refresh. Both
-        // paths must match and restart from this same visible native pose.
-        let paused=layer.convertTime(CACurrentMediaTime(),from:nil)
-        layer.speed=0;layer.timeOffset=paused;CATransaction.flush()
-        try await Task.sleep(for:.milliseconds(25))
-        let frozen=try #require(fixture.backdrop.presentedHoverRect)
-        let shadePath=try #require((layer.presentation() as? CAShapeLayer)?.path)
-        let frozenHole=try #require(rectangles(shadePath).last)
-        #expect(distance(frozenHole,frozen)<0.01,"hole: \(frozenHole), outline: \(frozen)")
+        fixture.backdrop.updateHoverGeometry(Fixture.area,rect:Fixture.leaf,duration:0)
+        let layer=try #require(fixture.backdrop.layer as? CAShapeLayer)
+        let key=CaptureSelectionBackdropView.hoverAnimationKey
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        layer.speed=0; layer.timeOffset=1
+        CATransaction.commit()
+        fixture.backdrop.updateHoverGeometry(Fixture.area,rect:Fixture.area,duration:0.12)
+        let source=try #require(layer.animation(forKey:key))
+        let middle=source.beginTime+source.duration/2
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        layer.timeOffset=middle
+        CATransaction.commit()
+
+        let deadline=ContinuousClock.now.advanced(by:.seconds(3))
+        var paths:(bounds:CGRect, hole:CGRect, outline:CGRect)?
+        func isMiddle(_ rect:CGRect) -> Bool {
+            Fixture.area.contains(rect) && distance(rect,Fixture.leaf)>0.01 && distance(rect,Fixture.area)>0.01
+        }
+        repeat {
+            fixture.panel.displayIfNeeded(); CATransaction.flush()
+            // Read one native presentation tree at a fixed pose, never a
+            // model or pre-commit fallback for one of the two paths.
+            if let presented=layer.presentation(),abs(presented.timeOffset-middle)<0.00001,
+               let shade=presented.path,
+               let outline=(presented.sublayers?.first { $0.name == CaptureSelectionBackdropView.hoverOutlineName } as? CAShapeLayer)?.path?.boundingBoxOfPath {
+                let holeRects=try rectangles(shade)
+                if holeRects.count == 2 && isMiddle(holeRects[1]) && isMiddle(outline) {
+                    paths=(holeRects[0],holeRects[1],outline)
+                    break
+                }
+            }
+            try await Task.sleep(for:.milliseconds(20))
+        } while ContinuousClock.now<deadline
+        let pose=try #require(paths,"Both native paths must reach an intermediate pose at the pinned time")
+        let frozen=pose.outline
+        #expect(pose.bounds == Fixture.area)
+        #expect(distance(pose.hole,frozen)<0.01,"hole: \(pose.hole), outline: \(frozen)")
+        #expect(distance(try #require(fixture.backdrop.presentedHoverRect),frozen)<0.01)
+
         let next=CGRect(x:450,y:350,width:90,height:80)
         fixture.backdrop.updateHoverGeometry(Fixture.area,rect:next,duration:0.12)
-        let border=try #require(fixture.outline.animation(forKey:CaptureSelectionBackdropView.hoverAnimationKey) as? CABasicAnimation)
-        let hole=try #require(layer.animation(forKey:CaptureSelectionBackdropView.hoverAnimationKey) as? CABasicAnimation)
+        let border=try #require(fixture.outline.animation(forKey:key) as? CABasicAnimation)
+        let hole=try #require(layer.animation(forKey:key) as? CABasicAnimation)
         #expect(try distance(path(border.fromValue).boundingBoxOfPath,frozen)<0.01)
         #expect(try rectangles(path(hole.fromValue)).last.map { distance($0,frozen)<0.01 } == true)
+        #expect(try path(border.toValue).boundingBoxOfPath == next)
+        #expect(try rectangles(path(hole.toValue)) == [Fixture.area,next])
+        #expect(hole.beginTime == border.beginTime && hole.duration == border.duration)
     }
 
-    @Test func aKnownHierarchyKeepsRepeatedFailedQueriesOutOfNativeAnimationTargets() async throws {
+    @Test func aKnownHierarchyKeepsRepeatedFailedQueriesOutOfNativeAnimationTargets() throws {
         let parent=CGRect(x:40,y:40,width:500,height:400)
-        var probes=0
+        var probes=0, now:TimeInterval=1
         let fixture=try Fixture(hitResolver:{ point in
             if Fixture.leaf.contains(point) { return CaptureElementHit(rect:Fixture.leaf,ancestors:[parent,Fixture.area]) }
             probes+=1
             return probes<=3 ? nil:CaptureElementHit(rect:parent,ancestors:[Fixture.area])
-        });defer { fixture.close() }
-        fixture.panel.orderFrontRegardless();fixture.move(to:CGPoint(x:100,y:100));CATransaction.flush()
-        try await Task.sleep(for:.milliseconds(30))
-        fixture.move(to:CGPoint(x:300,y:220))
-        #expect(fixture.view.selected == Fixture.leaf)
-        #expect(fixture.outline.animation(forKey:CaptureSelectionBackdropView.hoverAnimationKey) == nil)
-        for _ in 0..<4 {
-            try await Task.sleep(for:.milliseconds(90))
-            fixture.move(to:CGPoint(x:301,y:220));CATransaction.flush()
-            #expect(fixture.view.selected == (probes<4 ? Fixture.leaf:parent))
-            #expect(parent.insetBy(dx:-0.01,dy:-0.01).contains(try #require(fixture.backdrop.presentedHoverRect)))
+        },hoverNow:{ now });defer { fixture.close() }
+        fixture.move(to:CGPoint(x:100,y:100))
+        let key=CaptureSelectionBackdropView.hoverAnimationKey
+        // Each failed probe is inside the 240 ms lease, regardless of the
+        // host's scheduling load. Real stationary retries are tested below.
+        for attempt in 1...3 {
+            fixture.move(to:CGPoint(x:300,y:220))
+            #expect(probes == attempt && fixture.view.selected == Fixture.leaf)
+            #expect(fixture.outline.animation(forKey:key) == nil)
+            now += 0.085
         }
-        #expect(fixture.view.selected == parent && probes == 5 && fixture.panel.alphaValue == 1 && fixture.view.image === fixture.image)
+        fixture.move(to:CGPoint(x:301,y:220))
+        let animation=try #require(fixture.outline.animation(forKey:key) as? CABasicAnimation)
+        #expect(try path(animation.fromValue).boundingBoxOfPath == Fixture.leaf)
+        #expect(try path(animation.toValue).boundingBoxOfPath == parent)
+        #expect(fixture.view.selected == parent && probes == 4 && fixture.panel.alphaValue == 1 && fixture.view.image === fixture.image)
     }
 
     @Test func aSuccessfulRefreshDiscardsHierarchyRebuiltWhileTheNewImageWasAwaited() async throws {
@@ -219,15 +255,30 @@ struct CaptureHoverTransitionTests {
         #expect(probes == 2)
     }
 
-    @Test func aCompletedTransitionHasNoAnimationLeftRunning() async throws {
+    @Test(arguments:[false,true])
+    func aCompletedTransitionHasNoAnimationLeftRunning(renderingSuspended:Bool) async throws {
         let fixture=try Fixture();defer { fixture.close() }
         fixture.panel.orderFrontRegardless()
-        fixture.move(to:CGPoint(x:100,y:100));CATransaction.flush()
-        try await Task.sleep(for:.milliseconds(25))
-        fixture.move(to:CGPoint(x:600,y:450));CATransaction.flush()
-        try await Task.sleep(for:.milliseconds(190))
-        #expect(fixture.backdrop.layer?.animation(forKey:CaptureSelectionBackdropView.hoverAnimationKey) == nil)
-        #expect(fixture.outline.animation(forKey:CaptureSelectionBackdropView.hoverAnimationKey) == nil)
+        fixture.move(to:CGPoint(x:100,y:100));fixture.panel.displayIfNeeded();CATransaction.flush()
+        let key=CaptureSelectionBackdropView.hoverAnimationKey
+        let shade=try #require(fixture.backdrop.layer)
+        if renderingSuspended {
+            // A stalled compositor must not be needed to release old paths.
+            let frozenTime=shade.convertTime(CACurrentMediaTime(),from:nil)
+            shade.speed=0;shade.timeOffset=frozenTime
+        }
+        fixture.move(to:CGPoint(x:600,y:450))
+        #expect(shade.animation(forKey:key)?.duration == 0.12)
+        #expect(fixture.outline.animation(forKey:key)?.duration == 0.12)
+        let deadline=ContinuousClock.now.advanced(by:.seconds(2))
+        repeat {
+            fixture.panel.displayIfNeeded();CATransaction.flush()
+            if shade.animation(forKey:key) == nil && fixture.outline.animation(forKey:key) == nil,
+               fixture.backdrop.presentedHoverRect == Fixture.area { return }
+            try await Task.sleep(for:.milliseconds(20))
+        } while ContinuousClock.now < deadline
+        #expect(shade.animation(forKey:key) == nil)
+        #expect(fixture.outline.animation(forKey:key) == nil)
         #expect(fixture.backdrop.presentedHoverRect == Fixture.area)
     }
 
@@ -433,7 +484,8 @@ struct CaptureHoverTransitionTests {
         let panel:NSPanel
         var backdrop:CaptureSelectionBackdropView { view.subviews.compactMap { $0 as? CaptureSelectionBackdropView }.first! }
         var outline:CAShapeLayer { backdrop.layer!.sublayers!.first { $0.name == CaptureSelectionBackdropView.hoverOutlineName } as! CAShapeLayer }
-        init(reduceMotion:Bool=false,resolver:((CGPoint)->CGRect?)?=nil,hitResolver:((CGPoint)->CaptureElementHit?)?=nil,factor:Int=1,stripes:Bool=false) throws {
+        init(reduceMotion:Bool=false,resolver:((CGPoint)->CGRect?)?=nil,hitResolver:((CGPoint)->CaptureElementHit?)?=nil,factor:Int=1,stripes:Bool=false,
+             hoverNow:@escaping ()->TimeInterval = { ProcessInfo.processInfo.systemUptime }) throws {
             let context=try CaptureImage.context(width:800*factor,height:600*factor)
             context.setFillColor(NSColor.black.cgColor);context.fill(CGRect(x:0,y:0,width:800*factor,height:600*factor))
             context.setFillColor(NSColor.white.cgColor)
@@ -442,8 +494,10 @@ struct CaptureHoverTransitionTests {
             image=try #require(context.makeImage())
             let defaults=try #require(UserDefaults(suiteName:domain))
             view=CaptureSelectionView(image:image,allowsShapes:true,
-                elementResolver:resolver ?? { Self.leaf.contains($0) ? Self.leaf:Self.area },elementHitResolver:hitResolver,sessionDefaults:defaults,hoverReduceMotion:{ reduceMotion })
+                elementResolver:resolver ?? { Self.leaf.contains($0) ? Self.leaf:Self.area },elementHitResolver:hitResolver,
+                sessionDefaults:defaults,hoverReduceMotion:{ reduceMotion },hoverNow:hoverNow)
             panel=NSPanel(contentRect:Self.area,styleMask:[.borderless,.nonactivatingPanel],backing:.buffered,defer:false)
+            panel.ignoresMouseEvents=true // Drive the native view directly, never through the physical pointer.
             panel.isReleasedWhenClosed=false;panel.contentView=view;view.windows=[Self.area]
             view.layoutSubtreeIfNeeded()
         }

@@ -366,6 +366,7 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
     private let elementResolver:((CGPoint)->CGRect?)?
     private let elementHitResolver:((CGPoint)->CaptureElementHit?)?
     private let hoverReduceMotion:()->Bool
+    private let hoverNow:()->TimeInterval
     private var hover=CaptureElementHoverState()
     private var hoverRetryTask:Task<Void,Never>?
     private var hoverRetryGeneration=0
@@ -406,8 +407,9 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
     override var acceptsFirstResponder:Bool { true }
     override func acceptsFirstMouse(for event:NSEvent?) -> Bool { true }
     init(image:CGImage,allowsShapes:Bool,elementDetectionAllowed:Bool=false,elementResolver:((CGPoint)->CGRect?)?=nil,elementHitResolver:((CGPoint)->CaptureElementHit?)?=nil,sessionDefaults:UserDefaults = .standard,
-         hoverReduceMotion:@escaping ()->Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }) {
-        self.image=image;self.allowsShapes=allowsShapes;self.hoverReduceMotion=hoverReduceMotion
+         hoverReduceMotion:@escaping ()->Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
+         hoverNow:@escaping ()->TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.image=image;self.allowsShapes=allowsShapes;self.hoverReduceMotion=hoverReduceMotion;self.hoverNow=hoverNow
         session=CaptureSelectionSession(image:image,allowsAnnotations:allowsShapes,defaults:sessionDefaults)
         self.elementDetectionAllowed=elementDetectionAllowed;self.elementResolver=elementResolver;self.elementHitResolver=elementHitResolver
         super.init(frame:.zero)
@@ -1072,7 +1074,7 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
         let hint=force ? nil:hover.refinementHint(at:point,window:windows.first { $0.contains(point) })
         let result=hover.selectionUsingHit(at:point,window:windows.first { $0.contains(point) },
                         enabled:shape != .windows && detectElements && canDetectElements,
-                        now:ProcessInfo.processInfo.systemUptime,force:force) {
+                        now:hoverNow(),force:force) {
             if let elementHitResolver { return elementHitResolver(point) }
             if let elementResolver { return elementResolver(point).map { CaptureElementHit(rect:$0) } }
             return elementHit(at:point,hint:hint)
@@ -1081,7 +1083,7 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
         return result
     }
     private func scheduleHoverRetry() {
-        guard let delay=hover.retryDelay(now:ProcessInfo.processInfo.systemUptime) else { cancelHoverRetry();return }
+        guard let delay=hover.retryDelay(now:hoverNow()) else { cancelHoverRetry();return }
         guard hoverRetryTask == nil else { return }
         let generation=hoverRetryGeneration,deadline=ContinuousClock.now.advanced(by:.seconds(delay))
         // A bounded uncertain-hit validation, even
@@ -1116,15 +1118,19 @@ final class CaptureSelectionBackdropView:NSView {
     private var shadeFillRule:CAShapeLayerFillRule = .nonZero
     private var hoverRect:CGRect?
     private var hoverStartRect:CGRect?
+    private var hoverCleanupDeadline:ContinuousClock.Instant?
+    private var hoverCleanupTask:Task<Void,Never>?
+    var sleepForHoverCleanup: @MainActor (ContinuousClock.Instant) async throws -> Void = { deadline in
+        if ContinuousClock.now < deadline { try await Task.sleep(until: deadline, clock: .continuous) }
+    }
     private let hoverOutline=CAShapeLayer()
     var presentsHover:Bool { hoverRect != nil }
-    /// Read the visible pose, not the latest hit-test target. Before the first
-    /// CA commit, an existing animation's start is the last displayed pose.
+    /// Read the visible pose only while a path interpolation owns the layer.
+    /// Before its first CA commit, the start is the last displayed pose.
     var presentedHoverRect:CGRect? {
-        guard hoverRect != nil else { return nil }
-        if let path=hoverOutline.presentation()?.path { return path.boundingBoxOfPath }
-        if hoverOutline.animation(forKey:Self.hoverAnimationKey) != nil,let hoverStartRect { return hoverStartRect }
-        return hoverRect
+        guard let hoverRect else { return nil }
+        guard hoverOutline.animation(forKey:Self.hoverAnimationKey) != nil else { return hoverRect }
+        return hoverOutline.presentation()?.path?.boundingBoxOfPath ?? hoverStartRect ?? hoverRect
     }
     override var isFlipped:Bool { true }
     override var isOpaque:Bool { false }
@@ -1151,12 +1157,36 @@ final class CaptureSelectionBackdropView:NSView {
         // fills it. Boolean subtraction would change path topology mid-tween.
         let path=CGMutablePath();path.addRect(bounds);path.addRect(rect);return path
     }
-    private func stopGeometryAnimation() {
+    private func stopGeometryAnimation(keepCleanup:Bool=false) {
         hoverStartRect=nil
         layer?.removeAnimation(forKey:Self.hoverAnimationKey)
         hoverOutline.removeAnimation(forKey:Self.hoverAnimationKey)
+        if !keepCleanup {
+            hoverCleanupDeadline=nil
+            hoverCleanupTask?.cancel();hoverCleanupTask=nil
+        }
     }
-    func cancelAnimations() { hoverStartRect=nil;layer?.removeAllAnimations();hoverOutline.removeAllAnimations() }
+    func cancelAnimations() {
+        stopGeometryAnimation()
+        layer?.removeAllAnimations();hoverOutline.removeAllAnimations()
+    }
+    private func scheduleHoverCleanup(after duration:TimeInterval) {
+        // Core Animation can keep completed path animations attached when a
+        // window is not being rendered. Model geometry is already at the
+        // destination. Release both paths together even without render ticks.
+        hoverCleanupDeadline=ContinuousClock.now.advanced(by:.seconds(duration))
+        guard hoverCleanupTask == nil else { return }
+        hoverCleanupTask=Task { @MainActor [weak self, sleep = sleepForHoverCleanup] in
+            while !Task.isCancelled,let deadline=self?.hoverCleanupDeadline {
+                do { try await sleep(deadline) } catch { return }
+                guard let self,!Task.isCancelled else { return }
+                // A retarget extends this single lease, not a queue of tasks.
+                guard self.hoverCleanupDeadline == deadline else { continue }
+                self.stopGeometryAnimation()
+                return
+            }
+        }
+    }
     func updateHoverGeometry(_ area:CGRect,rect:CGRect,duration:TimeInterval) {
         let duration=CaptureBackdropTransition.duration(duration)
         if frame == area,hoverRect == rect {
@@ -1165,10 +1195,10 @@ final class CaptureSelectionBackdropView:NSView {
         }
         let start=presentedHoverRect
         let animate=duration>0 && frame == area && hoverRect != nil && start != rect
-        stopGeometryAnimation()
+        stopGeometryAnimation(keepCleanup:animate)
         frame=area;hoverRect=rect;shadeFillRule = .evenOdd;shadePath=hoverShade(rect)
         updateLayer()
-        guard animate,let start,let layer else { return }
+        guard animate,let start,let layer else { stopGeometryAnimation();return }
         hoverStartRect=start
         let now=CACurrentMediaTime()
         for (target,from,to) in [(layer,hoverShade(start),hoverShade(rect)),
@@ -1179,6 +1209,7 @@ final class CaptureSelectionBackdropView:NSView {
             animation.timingFunction=CAMediaTimingFunction(name:.easeOut)
             target.add(animation,forKey:Self.hoverAnimationKey)
         }
+        scheduleHoverCleanup(after:duration)
     }
     func updateGeometry(_ area:CGRect,undimmed:CGPath?) {
         stopGeometryAnimation();hoverRect=nil;shadeFillRule = .nonZero
