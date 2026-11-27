@@ -467,7 +467,12 @@ struct CaptureFloatingEditorTests {
         let event=try #require(NSEvent.mouseEvent(with:.mouseMoved,location:.zero,modifierFlags:[],timestamp:0,windowNumber:panel.windowNumber,context:nil,eventNumber:1,clickCount:0,pressure:0))
         first.mouseEntered(with:event)
         #expect(entered && first.isHovering && first.hintPanel == nil)
-        try await Task.sleep(for:.milliseconds(410))
+        // The 350 ms dwell runs on the main actor; CI may schedule it late.
+        // Wait for the actual panel without weakening the delayed-show assertion.
+        let deadline=ContinuousClock.now.advanced(by:.seconds(3))
+        while first.hintPanel == nil && first.isHovering && ContinuousClock.now<deadline {
+            try await Task.sleep(for:.milliseconds(20))
+        }
         let hint=try #require(first.hintPanel)
         #expect(hint.isVisible && !panel.isKeyWindow)
         second.mouseEntered(with:event)
