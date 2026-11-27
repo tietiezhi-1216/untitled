@@ -4,11 +4,11 @@
     {
       "id": "com.untitled.doubao-speech-input",
       "name": "语音输入",
-      "version": "1.2.15",
+      "version": "1.2.16",
       "summary": "随时开始听写，定稿优先插入当前输入框，不能插入就复制。",
       "author": "tietiezhi-1216",
-      "downloadURL": "https://github.com/tietiezhi-1216/untitled/releases/download/v0.13.49/doubao-speech-input-1.2.15.zip",
-      "sha256": "5dbe37d10939855204bf35d355c0c728808351492c1bc69996b01db43361aac6",
+      "downloadURL": "https://github.com/tietiezhi-1216/untitled/releases/download/v0.13.50/doubao-speech-input-1.2.16.zip",
+      "sha256": "dbcbddb08b2b5567837319a073efc419125b9a2da3fb754fdbfcba8330a77397",
       "icon": {
         "symbol": "waveform",
         "tint": "#D77A36",

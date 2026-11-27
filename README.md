@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/tietiezhi-1216/untitled/releases/tag/v0.13.49">下载预览版</a> ·
+  <a href="https://github.com/tietiezhi-1216/untitled/releases/tag/v0.13.50">下载预览版</a> ·
   <a href="AGENTS.md">Agent 开发入口</a> ·
   <a href="Plugins/README.md">插件文档</a> ·
   <a href="CONTRIBUTING.md">参与贡献</a>
@@ -36,14 +36,14 @@ Untitled 是由用户通过 agents 持续定制的原生 macOS 软件。宿主�
 
 ### 下载安装
 
-下载 [Untitled v0.13.49 · macOS 安装包](https://github.com/tietiezhi-1216/untitled/releases/download/v0.13.49/Untitled-macOS-arm64-v0.13.49.zip)，解压后将 `Untitled.app` 拖入“应用程序”目录。
+下载 [Untitled v0.13.50 · macOS 安装包](https://github.com/tietiezhi-1216/untitled/releases/download/v0.13.50/Untitled-macOS-arm64-v0.13.50.zip)，解压后将 `Untitled.app` 拖入“应用程序”目录。
 
 | 当前发行版 | 说明 |
 | --- | --- |
-| 版本 | [v0.13.49 预览版](https://github.com/tietiezhi-1216/untitled/releases/tag/v0.13.49) · [对应源码](https://github.com/tietiezhi-1216/untitled/tree/v0.13.49) |
+| 版本 | [v0.13.50 预览版](https://github.com/tietiezhi-1216/untitled/releases/tag/v0.13.50) · [对应源码](https://github.com/tietiezhi-1216/untitled/tree/v0.13.50) |
 | 平台 | 仅支持 macOS；当前安装包适用于 Apple Silicon（arm64），最低 macOS 14 |
 | 签名 | Developer ID 签名，启用 Hardened Runtime；尚未完成 Apple 公证 |
-| 校验与验收 | [SHA-256 校验文件](https://github.com/tietiezhi-1216/untitled/releases/download/v0.13.49/SHA256SUMS.txt) · [构建与测试](https://github.com/tietiezhi-1216/untitled/actions/runs/45808901925) · 真机与性能验收范围见发布说明 |
+| 校验与验收 | [SHA-256 校验文件](https://github.com/tietiezhi-1216/untitled/releases/download/v0.13.50/SHA256SUMS.txt) · [构建与测试](https://github.com/tietiezhi-1216/untitled/actions/runs/45940144951) · 真机与性能验收范围见发布说明 |
 
 录屏和系统翻译需要 macOS 15+，本地文档结构识别需要 macOS 26+。系统权限在实际使用相关功能时由用户授权。
 
@@ -68,7 +68,7 @@ cd untitled
 | [快捷键](https://github.com/tietiezhi-1216/untitled/blob/v0.13.49/Plugins/global-shortcuts/README.md) | 打开应用、网址、系统快捷指令与主面板 |
 | [截图](https://github.com/tietiezhi-1216/untitled/blob/v0.13.49/Plugins/screenshot/README.md) | 截图、编辑、贴图、录屏与本地识别等工作流 |
 | [键鼠共享](https://github.com/tietiezhi-1216/untitled/blob/v0.13.49/Plugins/peripheral-sharing/README.md) | 双 Mac 键鼠与按需麦克风共享；完整双机验收范围见插件说明 |
-| [语音输入](https://github.com/tietiezhi-1216/untitled/blob/v0.13.49/Plugins/doubao-speech-input/README.md) | 实时听写浮条与本地历史；定稿插入或复制 |
+| [语音输入](https://github.com/tietiezhi-1216/untitled/blob/v0.13.50/Plugins/doubao-speech-input/README.md) | 实时听写浮条与本地历史；定稿插入或复制 |
 
 ## 让 agent 开发插件
 
