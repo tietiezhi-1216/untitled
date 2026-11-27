@@ -2,7 +2,7 @@
   {
     "id": "com.untitled.doubao-speech-input",
     "repository": "https://github.com/tietiezhi-1216/untitled",
-    "version": "1.2.15",
+    "version": "1.2.16",
     "name": "语音输入",
     "summary": "随时开始听写，定稿优先插入当前输入框，不能插入就复制。",
     "icon": {

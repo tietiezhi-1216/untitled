@@ -253,29 +253,95 @@ import Testing
         }
     }
 
-    @Test @MainActor func expansionIsMonotoneAnchoredInterruptibleAndHonoursReducedMotion() async throws {
-        let s = DictationHUDStage(size: DictationHUD.expanded, content: NSView())
-        s.configure(reduceMotion: false, solid: true)
-        let plate = try #require(s.plate)
-        #expect(plate.frame.size == DictationHUD.compact)
-        s.expand()
-        var last = plate.frame.width, sampledIntermediate = false
-        let end = ContinuousClock.now.advanced(by: .seconds(2))
-        while s.openness < 1 && ContinuousClock.now < end {
-            try await Task.sleep(for: .milliseconds(20))
-            s.expand() // further preview callbacks cannot restart the transition
-            let r = plate.frame
-            #expect(r.width >= last && abs(r.midX - s.bounds.midX) < 0.01 && r.minY == 0)
-            if s.openness > 0 && s.openness < 1 { sampledIntermediate = true }
-            last = r.width
+    @Test @MainActor func openingBlendsTheWaveIntoGlassAndWidensFromTheSameMidpoint() throws {
+        _ = NSApplication.shared
+        var now = 10.0
+        let stage = DictationHUDStage(size: DictationHUD.expanded, now: { now })
+        stage.configure(reduceMotion: false, solid: false)
+        let plate = try #require(stage.plate), wave = try #require(stage.wave)
+        #expect(plate.frame.size == DictationHUD.compact && stage.liquid.isHidden && wave.alphaValue == 1)
+
+        stage.display(DictationCaptionSlice("你好"), finishing: false)
+        now += 0.14; stage.refresh()
+        let middle = plate.frame
+        #expect(middle.width > DictationHUD.compact.width && middle.height > DictationHUD.compact.height)
+        #expect((0.05...0.95).contains(wave.alphaValue) && (0.05...0.95).contains(stage.liquid.alphaValue))
+        if #available(macOS 26, *), let native = plate as? NSGlassEffectView {
+            #expect(native.cornerRadius == middle.height / 2)
         }
-        #expect(sampledIntermediate && plate.frame.size == DictationHUD.expanded)
-        let reduced = DictationHUDStage(size: DictationHUD.expanded, content: NSView())
-        reduced.configure(reduceMotion: true, solid: true); reduced.expand()
-        #expect(reduced.openness == 1 && reduced.plate?.frame.size == DictationHUD.expanded)
-        let cancelled = DictationHUDStage(size: DictationHUD.expanded, content: NSView())
-        cancelled.configure(reduceMotion: false, solid: true); cancelled.expand(); cancelled.stop()
-        try await Task.sleep(for: .milliseconds(45)); #expect(cancelled.openness == 0)
+        now += 0.3; stage.refresh()
+        let short = plate.frame
+        #expect(stage.openness == 1 && stage.wave == nil && wave.superview == nil && !wave.isAnimating)
+        #expect(short.width > middle.width && short.width < stage.bounds.width && short.height == DictationHUD.expanded.height)
+
+        stage.display(DictationCaptionSlice("明天上午去喝杯咖啡"), finishing: false)
+        #expect(plate.frame == short)
+        now += 0.10; stage.refresh()
+        let changing = plate.frame
+        #expect(changing.width > short.width && changing.height == short.height)
+        stage.display(DictationCaptionSlice(String(repeating: "文字不会换行", count: 10)), finishing: false)
+        #expect(plate.frame == changing) // Retarget from the current visible width.
+        now += 0.24; stage.refresh()
+        let widest = plate.frame
+        #expect(widest.size == DictationHUD.expanded)
+        stage.display(DictationCaptionSlice("更短的修订"), finishing: false)
+        now += 1; stage.refresh()
+        #expect(plate.frame == widest)
+        #expect([middle, short, changing, widest].allSatisfy { $0.midX == stage.bounds.midX && $0.minY == 0 })
+    }
+
+    @Test @MainActor func glassOnlyTicksWhileListeningAndHonoursDisplayOptions() throws {
+        _ = NSApplication.shared
+        let rect = CGRect(origin: .zero, size: DictationHUD.expanded)
+        let window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; defer { window.close() }
+        var now = 5.0
+        let stage = DictationHUDStage(size: rect.size, now: { now })
+        stage.configure(reduceMotion: false, solid: false)
+        window.contentView = stage
+        #expect(!stage.isAnimating)
+        let text = DictationCaptionSlice("明天下午见")
+        stage.display(text, finishing: false)
+        now += 0.45; stage.refresh()
+        #expect(stage.isAnimating && stage.liquid.elapsed > 0 && stage.wave == nil)
+        let last = stage.liquid.elapsed
+        stage.display(text, finishing: true)
+        now += 1; stage.refresh()
+        #expect(!stage.isAnimating && stage.liquid.elapsed == last && !stage.liquid.isHidden)
+        window.contentView = nil
+        #expect(!stage.isAnimating)
+
+        let reduced = DictationHUDStage(size: rect.size, now: { now })
+        window.contentView = reduced
+        reduced.configure(reduceMotion: true, solid: false)
+        reduced.display(text, finishing: false)
+        #expect(reduced.openness == 1 && reduced.wave == nil && reduced.liquid.elapsed == 0 && !reduced.isAnimating)
+        #expect(!reduced.liquid.isHidden)
+        reduced.configure(reduceMotion: true, solid: true)
+        #expect(reduced.liquid.isHidden && !reduced.isAnimating)
+    }
+
+    @Test(arguments: [false, true]) @MainActor func actualGlassColoursDriftWithinATranslucentCapsule(dark: Bool) throws {
+        let rect = CGRect(x: 0, y: 0, width: 296, height: 48)
+        func sample(at time: Double) throws -> NSBitmapImageRep {
+            let context = try #require(CGContext(data: nil, width: 296, height: 48, bitsPerComponent: 8,
+                bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            DictationLiquidBackdrop.draw(in: rect, elapsed: time, dark: dark, context: context)
+            return NSBitmapImageRep(cgImage: try #require(context.makeImage()))
+        }
+        let start = try sample(at: 0.4), next = try sample(at: 1.8)
+        #expect((start.colorAt(x: 0, y: 0)?.alphaComponent ?? 1) < 0.01)
+        #expect((next.colorAt(x: 295, y: 47)?.alphaComponent ?? 1) < 0.01)
+        var changed = 0, cool = 0, warm = 0
+        for x in stride(from: 25, through: 275, by: 10) {
+            let a = try #require(start.colorAt(x: x, y: 24)?.usingColorSpace(.sRGB))
+            let b = try #require(next.colorAt(x: x, y: 24)?.usingColorSpace(.sRGB))
+            #expect(max(a.alphaComponent, b.alphaComponent) < 0.80)
+            if abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent) > 0.18 { changed += 1 }
+            if a.blueComponent > a.redComponent + 0.13 { cool += 1 }
+            if a.redComponent > a.blueComponent + 0.13 { warm += 1 }
+        }
+        #expect(changed >= 8 && cool > 2 && warm > 1)
     }
 
     @Test @MainActor func aQuietOrDetachedWaveDoesNotKeepAClockRunning() {

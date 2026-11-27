@@ -1,6 +1,5 @@
 import AppKit
 import QuartzCore
-import SwiftUI
 
 /// Bounded projection for display only. Absolute byte positions distinguish identical
 /// repeating tails when the 96-character window slides. Never used for final delivery.
@@ -98,14 +97,6 @@ struct DictationDraftReveal {
     }
 }
 
-struct DictationDraftCaption: NSViewRepresentable {
-    let slice: DictationCaptionSlice
-    let reduceMotion: Bool, layoutWidth: CGFloat
-    func makeNSView(context: Context) -> DictationCaptionView { DictationCaptionView(frame: .zero) }
-    func updateNSView(_ view: DictationCaptionView, context: Context) { view.display(slice, reduceMotion: reduceMotion, layoutWidth: layoutWidth) }
-    static func dismantleNSView(_ view: DictationCaptionView, coordinator: ()) { view.stop() }
-}
-
 /// A finite translation between two presentations of the *current* hypothesis, not a
 /// repeating marquee. New input samples the in-flight position; no animations are enqueued.
 private struct CaptionTravel {
@@ -160,12 +151,15 @@ private struct CaptionTravel {
         }
     }
 
-    func display(_ next: DictationCaptionSlice, reduceMotion: Bool, layoutWidth: CGFloat? = nil) {
-        let width = max(1, layoutWidth ?? bounds.width), t = now()
-        guard next != slice || reduceMotion != self.reduceMotion || width != lastWidth else { return }
-        let edit = reveal.edit(to: next.line, discarding: next.removedPrefix(from: slice))
-        let oldX = travel.x(at: t), oldAnchors = anchors
+    @discardableResult
+    func display(_ next: DictationCaptionSlice, reduceMotion: Bool, layoutWidth: CGFloat? = nil,
+                 fittingWidth: ((CGFloat) -> CGFloat)? = nil) -> CGFloat {
+        let oldAnchors = anchors
         if next.line != slice.line { shape(next.line) }
+        let width = max(1, fittingWidth?(ceil(used.width)) ?? layoutWidth ?? bounds.width), t = now()
+        guard next != slice || reduceMotion != self.reduceMotion || width != lastWidth else { return width }
+        let edit = reveal.edit(to: next.line, discarding: next.removedPrefix(from: slice))
+        let oldX = travel.x(at: t)
         let room = width - ceil(used.width)
         let target = (room >= 0 ? room / 2 : room) - used.minX
         // An oversized first packet also glides; limit catch-up to one viewport.
@@ -179,7 +173,10 @@ private struct CaptionTravel {
                       (reveal.cells[j].start ?? t) <= t else { continue }
                 let screenX = oldX + oldAnchors[j]
                 if screenX >= -1 && screenX < lastWidth {
-                    from = min(target + width, max(target - width, screenX - anchors[i])); break
+                    // The outer surface widens about a fixed midpoint. A wider
+                    // viewport's origin moves left by half of the width change.
+                    let centreShift = fittingWidth != nil ? (width - lastWidth) / 2 : 0
+                    from = min(target + width, max(target - width, screenX + centreShift - anchors[i])); break
                 }
             }
         }
@@ -207,6 +204,7 @@ private struct CaptionTravel {
         deadline = max(travel.end, fadeEnd)
         slice = next; lastWidth = width; self.reduceMotion = reduceMotion
         needsDisplay = true; updateClock()
+        return width
     }
     override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); updateClock() }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }

@@ -765,7 +765,7 @@ import Testing
         #expect(dependencies.microphones.allSatisfy { $0.started == 1 && $0.stopped > 0 })
     }
 
-    @Test @MainActor func bubbleExpandsOnceForLiveTextAndNeverTakesKeyboardFocus() async throws {
+    @Test @MainActor func bubbleCrossfadesToOneLineAndWidensWithoutTakingKeyboardFocus() async throws {
         _ = NSApplication.shared
         let d = Dependencies(), c = d.allowedController()
         try c.toggle(); defer { c.cancel() }
@@ -808,34 +808,22 @@ import Testing
         }
         try await render("compact")
         session.onTranscript?("明天下午三点")
-        try await wait { stage.openness == 1 && first(DictationCaptionView.self, in: content) != nil }
+        try await wait { stage.openness == 1 && stage.wave == nil }
         let expanded = content.frame
-        #expect(window.frame == canvas && expanded.size == canvas.size && expanded.height <= 64)
-        #expect(DictationHUD.captionHeight >= 20 && DictationHUD.captionHeight < 26)
+        #expect(window.frame == canvas && expanded.height == DictationHUD.expanded.height)
+        #expect(expanded.width > compact.width && expanded.width < canvas.width)
         #expect(abs(expanded.midX - compact.midX) <= 1 && expanded.minY == compact.minY)
-        let wave = try #require(first(DictationWaveView.self, in: content))
-        try await wait { abs(wave.bounds.width - DictationWaveMotion.expandedWidth) <= 1 }
-        #expect(wave.bounds.width > 3 * waveRect.width && wave.bounds.width > 0.75 * content.bounds.width)
-        #expect(abs(wave.convert(wave.bounds, to: content).midX - content.bounds.midX) <= 1)
+        #expect(first(DictationWaveView.self, in: content) == nil && compactWave.window == nil && !compactWave.isAnimating)
         let ink = try #require(first(DictationCaptionView.self, in: content))
         let inkFrame = ink.convert(ink.bounds, to: content)
         #expect(abs(inkFrame.width - DictationHUD.captionWidth(in: content.bounds.width)) <= 1)
-        let inset = DictationHUD.contentInset
-        let left = inkFrame.minX - content.bounds.minX, right = content.bounds.maxX - inkFrame.maxX
-        #expect(abs(left-inset) <= 1 && abs(right-left) <= 1 && (8...11).contains(inset))
-        let meterFrame = wave.convert(wave.bounds, to: content)
-        #expect(!meterFrame.intersects(inkFrame) && content.bounds.contains(meterFrame) && content.bounds.contains(inkFrame))
-        // Compare visible margins, not just SwiftUI frames: ink does not fill either slot.
-        let captionBottom = content.isFlipped ? content.bounds.maxY-inkFrame.maxY : inkFrame.minY-content.bounds.minY
-        var meter = DictationWaveMotion()
-        for i in 0...25 { meter.set(.init(rms: 0.016), at: 1 + Double(i) * 0.04, reduceMotion: false) }
-        let bars = meter.frame(in: meterFrame, at: 2).bars
-        let peak = try #require(bars.max { $0.frame.height < $1.frame.height }).frame
-        let waveTop = content.isFlipped ? peak.minY-content.bounds.minY : content.bounds.maxY-peak.maxY
-        #expect(bars.count == 31 && abs(waveTop-left) <= 2 && abs(captionBottom+3-left) <= 1)
+        #expect(abs(inkFrame.midY - content.bounds.midY) <= 1 && inkFrame.height == DictationHUD.captionHeight)
+        #expect(content.bounds.contains(inkFrame))
         let large = String(repeating: "这是一句话，然后是另一句话。", count: 32) + "注意：最后一行是最新的草稿。"
         session.onTranscript?(large)
-        #expect(window.frame == canvas && content.frame == expanded && c.bubblePreview.hasSuffix("最后一行是最新的草稿。"))
+        try await wait { abs(content.frame.width - canvas.width) < 0.01 }
+        #expect(window.frame == canvas && content.frame.height == expanded.height && content.frame.midX == expanded.midX)
+        #expect(c.bubblePreview.hasSuffix("最后一行是最新的草稿。") && stage.wave == nil)
         #expect(d.target.writes.isEmpty && NSApp.keyWindow === key)
         #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == front)
         if ProcessInfo.processInfo.environment["UNTITLED_DICTATION_HUD_PREVIEW"] != nil {
@@ -844,7 +832,7 @@ import Testing
             session.onTranscript?("明天下午 3 点，一起喝杯咖啡。"); try await render("short")
         }
         hud.close()
-        #expect(!window.isVisible)
+        #expect(!window.isVisible && !stage.isAnimating)
     }
 
     @Test(arguments: [false, true]) @MainActor func syntheticPCMAnimatesActualPixelsEvenWhileASRIsBlocked(connecting: Bool) async throws {

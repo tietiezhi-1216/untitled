@@ -1,19 +1,15 @@
 import AppKit
 import Combine
-import SwiftUI
+import QuartzCore
 
 @MainActor final class DictationHUD {
     static let compact = NSSize(width: 88, height: 38)
-    static let expanded = NSSize(width: 296, height: 62)
-    static let contentInset: CGFloat = 9, captionHeight: CGFloat = 23
-    // One optical margin: a typical speaking stem extends ~8 pt above its centre;
-    // a single line of 15.5 pt type has ~3 pt of leading below the ink in its slot.
-    // Use fixed offsets, never chase individual glyphs or the current audio level.
-    fileprivate static let expandedWaveCenterY = contentInset + 8, captionBottomInset = contentInset - 3
+    static let expanded = NSSize(width: 296, height: 48)
+    static let contentInset: CGFloat = 15, captionHeight: CGFloat = 23
     static func captionWidth(in width: CGFloat) -> CGFloat { max(1, width - 2 * contentInset) }
     private var panel: DictationPanel?
     private var stage: DictationHUDStage?
-    private var expansion: AnyCancellable?, displayOptions: AnyCancellable?
+    private var presentation: AnyCancellable?, displayOptions: AnyCancellable?
     isolated deinit { close() }
 
     nonisolated static func preview(for text: String) -> String { DictationCaptionSlice(text).summary }
@@ -29,8 +25,7 @@ import SwiftUI
         let point = NSEvent.mouseLocation
         let visible = (NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main)?.visibleFrame
         let frame = visible.map { Self.frame(on: $0, expanded: true) } ?? NSRect(origin: .zero, size: Self.expanded)
-        // The nonactivating, mouse-transparent window stays still. Only its small visible
-        // glass surface expands, pinned to the same bottom centre, once per utterance.
+        // Only the visible glass changes size; the nonactivating window never moves.
         let panel = DictationPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.identifier = NSUserInterfaceItemIdentifier("doubao.dictation.hud")
         panel.level = .floating
@@ -38,23 +33,22 @@ import SwiftUI
         panel.hidesOnDeactivate = false; panel.isReleasedWhenClosed = false
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true
         panel.ignoresMouseEvents = true
-        let host = NSHostingView(rootView: DictationHUDView(controller: controller, captionWidth: Self.captionWidth(in: frame.width)))
-        host.sizingOptions = []; host.autoresizingMask = [.width, .height]
-        let stage = DictationHUDStage(size: frame.size, content: host)
+        let stage = DictationHUDStage(size: frame.size, readings: controller.waveReadings)
         panel.contentView = stage
         self.stage = stage; self.panel = panel
         stage.refreshDisplayOptions()
         displayOptions = NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)
             .receive(on: RunLoop.main).sink { [weak stage] _ in stage?.refreshDisplayOptions() }
-        expansion = controller.$captionSlice.first(where: { !$0.line.isEmpty }).sink { [weak stage] _ in stage?.expand() }
+        presentation = controller.$captionSlice.combineLatest(controller.$phase).sink { [weak stage] slice, phase in
+            stage?.display(slice, finishing: phase == .finishing || phase == .idle)
+        }
         panel.orderFrontRegardless()
     }
-    /// Replace the live wave/caption with a static acknowledgement in the same
-    /// mouse-transparent window. No focus, new screen capture, animation or input events.
+
+    /// Replace the live surface with a static acknowledgement in the same window.
     func showReceipt(_ message: String) {
         guard let panel else { return }
-        expansion?.cancel(); expansion = nil; displayOptions?.cancel(); displayOptions = nil
-        stage?.stop(); stage = nil
+        stopStage()
         let label = NSTextField(labelWithString: message)
         label.font = .systemFont(ofSize: 12, weight: .medium); label.alignment = .center
         label.textColor = .labelColor; label.lineBreakMode = .byTruncatingTail; label.sizeToFit()
@@ -66,23 +60,63 @@ import SwiftUI
         label.frame = NSRect(x: 7, y: ((h - label.frame.height) / 2).rounded(), width: max(1, w - 14), height: label.frame.height)
         content.addSubview(label); outer.addSubview(plate); panel.contentView = outer; panel.invalidateShadow()
     }
-    func close() {
-        expansion?.cancel(); expansion = nil; displayOptions?.cancel(); displayOptions = nil
+    private func stopStage() {
+        presentation?.cancel(); presentation = nil; displayOptions?.cancel(); displayOptions = nil
         stage?.stop(); stage = nil
+    }
+    func close() {
+        stopStage()
         panel?.orderOut(nil); panel?.contentView = nil; panel?.close(); panel = nil
     }
 }
 
-/// One bounded transition, independent of microphone/ASR updates. There is no animated
-/// NSWindow resize, implicit spring, or per-word change of the glass's target width.
+/// Coordinates one glass surface, one caption viewport and the opening wave.
+/// Its only repeating work is painting the small, visible glass while listening.
 @MainActor final class DictationHUDStage: NSView {
-    private let content: NSView
+    private struct Widening {
+        let from, to: CGFloat
+        let start, duration: TimeInterval
+        var end: TimeInterval { start + duration }
+        func width(at t: TimeInterval) -> CGFloat {
+            let u = min(1, max(0, (t - start) / duration))
+            return from + (to - from) * (1 - (1 - u) * (1 - u) * (1 - u))
+        }
+    }
+
+    private static let openingDuration = 0.34
+    private static let minimumCaptionPillWidth: CGFloat = 128
+    private let content = NSView(), viewport = NSView()
+    private let caption: DictationCaptionView
+    private let status = NSTextField(labelWithString: "")
+    private let readings: CurrentValueSubject<DictationMeterReading, Never>?
+    private let now: () -> TimeInterval
+    private(set) var wave: DictationWaveView?
+    let liquid = DictationLiquidBackdrop(frame: .zero)
     private(set) var plate: NSView?
-    private var solid: Bool?, reduceMotion = false
     private(set) var openness: CGFloat = 0
-    private var hasExpanded = false, transition: Task<Void, Never>?
-    init(size: NSSize, content: NSView) {
-        self.content = content; super.init(frame: NSRect(origin: .zero, size: size))
+    private var solid = false, reduceMotion = false, finishing = false
+    private var slice = DictationCaptionSlice("")
+    private var openedAt: TimeInterval?, widening: Widening?
+    private var targetWidth: CGFloat, captionLayoutWidth: CGFloat = 1
+    private var clock: Task<Void, Never>?
+    var isAnimating: Bool { clock != nil }
+
+    init(size: NSSize, readings: CurrentValueSubject<DictationMeterReading, Never>? = nil,
+         now: @escaping () -> TimeInterval = CACurrentMediaTime) {
+        self.now = now; self.readings = readings
+        caption = DictationCaptionView(frame: .zero, now: now)
+        targetWidth = min(size.width, DictationHUD.compact.width)
+        super.init(frame: NSRect(origin: .zero, size: size))
+        setAccessibilityElement(true); setAccessibilityRole(.staticText)
+        setAccessibilityHelp("使用听写快捷键结束。定稿优先插入当前输入框，否则复制；取消不提交草稿")
+        status.setAccessibilityElement(false)
+        status.alignment = .center; status.textColor = .secondaryLabelColor
+        status.font = .systemFont(ofSize: 12, weight: .medium); status.lineBreakMode = .byTruncatingTail
+        viewport.clipsToBounds = true
+        let wave = DictationWaveView(frame: .zero, now: now)
+        self.wave = wave
+        content.addSubview(liquid); content.addSubview(wave)
+        viewport.addSubview(caption); content.addSubview(viewport); content.addSubview(status)
     }
     required init?(coder: NSCoder) { nil }
     isolated deinit { stop() }
@@ -92,38 +126,122 @@ import SwiftUI
                   solid: NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency)
     }
     func configure(reduceMotion: Bool, solid: Bool) {
-        self.reduceMotion = reduceMotion
-        if solid != self.solid {
-            self.solid = solid
+        if plate == nil || self.solid != solid {
             content.removeFromSuperview(); plate?.removeFromSuperview()
-            let view = DictationHUDPlate.make(in: surfaceFrame, content: content, reduceTransparency: solid)
+            let view = DictationHUDPlate.make(in: surfaceFrame(at: now()), content: content, reduceTransparency: solid)
             plate = view; addSubview(view)
         }
-        if reduceMotion && hasExpanded { stop(); apply(1) }
+        self.solid = solid; self.reduceMotion = reduceMotion
+        if reduceMotion { widening = nil }
+        if let readings { wave?.bind(readings, reduceMotion: reduceMotion, solid: solid) }
+        caption.display(slice, reduceMotion: reduceMotion, layoutWidth: captionLayoutWidth)
+        refresh()
     }
-    private var surfaceFrame: NSRect {
-        let w0 = min(bounds.width, DictationHUD.compact.width)
-        let w = w0 + (bounds.width - w0) * openness
-        let h = DictationHUD.compact.height + (bounds.height - DictationHUD.compact.height) * openness
-        return NSRect(x: bounds.midX - w / 2, y: bounds.minY, width: w, height: h)
+
+    func display(_ next: DictationCaptionSlice, finishing: Bool) {
+        let t = now(), opening = openedAt == nil && !next.line.isEmpty
+        if opening { openedAt = t }
+        self.slice = next; self.finishing = finishing
+        setAccessibilityLabel(finishing ? "正在定稿" : "听写预览")
+        setAccessibilityValue(next.summary)
+        status.stringValue = finishing ? "正在定稿…" : "正在听写…"
+        captionLayoutWidth = caption.display(next, reduceMotion: reduceMotion, fittingWidth: { [self] measured in
+            if !next.line.isEmpty { widen(for: measured, opening: opening, at: t) }
+            return DictationHUD.captionWidth(in: targetWidth)
+        })
+        refresh()
     }
-    private func apply(_ p: CGFloat) { openness = p; plate?.frame = surfaceFrame }
-    func expand() {
-        guard !hasExpanded else { return }
-        hasExpanded = true
-        guard !reduceMotion else { apply(1); return }
-        let start = CACurrentMediaTime()
-        transition = Task { [weak self] in
+
+    private func widen(for measured: CGFloat, opening: Bool, at t: TimeInterval) {
+        // Grow in small steps for new text. Corrections never squeeze the current line.
+        let padded = (ceil((measured + 2 * DictationHUD.contentInset + 1) / 8) * 8)
+        let wanted = min(bounds.width, max(Self.minimumCaptionPillWidth, padded))
+        guard wanted > targetWidth else { return }
+        let previous = widening?.width(at: t) ?? targetWidth
+        targetWidth = wanted
+        widening = reduceMotion ? nil : Widening(from: previous, to: wanted, start: t, duration: opening ? Self.openingDuration : 0.21)
+    }
+    private static func smooth(_ t: CGFloat) -> CGFloat {
+        let p = min(1, max(0, t)); return p * p * (3 - 2 * p)
+    }
+    private func progress(at t: TimeInterval) -> CGFloat {
+        guard let openedAt else { return 0 }
+        return reduceMotion ? 1 : min(1, max(0, (t - openedAt) / Self.openingDuration))
+    }
+    private func surfaceFrame(at t: TimeInterval) -> CGRect {
+        let w = widening?.width(at: t) ?? targetWidth
+        let h = DictationHUD.compact.height + (bounds.height - DictationHUD.compact.height) * Self.smooth(progress(at: t))
+        return CGRect(x: bounds.midX - w / 2, y: bounds.minY, width: w, height: h)
+    }
+
+    private func render(at t: TimeInterval) {
+        guard let plate else { return }
+        let wasOpening = openness < 1, resized = widening != nil
+        openness = progress(at: t)
+        let frame = surfaceFrame(at: t)
+        if let widening, t >= widening.end { self.widening = nil }
+        DictationHUDPlate.resize(plate, to: frame)
+        let size = frame.size
+        content.setFrameSize(size)
+        liquid.frame = CGRect(origin: .zero, size: size)
+        liquid.alphaValue = solid ? 0 : Self.smooth((openness - 0.04) / 0.96)
+        liquid.isHidden = liquid.alphaValue == 0
+        sampleLight(at: t)
+
+        if let wave {
+            wave.alphaValue = finishing ? 0 : 1 - Self.smooth((openness - 0.07) / 0.66)
+            if wave.alphaValue <= 0 {
+                wave.disconnect(); wave.removeFromSuperview(); self.wave = nil
+            } else {
+                let w = min(size.width, DictationWaveMotion.compactWidth)
+                wave.frame = CGRect(x: (size.width - w) / 2, y: (size.height - DictationWaveMotion.slotHeight) / 2,
+                                    width: w, height: DictationWaveMotion.slotHeight)
+            }
+        }
+        let visibleCaptionWidth = DictationHUD.captionWidth(in: size.width)
+        let captionY = (size.height - DictationHUD.captionHeight) / 2
+        viewport.frame = CGRect(x: (size.width - visibleCaptionWidth) / 2, y: captionY,
+                                width: visibleCaptionWidth, height: DictationHUD.captionHeight)
+        caption.frame = CGRect(x: (visibleCaptionWidth - captionLayoutWidth) / 2, y: 0,
+                               width: captionLayoutWidth, height: DictationHUD.captionHeight)
+        viewport.alphaValue = Self.smooth((openness - 0.26) / 0.66)
+        viewport.isHidden = slice.line.isEmpty || viewport.alphaValue == 0
+        status.isHidden = !slice.line.isEmpty || (!finishing && openedAt == nil)
+        status.frame = viewport.frame
+        if (wasOpening && openness == 1) || (resized && widening == nil) { window?.invalidateShadow() }
+    }
+
+    private func sampleLight(at t: TimeInterval) {
+        if drifts, let openedAt { liquid.sample(at: t - openedAt) }
+    }
+    private var drifts: Bool { openedAt != nil && !finishing && !solid && !reduceMotion }
+    private var resizes: Bool { widening != nil || (openedAt != nil && openness < 1) }
+    private var needsClock: Bool { window != nil && (resizes || drifts) }
+    func refresh() {
+        render(at: now())
+        guard needsClock else { stopClock(); return }
+        guard clock == nil else { return }
+        clock = Task { [weak self] in
             while !Task.isCancelled {
-                guard let self else { return }
-                let t = min(1, (CACurrentMediaTime() - start) / 0.30)
-                self.apply(t * t * (3 - 2 * t))
-                if t >= 1 { self.transition = nil; self.window?.invalidateShadow(); return }
-                do { try await Task.sleep(for: .milliseconds(16)) } catch { return }
+                let interval = self?.resizes == true ? 16 : 33
+                do { try await Task.sleep(for: .milliseconds(interval)) } catch { return }
+                guard let self, !Task.isCancelled else { return }
+                let time = self.now()
+                if self.resizes { self.render(at: time) } else { self.sampleLight(at: time) }
+                if !self.needsClock { self.clock = nil; return }
             }
         }
     }
-    func stop() { transition?.cancel(); transition = nil }
+    private func stopClock() { clock?.cancel(); clock = nil }
+    func stop() { stopClock(); wave?.disconnect(); caption.stop() }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { stop() }
+        else {
+            if let readings { wave?.bind(readings, reduceMotion: reduceMotion, solid: solid) }
+            refresh()
+        }
+    }
 }
 
 private final class DictationPanel: NSPanel {
@@ -131,83 +249,43 @@ private final class DictationPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-/// Embed the content *inside* native glass; no black tint, second material, or forced dark mode.
+/// The system supplies the glass. The colour field is clipped content, not a second material.
 @MainActor enum DictationHUDPlate {
     static func make(in frame: NSRect, content: NSView, reduceTransparency: Bool) -> NSView {
-        let radius = DictationHUD.compact.height / 2
         content.frame = NSRect(origin: .zero, size: frame.size)
         content.autoresizingMask = [.width, .height]
         if !reduceTransparency {
             if #available(macOS 26, *) {
                 let glass = NSGlassEffectView(frame: frame)
-                glass.style = .regular; glass.cornerRadius = radius; glass.contentView = content
+                glass.style = .regular; glass.cornerRadius = radius(in: frame); glass.contentView = content
                 return glass
             }
             let material = NSVisualEffectView(frame: frame)
             material.material = .popover; material.blendingMode = .behindWindow; material.state = .active
-            material.wantsLayer = true; material.layer?.cornerRadius = radius; material.layer?.cornerCurve = .continuous
+            material.wantsLayer = true; material.layer?.cornerRadius = radius(in: frame)
             material.layer?.masksToBounds = true; material.addSubview(content)
             return material
         }
         let solid = Solid(frame: frame); solid.addSubview(content); return solid
     }
+    static func resize(_ plate: NSView, to frame: NSRect) {
+        guard plate.frame != frame else { return }
+        let oldRadius = radius(in: plate.frame), next = radius(in: frame)
+        plate.frame = frame
+        if oldRadius != next {
+            if #available(macOS 26, *), let glass = plate as? NSGlassEffectView { glass.cornerRadius = next }
+            else if let material = plate as? NSVisualEffectView { material.layer?.cornerRadius = next }
+        }
+        if plate is Solid { plate.needsDisplay = true }
+    }
+    static func radius(in rect: CGRect) -> CGFloat { min(rect.width, rect.height) / 2 }
     private final class Solid: NSView {
         override func draw(_ dirtyRect: NSRect) {
-            let r = DictationHUD.compact.height / 2
-            let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: r, yRadius: r)
+            let box = bounds.insetBy(dx: 0.5, dy: 0.5), r = DictationHUDPlate.radius(in: box)
+            let path = NSBezierPath(roundedRect: box, xRadius: r, yRadius: r)
             NSColor.windowBackgroundColor.withAlphaComponent(1).setFill(); path.fill()
             NSColor.separatorColor.setStroke(); path.lineWidth = 1; path.stroke()
         }
         override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
     }
-}
-
-private struct DictationHUDView: View {
-    @ObservedObject var controller: DoubaoDictationController
-    let captionWidth: CGFloat
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    var body: some View {
-        GeometryReader { geometry in
-            let size = geometry.size
-            let p = min(1, max(0, (size.height - DictationHUD.compact.height) / (DictationHUD.expanded.height - DictationHUD.compact.height)))
-            let waveWidth = DictationWaveMotion.compactWidth + (DictationWaveMotion.expandedWidth - DictationWaveMotion.compactWidth) * p
-            let compactCenterY = DictationHUD.compact.height / 2
-            let headerY = compactCenterY + (DictationHUD.expandedWaveCenterY - compactCenterY) * p
-            let captionY = size.height - DictationHUD.captionBottomInset - DictationHUD.captionHeight / 2
-            ZStack {
-                if controller.phase == .finishing {
-                    DictationHUDLabel(text: p < 0.5 ? "正在定稿" : controller.statusTitle, size: 11.5)
-                        .fixedSize().position(x: size.width / 2, y: headerY)
-                } else {
-                    DictationWave(readings: controller.waveReadings, reduceMotion: reduceMotion)
-                        .frame(width: min(waveWidth, size.width), height: DictationWaveMotion.slotHeight)
-                        .position(x: size.width / 2, y: headerY)
-                }
-                if !controller.captionSlice.line.isEmpty && p >= 0.99 {
-                    // Mount once the fixed-width, single-line viewport fits inside the glass.
-                    DictationDraftCaption(slice: controller.captionSlice, reduceMotion: reduceMotion, layoutWidth: captionWidth)
-                        .frame(width: captionWidth, height: DictationHUD.captionHeight)
-                        .position(x: size.width / 2, y: captionY)
-                } else if p >= 1 {
-                    DictationHUDLabel(text: "等待识别结果…", size: 14).fixedSize()
-                        .position(x: size.width / 2, y: captionY)
-                }
-            }
-            .frame(width: size.width, height: size.height).clipped()
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(controller.phase == .finishing ? controller.statusTitle : "听写预览")
-        .accessibilityValue(controller.bubblePreview)
-        .accessibilityHint("使用听写快捷键结束。定稿优先插入当前输入框，否则复制；取消不提交草稿")
-    }
-}
-
-private struct DictationHUDLabel: NSViewRepresentable {
-    let text: String, size: CGFloat
-    func makeNSView(context: Context) -> NSTextField {
-        let label = NSTextField(labelWithString: text)
-        label.alignment = .center; label.textColor = .secondaryLabelColor
-        label.font = .systemFont(ofSize: size, weight: .medium); return label
-    }
-    func updateNSView(_ label: NSTextField, context: Context) { label.stringValue = text }
 }

@@ -114,6 +114,7 @@
 		A91601000000000000000005 /* DictationHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91602000000000000000005 /* DictationHUD.swift */; };
 		D1CA01000000000000000001 /* DictationDraftCaption.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1CA02000000000000000001 /* DictationDraftCaption.swift */; };
 		D1CA01000000000000000002 /* DictationWaveMotion.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1CA02000000000000000002 /* DictationWaveMotion.swift */; };
+		D1CA01000000000000000003 /* DictationLiquidBackdrop.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1CA02000000000000000003 /* DictationLiquidBackdrop.swift */; };
 		A91601000000000000000006 /* DoubaoSpeechPluginUIProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91602000000000000000006 /* DoubaoSpeechPluginUIProvider.swift */; };
 		D1C700000000000000000020 /* DictationInputMethodProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C700000000000000000010 /* DictationInputMethodProtocol.swift */; };
 		D1C700000000000000000021 /* DictationIMESocket.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C700000000000000000011 /* DictationIMESocket.swift */; };
@@ -240,6 +241,7 @@
 		A91602000000000000000005 /* DictationHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationHUD.swift; sourceTree = "<group>"; };
 		D1CA02000000000000000001 /* DictationDraftCaption.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationDraftCaption.swift; sourceTree = "<group>"; };
 		D1CA02000000000000000002 /* DictationWaveMotion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationWaveMotion.swift; sourceTree = "<group>"; };
+		D1CA02000000000000000003 /* DictationLiquidBackdrop.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationLiquidBackdrop.swift; sourceTree = "<group>"; };
 		A91602000000000000000006 /* DoubaoSpeechPluginUIProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DoubaoSpeechPluginUIProvider.swift; sourceTree = "<group>"; };
 		D1C700000000000000000010 /* DictationInputMethodProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationInputMethodProtocol.swift; sourceTree = "<group>"; };
 		D1C700000000000000000011 /* DictationIMESocket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationIMESocket.swift; sourceTree = "<group>"; };
@@ -461,6 +463,7 @@
 				A91602000000000000000005 /* DictationHUD.swift */,
 				D1CA02000000000000000001 /* DictationDraftCaption.swift */,
 				D1CA02000000000000000002 /* DictationWaveMotion.swift */,
+				D1CA02000000000000000003 /* DictationLiquidBackdrop.swift */,
 				A91602000000000000000006 /* DoubaoSpeechPluginUIProvider.swift */,
 			);
 			path = SpeechInput;
@@ -546,6 +549,7 @@
 				A91601000000000000000005 /* DictationHUD.swift in Sources */,
 				D1CA01000000000000000001 /* DictationDraftCaption.swift in Sources */,
 				D1CA01000000000000000002 /* DictationWaveMotion.swift in Sources */,
+				D1CA01000000000000000003 /* DictationLiquidBackdrop.swift in Sources */,
 				A91601000000000000000006 /* DoubaoSpeechPluginUIProvider.swift in Sources */,
 				A9150100000000000000000B /* SharingCursorCapture.swift in Sources */,
 				A9150100000000000000000C /* SharingNativeCursorSurface.swift in Sources */,

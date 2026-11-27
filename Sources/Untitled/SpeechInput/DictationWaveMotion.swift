@@ -1,7 +1,6 @@
 import AppKit
 import Combine
 import QuartzCore
-import SwiftUI
 
 /// One measured envelope drives both the delayed stems and their shared refraction.
 struct DictationWaveMotion {
@@ -100,14 +99,6 @@ struct DictationWaveMotion {
         }
         return Frame(bars: bars, level: peak, phase: peak > 0 ? phase : 0)
     }
-}
-
-struct DictationWave: NSViewRepresentable {
-    let readings: CurrentValueSubject<DictationMeterReading, Never>, reduceMotion: Bool
-    @Environment(\.accessibilityReduceTransparency) private var solid
-    func makeNSView(context: Context) -> DictationWaveView { DictationWaveView(frame: .zero) }
-    func updateNSView(_ view: DictationWaveView, context: Context) { view.bind(readings, reduceMotion: reduceMotion, solid: solid) }
-    static func dismantleNSView(_ view: DictationWaveView, coordinator: ()) { view.disconnect() }
 }
 
 @MainActor final class DictationWaveView: NSView {
