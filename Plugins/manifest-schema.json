@@ -17,6 +17,17 @@
     "templates",
     "ui"
   ],
+  "allOf": [
+    {
+      "if": { "properties": { "actions": { "contains": { "const": "sendNotification" } } } },
+      "then": {
+        "required": ["permissions"],
+        "properties": {
+          "permissions": { "contains": { "required": ["id"], "properties": { "id": { "const": "system.notifications" } } } }
+        }
+      }
+    }
+  ],
   "properties": {
     "schemaVersion": {
       "const": 2
@@ -61,6 +72,11 @@
           "openURL",
           "runShortcut",
           "showMainWindow",
+          "revealFile",
+          "shareFile",
+          "readClipboardText",
+          "copyText",
+          "sendNotification",
           "sharePeripherals",
           "shareWirelessMicrophone",
           "switchPeripheralControl",
@@ -117,6 +133,10 @@
               "openURL",
               "runShortcut",
               "showMainWindow",
+              "revealFile",
+              "shareFile",
+              "copyText",
+              "sendNotification",
               "sharePeripherals",
               "shareWirelessMicrophone",
               "switchPeripheralControl",

@@ -66,7 +66,7 @@ struct PluginDetailView: View {
                 }
                 .help("执行 \(command.title)")
                 .accessibilityLabel("执行 \(command.title)")
-                .disabled(!plugin.isEnabled || !command.isEnabled || !command.isConfigured)
+                .disabled(!plugin.isEnabled || !plugin.allowsAction(command.action) || !command.isEnabled || !command.isConfigured)
                 Button("编辑") { editingCommand = command }
             }
             .panelGlassButton()
@@ -128,6 +128,7 @@ struct PluginHeaderControlView: View {
 
             } else if control == .more {
                 Menu {
+                    Button("权限与能力…") { store.showPluginAccess(plugin.id) }
                     Link("查看源码", destination: plugin.manifest.repository)
                     Divider()
                     Button("卸载插件…", role: .destructive) { confirmUninstall = true }
@@ -181,10 +182,11 @@ struct PluginAddCommandView: View {
     @ViewState private var editingCommand: PluginCommand?
     let pluginID: String
     var body: some View {
-        if let plugin = store.installed.first(where: { $0.id == pluginID }) {
+        if let plugin = store.installed.first(where: { $0.id == pluginID }),
+           plugin.manifest.actions.contains(where: \.canBindCommand) {
             Menu {
                 if plugin.manifest.templates.isEmpty {
-                    ForEach(plugin.manifest.actions, id: \.self) { action in
+                    ForEach(plugin.manifest.actions.filter(\.canBindCommand), id: \.self) { action in
                         Button(action.title) { editingCommand = PluginCommand(action: action) }
                     }
                 } else {

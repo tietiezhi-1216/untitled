@@ -12,7 +12,7 @@ struct CommandEditor: View {
 
     init(pluginID: String, command: PluginCommand, actions: [ActionKind]) {
         self.pluginID = pluginID
-        self.actions = actions
+        self.actions = actions.filter(\.canBindCommand)
         _draft = ViewState(wrappedValue: command)
     }
 
@@ -54,6 +54,13 @@ struct CommandEditor: View {
                 case .showMainWindow:
                     Text("将主面板带到前台；窗口已关闭时会重新打开。")
                         .font(.callout).foregroundStyle(.secondary)
+                case .revealFile, .shareFile:
+                    Text("运行时从系统窗口选择文件。")
+                        .font(.callout).foregroundStyle(.secondary)
+                case .copyText:
+                    TextField("要复制的文本", text: $draft.target, axis: .vertical).lineLimit(2...4)
+                case .sendNotification:
+                    TextField("通知标题", text: $draft.target)
                 case .sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing:
                     Text("使用外设共享插件中已配对的设备。切换控制需要两端明确开启键鼠共享；停止操作始终释放键鼠和麦克风。")
                         .font(.callout).foregroundStyle(.secondary)
@@ -95,7 +102,9 @@ struct CommandEditor: View {
 
     private func save() {
         do {
-            draft.target = draft.target.trimmingCharacters(in: .whitespacesAndNewlines)
+            if draft.action != .copyText {
+                draft.target = draft.target.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
             try store.saveCommand(draft, pluginID: pluginID)
             dismiss()
         } catch { self.error = error.localizedDescription }
