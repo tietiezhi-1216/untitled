@@ -9,6 +9,7 @@
         registry.register(HostPluginUIProvider())
         registry.register(CapturePluginUIProvider())
         registry.register(SharingPluginUIProvider())
+        registry.register(WirelessMicrophonePluginUIProvider())
         registry.register(DoubaoSpeechPluginUIProvider())
         return registry
     }

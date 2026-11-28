@@ -93,6 +93,8 @@ struct PluginDetailView: View {
             "将工具箱主窗口带到前台"
         case .sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing:
             "已配对 Mac 的键鼠共享操作"
+        case .shareWirelessMicrophone:
+            "启动或停止无线麦连接"
         default:
             "全局截图操作"
         }

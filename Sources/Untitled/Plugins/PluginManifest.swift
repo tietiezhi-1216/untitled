@@ -2,7 +2,7 @@ import Foundation
 
 enum HostInfo {
     static let name = "Untitled"
-    static let version = "0.13.1"
+    static let version = "0.13.51"
     static let bundleIdentifier = "com.untitled.app"
     static let repository = URL(string: "https://github.com/tietiezhi-1216/untitled")!
     static let catalog = URL(string: "https://raw.githubusercontent.com/tietiezhi-1216/untitled/main/Plugins/catalog.json")!
@@ -139,6 +139,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
     case runShortcut
     case showMainWindow
     case sharePeripherals, switchPeripheralControl, stopPeripheralSharing
+    case shareWirelessMicrophone
     case toggleDoubaoDictation, holdDoubaoDictation, cancelDoubaoDictation
     case captureRegion, captureWindow, captureScreen, captureScrolling, captureRecording
     case pinSelection, pinClipboard, togglePins, captureHistory
@@ -148,7 +149,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
     var isScreenshotAction: Bool {
         switch self {
         case .openApplication, .openURL, .runShortcut, .showMainWindow, .sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing,
-             .toggleDoubaoDictation, .holdDoubaoDictation, .cancelDoubaoDictation: false
+             .shareWirelessMicrophone, .toggleDoubaoDictation, .holdDoubaoDictation, .cancelDoubaoDictation: false
         default: true
         }
     }
@@ -162,6 +163,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
         case .sharePeripherals: "启动或停止外设共享"
         case .switchPeripheralControl: "切换键鼠控制目标"
         case .stopPeripheralSharing: "停止全部外设共享"
+        case .shareWirelessMicrophone: "启动或停止无线麦"
         case .toggleDoubaoDictation: "开始或结束豆包听写"
         case .holdDoubaoDictation: "按住说话（豆包）"
         case .cancelDoubaoDictation: "取消豆包听写"
@@ -196,6 +198,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
         case .sharePeripherals: "network"
         case .switchPeripheralControl: "keyboard"
         case .stopPeripheralSharing: "stop.circle"
+        case .shareWirelessMicrophone: "mic"
         case .toggleDoubaoDictation: "mic"
         case .holdDoubaoDictation: "mic.fill"
         case .cancelDoubaoDictation: "xmark.circle"

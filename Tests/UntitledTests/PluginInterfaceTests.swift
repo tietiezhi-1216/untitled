@@ -8,7 +8,7 @@ import Testing
 @Suite(.serialized) struct PluginInterfaceTests {
     @Test @MainActor func officialPluginsDeclareTheirOwnLayout() throws {
         let registry = PluginComposition.makeUIRegistry()
-        for name in ["global-shortcuts", "screenshot", "peripheral-sharing"] {
+        for name in ["global-shortcuts", "screenshot", "peripheral-sharing", "wireless-microphone"] {
             let data = try Data(contentsOf: URL(fileURLWithPath: "Plugins/\(name)/manifest.json"))
             let manifest = try JSONDecoder().decode(PluginManifest.self, from: data)
             try manifest.validate()
