@@ -320,7 +320,16 @@ import QuartzCore
     }
 }
 
-private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: Bool { true } }
+final class CaptureSelectionPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if let selection = contentView as? CaptureSelectionView, selection.handleCopyKeyEquivalent(event) {
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
 
 @MainActor private final class CaptureSelectionColorWell:NSColorWell {
     private var previousLevel:NSWindow.Level?
@@ -705,6 +714,22 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
         return true
     }
 
+    func handleCopyKeyEquivalent(_ event: NSEvent) -> Bool {
+        // AppKit can check window and menu key equivalents before a canvas keyDown.
+        guard event.modifierFlags.contains(.command), !handingOff, !session.preparingRecording,
+              let window, window.isKeyWindow, event.window == nil || event.window === window,
+              window.attachedSheet == nil, !CaptureKeyboardRouting.isEditingText(in: window),
+              let action = selectionShortcut(for: event), action == .copy || action == .copyAndClose else { return false }
+        if !handlePinShortcut(event) { session.perform(action) }
+        return true
+    }
+
+    private func selectionShortcut(for event: NSEvent) -> CaptureShortcutAction? {
+        guard allowsShapes, confirmed else { return nil }
+        return CaptureShortcutSettings.shared.action(keyCode: UInt32(event.keyCode),
+            modifiers: CaptureShortcutSettings.modifiers(event.modifierFlags), scope: .selection)
+    }
+
     override func keyDown(with event:NSEvent) {
         guard !handingOff,!session.exporting else { return }
         if handlePinShortcut(event) { return }
@@ -722,7 +747,7 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
             session.pendingMode=Shape(rawValue:(current.rawValue+(event.modifierFlags.contains(.shift) ? 3:1))%4) ?? .rectangle
             session.choosingMode=true;positionSessionControls();return
         }
-        if allowsShapes,confirmed,let action=CaptureShortcutSettings.shared.action(keyCode:UInt32(event.keyCode),modifiers:CaptureShortcutSettings.modifiers(modifiers),scope:.selection),action != .copyColor {
+        if let action = selectionShortcut(for: event), action != .copyColor {
             session.perform(action);return
         }
         switch event.keyCode {
