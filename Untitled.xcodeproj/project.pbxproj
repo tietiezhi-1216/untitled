@@ -107,6 +107,8 @@
 		A91A01000000000000000000 /* WirelessMicrophoneAudio.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91A02000000000000000000 /* WirelessMicrophoneAudio.swift */; };
 		A91A01000000000000000001 /* WirelessMicrophoneController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91A02000000000000000001 /* WirelessMicrophoneController.swift */; };
 		A91A01000000000000000002 /* WirelessMicrophonePluginUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91A02000000000000000002 /* WirelessMicrophonePluginUI.swift */; };
+		A91A01000000000000000004 /* XiaomiRemoteVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91A02000000000000000004 /* XiaomiRemoteVoice.swift */; };
+		A91A01000000000000000003 /* XiaomiRemoteBluetooth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91A02000000000000000003 /* XiaomiRemoteBluetooth.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -216,6 +218,8 @@
 		A91A02000000000000000000 /* WirelessMicrophoneAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WirelessMicrophoneAudio.swift; sourceTree = "<group>"; };
 		A91A02000000000000000001 /* WirelessMicrophoneController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WirelessMicrophoneController.swift; sourceTree = "<group>"; };
 		A91A02000000000000000002 /* WirelessMicrophonePluginUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WirelessMicrophonePluginUI.swift; sourceTree = "<group>"; };
+		A91A02000000000000000004 /* XiaomiRemoteVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaomiRemoteVoice.swift; sourceTree = "<group>"; };
+		A91A02000000000000000003 /* XiaomiRemoteBluetooth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaomiRemoteBluetooth.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -424,6 +428,8 @@
 				A91A02000000000000000000 /* WirelessMicrophoneAudio.swift */,
 				A91A02000000000000000001 /* WirelessMicrophoneController.swift */,
 				A91A02000000000000000002 /* WirelessMicrophonePluginUI.swift */,
+				A91A02000000000000000004 /* XiaomiRemoteVoice.swift */,
+				A91A02000000000000000003 /* XiaomiRemoteBluetooth.swift */,
 			);
 			path = WirelessMicrophone;
 			sourceTree = "<group>";
@@ -510,6 +516,8 @@
 				A91A01000000000000000000 /* WirelessMicrophoneAudio.swift in Sources */,
 				A91A01000000000000000001 /* WirelessMicrophoneController.swift in Sources */,
 				A91A01000000000000000002 /* WirelessMicrophonePluginUI.swift in Sources */,
+				A91A01000000000000000004 /* XiaomiRemoteVoice.swift in Sources */,
+				A91A01000000000000000003 /* XiaomiRemoteBluetooth.swift in Sources */,
 				5963A6D32F9BD7161D8EF758 /* CaptureScrollSegments.swift in Sources */,
 				19DE7DA35A510A5D85E79D6F /* CaptureRecordingAnnotations.swift in Sources */,
 				CAA000000000000000000012 /* CaptureWebP.swift in Sources */,

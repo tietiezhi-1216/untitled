@@ -217,8 +217,15 @@ private final class SharingMicrophoneQueueContext: @unchecked Sendable {
     private var player: AVAudioPlayerNode?
     private var queuedFrames = 0
     private var generation = 0
-    private let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+    private let format: AVAudioFormat
+    private let queueLimit: Int
     var isRunning: Bool { engine?.isRunning == true }
+    var hasQueuedAudio: Bool { queuedFrames > 0 }
+
+    init(sampleRate: Double = 48_000) {
+        format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
+        queueLimit = Int(sampleRate / 5)
+    }
     var isRoutingToFeed: Bool {
         guard let engine, let unit = engine.outputNode.audioUnit, let feed = SharingAudioDevices.device(SharingAudioDevices.feedUID) else { return false }
         var id: AudioDeviceID = 0, size = UInt32(MemoryLayout<AudioDeviceID>.size)
@@ -243,16 +250,32 @@ private final class SharingMicrophoneQueueContext: @unchecked Sendable {
         player.play()
     }
     func append(_ data: Data) {
-        guard let player, isRunning, isRoutingToFeed, !data.isEmpty, data.count.isMultiple(of: 4), data.count <= 32768 else { return }
+        guard !data.isEmpty, data.count.isMultiple(of: 4), data.count <= 32768 else { return }
         let count = data.count / 4
-        guard queuedFrames + count <= 9600, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)), let samples = buffer.floatChannelData?[0] else { return }
-        buffer.frameLength = AVAudioFrameCount(count)
-        data.withUnsafeBytes { bytes in
-            for index in 0..<count {
-                let value = Float(bitPattern: UInt32(littleEndian: bytes.loadUnaligned(fromByteOffset: index * 4, as: UInt32.self)))
-                samples[index] = value.isFinite ? min(1, max(-1, value)) : 0
+        _ = enqueue(count: count) { samples in
+            data.withUnsafeBytes { bytes in
+                for index in 0..<count {
+                    let value = Float(bitPattern: UInt32(littleEndian: bytes.loadUnaligned(fromByteOffset: index * 4, as: UInt32.self)))
+                    samples[index] = value.isFinite ? min(1, max(-1, value)) : 0
+                }
             }
         }
+    }
+
+    func append(_ pcm: [Int16]) -> Bool {
+        enqueue(count: pcm.count) { samples in
+            for index in pcm.indices { samples[index] = Float(pcm[index]) / 32_768 }
+        }
+    }
+
+    private func enqueue(count: Int, populate: (UnsafeMutablePointer<Float>) -> Void) -> Bool {
+        guard let player, isRunning, isRoutingToFeed else { return false }
+        // Keep the playback queue bounded to 200 ms. Drop audio when it cannot keep up.
+        guard count > 0, count <= queueLimit - queuedFrames,
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)),
+              let samples = buffer.floatChannelData?[0] else { return true }
+        buffer.frameLength = AVAudioFrameCount(count)
+        populate(samples)
         queuedFrames += count
         let generation = self.generation
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
@@ -261,6 +284,7 @@ private final class SharingMicrophoneQueueContext: @unchecked Sendable {
                 self.queuedFrames = max(0, self.queuedFrames - count)
             }
         }
+        return true
     }
     func stop() {
         generation += 1; player?.stop(); engine?.stop(); player = nil; engine = nil; queuedFrames = 0

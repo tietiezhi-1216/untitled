@@ -82,9 +82,9 @@
   {
     "id": "com.untitled.wireless-microphone",
     "repository": "https://github.com/tietiezhi-1216/untitled",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "name": "无线麦",
-    "summary": "让一台 Mac 的实体麦克风成为另一台 Mac 的应用输入。",
+    "summary": "连接小米蓝牙遥控器 2 和 2 Pro，按住语音键即可在 Mac 收音。",
     "icon": {
       "symbol": "mic.fill",
       "tint": "#267F87"

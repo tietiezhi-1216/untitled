@@ -94,7 +94,7 @@ struct PluginDetailView: View {
         case .sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing:
             "已配对 Mac 的键鼠共享操作"
         case .shareWirelessMicrophone:
-            "启动或停止无线麦连接"
+            "查找或断开小米遥控器"
         default:
             "全局截图操作"
         }

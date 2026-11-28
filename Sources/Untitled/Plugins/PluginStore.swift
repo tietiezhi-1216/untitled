@@ -89,15 +89,15 @@ final class PluginStore: ObservableObject {
         return controller
     }
     private var wirelessMicrophoneControllers: [String: WirelessMicrophoneController] = [:]
-    private let wirelessMicrophoneFactory: (String, UserDefaults) -> WirelessMicrophoneController
+    private let wirelessMicrophoneFactory: () -> WirelessMicrophoneController
 
     func wirelessMicrophone(for pluginID: String) -> WirelessMicrophoneController {
         if let controller = wirelessMicrophoneControllers[pluginID] { return controller }
-        let controller = wirelessMicrophoneFactory(pluginID, sharingDefaults)
+        let controller = wirelessMicrophoneFactory()
         controller.isAllowed = { [weak self] in self?.canUseWirelessMicrophone(pluginID) == true }
-        controller.requireMicrophone = { [weak self] in
+        controller.requireBluetooth = { [weak self] in
             guard let self else { throw PluginError.invalid("宿主已关闭。") }
-            try self.permissionClient(for: pluginID).require([.microphone])
+            try self.permissionClient(for: pluginID).require([.bluetooth])
         }
         wirelessMicrophoneControllers[pluginID] = controller
         return controller
@@ -113,7 +113,7 @@ final class PluginStore: ObservableObject {
         guard canUseWirelessMicrophone(pluginID) else { throw PluginError.invalid("请先安装并启用无线麦。") }
         let controller = wirelessMicrophone(for: pluginID)
         if controller.isRunning { controller.stop() }
-        else { try controller.start() }
+        else { try controller.discover() }
     }
 
     let uiRegistry: PluginUIRegistry
@@ -158,9 +158,7 @@ final class PluginStore: ObservableObject {
          presentations: PluginPresentationIndex = .bundled, initialCatalog: [CatalogEntry] = [],
          hotKeys: (any HotKeyRegistering)? = nil,
          dictationFactory: @escaping (URL) -> DoubaoDictationController = { DoubaoDictationController(preferencesURL: $0) },
-         wirelessMicrophoneFactory: @escaping (String, UserDefaults) -> WirelessMicrophoneController = {
-             WirelessMicrophoneController(pluginID: $0, defaults: $1)
-         }) {
+         wirelessMicrophoneFactory: @escaping () -> WirelessMicrophoneController = { WirelessMicrophoneController() }) {
         self.presentations = presentations
         self.catalog = initialCatalog
         self.dictationFactory = dictationFactory
