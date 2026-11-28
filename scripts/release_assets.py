@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import zipfile
 
-from release_plan import SHA, SLUG, command, require_main, version_number
+from release_plan import SHA, SLUG, command, require_approved_source, require_main, version_number
 
 
 TAG = re.compile(rf"(?:plugin-({SLUG})-)?v(\d+\.\d+\.\d+)")
@@ -136,8 +136,15 @@ def upload(repository, tag, path):
     command("gh", "release", "upload", tag, path, "--repo", repository)
 
 
-def publish(repository, source, tag, releases, release, directory, channel, minimum, adopted):
-    require_main(source)
+def require_publish_source(source, tag, source_policy):
+    if source_policy == "approved":
+        require_approved_source(source, tag)
+    else:
+        require_main(source)
+
+
+def publish(repository, source, tag, releases, release, directory, channel, minimum, adopted, source_policy="main"):
+    require_publish_source(source, tag, source_policy)
     slug, version = TAG.fullmatch(tag).groups()
     preview = not slug and channel == "preview"
     if release and release["prerelease"] != preview:
@@ -223,6 +230,7 @@ def main():
     parser.add_argument("--directory", type=Path)
     parser.add_argument("--channel", choices=("preview", "stable"), default="preview")
     parser.add_argument("--minimum")
+    parser.add_argument("--source-policy", choices=("main", "approved"), default="main")
     args = parser.parse_args()
     try:
         if not re.fullmatch(r"[\w.-]+/[\w.-]+", args.repo) or not SHA.fullmatch(args.source):
@@ -238,7 +246,7 @@ def main():
         if args.mode == "check-host":
             if slug:
                 raise ValueError("Use a host tag for this check")
-            require_main(args.source)
+            require_publish_source(args.source, args.tag, args.source_policy)
             if release and not release["draft"]:
                 if tag_source(args.tag) != args.source or release["prerelease"] != (args.channel == "preview"):
                     raise ValueError("Published host tag has a different source or channel")
@@ -249,7 +257,7 @@ def main():
             if args.directory is None or (slug and not args.minimum):
                 raise ValueError("Specify the package directory and the plugin minimum host version")
             result = publish(args.repo, args.source, args.tag, releases, release, args.directory,
-                             args.channel, args.minimum, adopted)
+                             args.channel, args.minimum, adopted, args.source_policy)
         else:
             result = verify_public(args.repo, args.source, args.tag, release)
         if result is None:

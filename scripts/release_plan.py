@@ -39,6 +39,26 @@ def require_main(source):
     return source
 
 
+def require_approved_source(source, tag=None):
+    """Use the exact release source and products recorded in protected main."""
+    if not SHA.fullmatch(source):
+        raise ValueError("Use a full release source SHA")
+    control = require_main(command("git", "rev-parse", "HEAD"))
+    approvals = json.loads(command("git", "show", f"{control}:.github/approved-release-sources.json"))
+    approval = approvals.get(source)
+    if not approval:
+        raise ValueError(f"Protected main has no release approval for {source}")
+    tags = set(approval["tags"])
+    if tag is not None and tag not in tags:
+        raise ValueError(f"Protected main has not approved {tag} for source {source}")
+    baseline = approval["baseline"]
+    if not isinstance(baseline, str) or not baseline.startswith("v"):
+        raise ValueError("Release approval requires a published host baseline tag")
+    version_number(baseline[1:])
+    command("git", "merge-base", "--is-ancestor", f"refs/tags/{baseline}^{{commit}}", source)
+    return tags
+
+
 def host_info(revision):
     info = plistlib.loads(command("git", "show", f"{revision}:Resources/Info.plist").encode())
     version = info["CFBundleShortVersionString"]
@@ -108,7 +128,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True)
     parser.add_argument("--base", help="PR base for pre-merge validation")
-    parser.add_argument("--protected-main", action="store_true")
+    source_group = parser.add_mutually_exclusive_group()
+    source_group.add_argument("--protected-main", action="store_true")
+    source_group.add_argument("--approved-source", action="store_true",
+                              help="Use an exact release source recorded in protected main")
     parser.add_argument("--actions", action="store_true", help="Export GitHub Actions job outputs")
     args = parser.parse_args()
     try:
@@ -117,7 +140,14 @@ def main():
             if args.base:
                 require_main(args.base)
                 command("git", "merge-base", "--is-ancestor", args.base, args.source)
+        if args.approved_source and args.base is not None:
+            raise ValueError("An approved release uses its own first parent as the base")
+        approved_tags = require_approved_source(args.source) if args.approved_source else None
         result = plan(args.source, args.base)
+        if approved_tags is not None:
+            tags = {item["tag"] for item in [result["host"], *result["plugins"]] if item}
+            if tags != approved_tags:
+                raise ValueError("The release plan does not match the tags approved in protected main")
         print(json.dumps(result, indent=2))
         if args.actions:
             with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
