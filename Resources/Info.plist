@@ -19,9 +19,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.13.53</string>
+    <string>0.13.55</string>
     <key>CFBundleVersion</key>
-    <string>123</string>
+    <string>125</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
@@ -30,13 +30,12 @@
     <string>NSApplication</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>仅在你主动开始语音听写、开启录屏麦克风选项，或允许已配对设备使用本机麦克风且对端应用实际使用时采集声音；语音听写会将录音发送给所选识别服务。</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>仅在你使用无线麦时查找和连接小米蓝牙遥控器，并接收你按住语音键时的声音。</string>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>仅在你启动外设共享或无线麦时发现并连接局域网中的 Mac。</string>
+    <string>仅在你启动外设共享时发现并连接局域网中的 Mac。</string>
     <key>NSBonjourServices</key>
-    <array>
-        <string>_untitled-share._tcp</string>
-        <string>_untitled-mic._tcp</string>
-    </array>
+    <array><string>_untitled-share._tcp</string></array>
     <key>NSCameraUsageDescription</key>
     <string>仅在你开启录屏画中画选项时显示摄像头画面。</string>
     <key>NSScreenCaptureUsageDescription</key>
