@@ -154,7 +154,11 @@ jobs:
 
   publish-plugin:
     needs: [plan, verify-release, publish-host]
-    if: ${{ always() && !cancelled() && !inputs.dry_run && needs.verify-release.result == 'success' && needs.plan.outputs.plugins != '[]' }}
+    if: >-
+      ${{ always() && !cancelled() && !inputs.dry_run
+          && needs.verify-release.result == 'success' && needs.plan.outputs.plugins != '[]'
+          && (needs.plan.outputs.source_policy != 'approved'
+              || needs.plan.outputs.host == 'null' || needs.publish-host.result == 'success') }}
     strategy:
       fail-fast: false
       matrix:

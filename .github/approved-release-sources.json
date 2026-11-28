@@ -4,6 +4,7 @@
     "tags": [
       "v0.13.55",
       "plugin-wireless-microphone-v2.0.1"
-    ]
+    ],
+    "allow_older_preview": true
   }
 }

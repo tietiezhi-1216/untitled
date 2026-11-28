@@ -56,7 +56,7 @@ def require_approved_source(source, tag=None):
         raise ValueError("Release approval requires a published host baseline tag")
     version_number(baseline[1:])
     command("git", "merge-base", "--is-ancestor", f"refs/tags/{baseline}^{{commit}}", source)
-    return tags
+    return approval
 
 
 def host_info(revision):
@@ -142,11 +142,11 @@ def main():
                 command("git", "merge-base", "--is-ancestor", args.base, args.source)
         if args.approved_source and args.base is not None:
             raise ValueError("An approved release uses its own first parent as the base")
-        approved_tags = require_approved_source(args.source) if args.approved_source else None
+        approval = require_approved_source(args.source) if args.approved_source else None
         result = plan(args.source, args.base)
-        if approved_tags is not None:
+        if approval:
             tags = {item["tag"] for item in [result["host"], *result["plugins"]] if item}
-            if tags != approved_tags:
+            if tags != set(approval["tags"]):
                 raise ValueError("The release plan does not match the tags approved in protected main")
         print(json.dumps(result, indent=2))
         if args.actions:
