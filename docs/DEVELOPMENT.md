@@ -1,6 +1,6 @@
 # Untitled 开发说明
 
-项目只面向 macOS。Swift Package 与 Xcode 共用源码；应用、package、module、target、scheme 与可执行文件统一为 `Untitled`，Xcode 工程为 `Untitled.xcodeproj`。插件贡献见 [CONTRIBUTING](../CONTRIBUTING.md)。
+项目只面向 macOS。Swift Package 与 Xcode 共用同一个静态组合产品；应用、package、应用 target、scheme 与可执行文件统一为 `Untitled`，Xcode 工程为 `Untitled.xcodeproj`。插件贡献见 [CONTRIBUTING](../CONTRIBUTING.md)。
 
 
 ### 原生界面与 Liquid Glass
@@ -34,7 +34,7 @@ swift test --no-parallel \
   -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib
 ```
 
-应用打包以 `xcrun --sdk macosx` 选出的 SDK 为准，最低构建 SDK 为 26，本机工具链为 27.0。需要更新 SDK 时请更新或切换 Xcode / Command Line Tools，无需更改最低运行版本 macOS 14.0。`build-app.sh` 在签名前校验主程序、WebP helper 和随包音频驱动各架构的 Mach-O SDK 与最低版本。CI 使用 `macos-26` 运行器上的工具链。
+应用打包以 `xcrun --sdk macosx` 选出的 SDK 为准，最低构建 SDK 为 26，本机工具链为 27.0。需要更新 SDK 时请更新或切换 Xcode / Command Line Tools，无需更改最低运行版本 macOS 14.0。`build-app.sh` 在签名前校验主程序、WebP helper 和随包音频驱动各架构的 Mach-O SDK 与最低版本；CI 同时校验 Xcode 产物，仍使用 `macos-26` 运行器上的工具链。
 
 构建结果位于 `dist/debug/Untitled.app` 或 `dist/release/Untitled.app`，使用当前 Mac 的架构。命令行与 Xcode 均不启用 App Sandbox，保留系统隐私授权。图标由 `scripts/build-icon.sh` 从选定的裂变原图生成，随应用打包。
 
@@ -52,7 +52,7 @@ swift test --no-parallel \
 
 四组语音相关 Swift Package 串行回归通过（94 项通过、可选联网测试按默认跳过），覆盖恒定音量下的实际像素换色、响音上限和丢失回调后连续回落、浅／深色、减少透明度、静音停钟与合成 PCM。未使用真实麦克风，未测不同桌面背景下的玻璃合成、GPU 峰值、长时功耗或完整 Xcode 构建。
 
-公式贴图使用随应用打包的 [KaTeX](../Resources/KaTeX/LICENSE)。静态 WebP 与 WebP 动图编码使用 [libwebp](../Tools/WebPEncoder/LICENSE)：`build-app.sh` 会构建并签名随包的 `img2webp`，首次构建下载固定版本源包并验证 SHA-256，用户运行发行版无需安装 Homebrew 或编码工具。相关许可保留在资源与工具目录。仅运行 Swift Package 可开发基本能力；完整发行功能应使用 `build-app.sh` 生成应用包。
+公式贴图使用随应用打包的 [KaTeX](../Plugins/screenshot/Resources/KaTeX/LICENSE)。静态 WebP 与 WebP 动图编码使用 [libwebp](../Plugins/screenshot/Tools/WebPEncoder/LICENSE)：`build-app.sh` 会构建并签名随包的 `img2webp`，首次构建下载固定版本源包并验证 SHA-256，用户运行发行版无需安装 Homebrew 或编码工具。相关许可保留在资源与工具目录。仅运行 Swift Package 可开发基本能力；完整发行功能应使用 `build-app.sh` 生成应用包。
 
 本地智能擦除模型通过截图设置显式下载，下载量为 187 MiB，独立存储在应用支持目录；不包含在主应用或插件 ZIP 内。采用 [LaMa Core ML](https://huggingface.co/mlboydaisuke/LaMa-CoreML)，遵循 Apache-2.0，安装器固定模型版本并校验 SHA-256。图像推理在本机完成，无需云端账号。
 
@@ -78,7 +78,7 @@ open Untitled.xcodeproj
 
 选择 `Untitled` scheme 和 `My Mac` 后按 `⌘R`。Xcode Target 与命令行构建统一采用非 App Sandbox 配置，保留 Hardened Runtime 与摄像头/麦克风 entitlement；系统受保护操作仍需用户授权。`.signing-identity` 只作用于终端构建，Xcode 中需另外配置同一签名身份。正式分发需配置自己的签名和公证。
 
-Swift Package 与 Xcode 工程共用 `Sources/Untitled`。新增宿主源码时，请同时将文件添加到 Xcode target；测试通过 Swift Package 执行。GitHub Actions 验证测试、插件打包和 Xcode 构建。
+SwiftPM 与 Xcode 使用同一应用入口和静态 `UntitledComposition` 产品，Xcode 不重新列举宿主与插件的 Swift 文件。新增原生源码放在所属 target 的目录内。SDK、宿主和三个插件的依赖图、实验 IME（只供独立目标和测试）可用 `python3 scripts/check-module-boundaries.py` 验证；完整 Xcode 编译仍需要 Xcode。两条应用打包路径都调用 `scripts/stage-plugin-resources.sh`，只运行仓库中的插件资产构建钩子，不执行安装包中的文件。GitHub Actions 验证模块图、测试、插件打包和 Xcode 构建。
 
 发布完成后，可额外执行真实 GitHub 下载与安装检查：
 
@@ -89,19 +89,21 @@ UNTITLED_NETWORK_TEST=1 swift test --filter downloadFromPublishedGitHubCatalog
 ## 目录
 
 ```text
+Sources/UntitledPluginSDK/  # 跨目标的通用动作、清单、权限、快捷键与 UI 模型
+Sources/UntitledEntry/      # SwiftPM / Xcode 共用应用入口
 Sources/Untitled/
-├── App/         # 窗口、菜单栏和统一外观
-├── Capture/     # 截图、编辑、贴图、滚动拼接、录制、OCR、文档导出与本地模型
+├── App/         # 组合根、窗口、菜单栏、历史身份迁移
 ├── Models/      # 应用外观设置
-├── Plugins/     # 插件规范、目录、ZIP 安装和配置存储
-├── Sharing/     # 双 Mac TLS 配对、键鼠接力与按需虚拟麦克风同步
-├── SpeechInput/ # 豆包游客双通道 ASR、麦克风、范围校验与非激活听写浮条
-├── Runtime/     # 通用动作执行与 Carbon 全局热键
+├── Plugins/     # 插件规范、目录、ZIP 安装、运行调度和配置存储
+├── Runtime/     # 通用动作、系统授权、Keychain 和全局热键
 └── Views/       # 原生商店、插件配置、录制器与设置
-Plugins/         # 所有插件源码及统一商店目录
-Tests/           # 安装、校验、热键、布局、图像处理、拼接、识别和媒体导出检查
-Resources/       # Info.plist、权限声明、应用图标与本地公式渲染资源
-Tools/           # 随包的 WebP 编码器与独立 HAL 虚拟麦克风源码/安装器
+Plugins/
+├── global-shortcuts/    # 声明式快捷键
+├── screenshot/          # 截图、贴图、录屏、OCR 与资源、WebP 工具
+├── peripheral-sharing/  # 键鼠接力、音频、剪贴板、HAL 驱动
+└── doubao-speech-input/ # 听写、浮条、定稿和历史，另有隔离的 IME 验证目标
+Tests/           # 宿主接口及内置模块回归
+Resources/       # 宿主 Info.plist、权限声明和应用图标
 scripts/         # 本地构建与插件打包
 ```
 

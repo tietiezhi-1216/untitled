@@ -1,0 +1,133 @@
+import AppKit
+import UntitledPluginSDK
+@preconcurrency import AVFoundation
+import Carbon
+import SwiftUI
+
+@MainActor final class CaptureCameraOverlay {
+    private final class SessionBox: @unchecked Sendable { let session = AVCaptureSession() }
+    private let box = SessionBox()
+    private var panel: NSPanel?
+    var windowID: CGWindowID? { panel.map { CGWindowID($0.windowNumber) } }
+
+    func start(in selection: CaptureSelection, permissions: PluginPermissionClient, deviceID: String? = nil, secondary: Bool = false) async throws {
+        guard selection.rect.width >= 240, selection.rect.height >= 180 else {
+            throw PluginError.invalid("摄像头画中画需要至少 240 × 180 的录屏选区。")
+        }
+        try permissions.require([.camera])
+        let defaults = UserDefaults.standard
+        let requested = deviceID ?? defaults.string(forKey: "capture.cameraDevice") ?? ""
+        let devices = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInWideAngleCamera, .external], mediaType: .video, position: .unspecified).devices
+        guard let device = devices.first(where: { $0.uniqueID == requested }) ?? (deviceID == nil ? AVCaptureDevice.default(for: .video) : nil) else { throw PluginError.invalid("未检测到摄像头，可关闭画中画后录屏。") }
+        let input = try AVCaptureDeviceInput(device: device)
+        box.session.beginConfiguration()
+        box.session.sessionPreset = .medium
+        guard box.session.canAddInput(input) else {
+            box.session.commitConfiguration()
+            throw PluginError.invalid("无法启动摄像头。")
+        }
+        box.session.addInput(input); box.session.commitConfiguration()
+        let width = min(300, selection.rect.width / 3)
+        let circle = defaults.bool(forKey: "capture.cameraCircle")
+        let height = circle ? width : width * 0.75
+        let panel = NSPanel(contentRect: CGRect(origin: .zero, size: CGSize(width: width, height: height)),
+                            styleMask: [.borderless, .resizable, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false; panel.level = .floating
+        panel.isMovableByWindowBackground = true
+        panel.aspectRatio = CGSize(width: circle ? 1 : 4, height: circle ? 1 : 3)
+        panel.isOpaque = false; panel.backgroundColor = .clear
+        let view = CameraPreviewView()
+        view.wantsLayer = true
+        let preview = AVCaptureVideoPreviewLayer(session: box.session)
+        preview.videoGravity = .resizeAspectFill
+        view.layer = preview
+        view.circular = circle
+        preview.masksToBounds = true
+        if let connection = preview.connection, connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = defaults.object(forKey: "capture.cameraMirror") as? Bool ?? true
+        }
+        panel.contentView = view
+        let frame = Self.screenFrame(selection)
+        panel.setFrameOrigin(CGPoint(x: secondary ? frame.minX + selection.rect.minX + 12 : frame.minX + selection.rect.maxX - width - 12,
+                                     y: frame.maxY - selection.rect.maxY + 12))
+        self.panel = panel
+        panel.orderFrontRegardless()
+        let box = box
+        await Task.detached { box.session.startRunning() }.value
+    }
+    func stop() {
+        panel?.close(); panel = nil
+        let box = box
+        Task.detached { box.session.stopRunning() }
+    }
+    static func screenFrame(_ selection: CaptureSelection) -> CGRect {
+        NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == selection.display.displayID
+        }?.frame ?? NSScreen.main?.frame ?? .zero
+    }
+}
+
+private final class CameraPreviewView: NSView {
+    var circular = false
+    override func layout() { super.layout(); layer?.cornerRadius = circular ? min(bounds.width, bounds.height) / 2 : 12 }
+    override func mouseDown(with event: NSEvent) { window?.performDrag(with: event) }
+}
+
+@MainActor final class CaptureKeystrokeOverlay: ObservableObject {
+    @Published private(set) var label = "按键显示"
+    private var panel: NSPanel?
+    private var monitor: Any?
+    private var reset: Task<Void, Never>?
+    var windowID: CGWindowID? { panel.map { CGWindowID($0.windowNumber) } }
+
+    func start(in selection: CaptureSelection, permissions: PluginPermissionClient) throws {
+        try permissions.require([.inputMonitoring])
+        let panel = NSPanel(contentRect: CGRect(x: 0, y: 0, width: min(260, selection.rect.width), height: 54),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false; panel.level = .floating
+        panel.isOpaque = false; panel.backgroundColor = .clear; panel.ignoresMouseEvents = true
+        panel.contentView = NSHostingView(rootView: KeystrokeLabel(overlay: self))
+        let frame = CaptureCameraOverlay.screenFrame(selection)
+        panel.setFrameOrigin(CGPoint(x: frame.minX + selection.rect.minX + 12, y: frame.maxY - selection.rect.maxY + 12))
+        self.panel = panel; panel.orderFrontRegardless()
+        monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard !IsSecureEventInputEnabled() else { return }
+            let text = Self.keyLabel(event)
+            Task { @MainActor [weak self] in self?.show(text) }
+        }
+        guard monitor != nil else { stop(); throw PluginError.invalid("无法监听按键，请检查输入监控权限。") }
+    }
+    nonisolated private static func keyLabel(_ event: NSEvent) -> String {
+        let special: [UInt16: String] = [36: "↩", 48: "⇥", 49: "Space", 51: "⌫", 53: "Esc", 123: "←", 124: "→", 125: "↓", 126: "↑"]
+        var prefix = ""
+        if event.modifierFlags.contains(.control) { prefix += "⌃" }
+        if event.modifierFlags.contains(.option) { prefix += "⌥" }
+        if event.modifierFlags.contains(.shift) { prefix += "⇧" }
+        if event.modifierFlags.contains(.command) { prefix += "⌘" }
+        return prefix + (special[event.keyCode] ?? event.charactersIgnoringModifiers?.uppercased() ?? "")
+    }
+    private func show(_ value: String) {
+        label = value
+        reset?.cancel()
+        reset = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(1.5)) } catch { return }
+            self?.label = ""
+        }
+    }
+    func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil; reset?.cancel(); reset = nil
+        panel?.close(); panel = nil
+    }
+}
+
+private struct KeystrokeLabel: View {
+    @ObservedObject var overlay: CaptureKeystrokeOverlay
+    var body: some View {
+        Text(overlay.label).font(.system(size: 26, weight: .medium, design: .monospaced))
+            .foregroundStyle(.white).padding(.horizontal, 18).padding(.vertical, 8)
+            .background(overlay.label.isEmpty ? .clear : Color.black.opacity(0.7), in: Capsule())
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}

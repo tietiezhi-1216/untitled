@@ -1,4 +1,5 @@
 import Carbon
+import UntitledPluginSDK
 import Foundation
 
 /// Suppress repeat-downs; clearing bindings releases only keys that actually started a gesture.
@@ -12,10 +13,10 @@ struct HotKeyPressState {
 }
 
 @MainActor
-final class HotKeyManager {
+package final class HotKeyManager {
     /// Native Carbon remains the default. Tests can own registrations without
     /// reserving real system chords, including deterministic conflict failures.
-    struct Driver {
+    package struct Driver {
         let register: (HotKey, @escaping @MainActor (Bool) -> Void) throws -> (@MainActor @Sendable () -> Void)
     }
     private let driver: Driver?

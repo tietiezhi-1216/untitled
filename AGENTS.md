@@ -14,8 +14,8 @@ Untitled 是由用户通过 agents 持续定制的原生 macOS 软件。功能�
 ## 技术边界
 
 - 只支持 macOS。Swift 6、SwiftUI / AppKit，部署最低 macOS 14；较新 API 保留相应 availability 检查。开发和打包使用所选工具链最新的 macOS SDK（最低 26，本机为 27.0），校验实际链接产物，不增加其他系统适配层。
-- 清单在 `Plugins/<slug>/`；通用协议与存储在 `Sources/Untitled/Plugins/`，系统接口在 `Runtime/`，组合入口在 `App/PluginComposition.swift`。
-- 现有 `Capture/`、`Sharing/` 是原生能力模块。新业务使用自己的模块与 provider；通用渲染器只访问注册表，不按插件 ID 硬编码页面。
+- 清单在 `Plugins/<slug>/`；通用清单模型在 `Sources/UntitledPluginSDK/`，宿主存储和系统接口在 `Sources/Untitled/`，内置模块只在 `Sources/Untitled/App/PluginComposition.swift` 组装。
+- 原生插件的源码、资源和专用工具归 `Plugins/<slug>/`。插件注册自己的视图、动作、状态与生命周期；宿主只做通用调度和系统能力授权，不按插件 ID 硬编码页面、操作或启停逻辑。见 [宿主与插件边界](docs/PLUGIN-BOUNDARY.md)。
 - 当前 ZIP 是声明式包，仅允许根目录 `manifest.json`、`README.md`、`LICENSE`。新增原生能力随宿主编译。任意代码加载、agent 执行器及完全接管是独立的运行时工作，未实现时不得宣称可用。
 - 命令行与 Xcode 构建均不启用 App Sandbox，保留系统授权与 Hardened Runtime。系统能力通过统一 driver 和绑定插件身份的客户端接入。
 - 原生 provider 同进程运行；权限声明是宿主接口约束，不是对恶意原生代码的隔离沙盒。共享与独立分发不代表自动获得系统权限。
@@ -23,12 +23,12 @@ Untitled 是由用户通过 agents 持续定制的原生 macOS 软件。功能�
 ## 实现与兼容
 
 - 开始前看 `git status --short`。保留已有未提交改动，不用 reset、clean 或整文件回退覆盖其他工作。
-- 产品、Swift package / module / target / scheme 和可执行文件统一为 `Untitled`，仓库名 `untitled`，工程 `Untitled.xcodeproj`。应用命名空间 `com.untitled.app`，内置插件 `com.untitled.*`，环境变量 `UNTITLED_*`；不新增旧命名别名。历史身份仅用于显式的数据迁移与驱动清理，规则见 [迁移说明](docs/IDENTITY-MIGRATION.md)。
+- 产品、Swift package、应用 target / scheme 和可执行文件统一为 `Untitled`，内部 Swift 模块用 `Untitled` 前缀，仓库名 `untitled`，工程 `Untitled.xcodeproj`。应用命名空间 `com.untitled.app`，内置插件 `com.untitled.*`，环境变量 `UNTITLED_*`；不新增旧命名别名。历史身份仅用于显式的数据迁移与驱动清理，规则见 [迁移说明](docs/IDENTITY-MIGRATION.md)。
 - 新插件使用自己的命名空间；fork 独立分发时换插件 ID，保留作者与许可。版本、模板 ID、命令 ID 稳定，升级不重置用户配置。
 - 安装、启用、打开界面不自动启动采集、远端控制、安装 helper 或申请整套权限。长任务可取消；禁用、卸载和退出释放自身热键、监听、连接与任务。
 - Swift 6 的 actor 和 Sendable 问题按真实所有权解决，不靠普遍添加 `@unchecked Sendable` 或忽略错误。
 - 密钥放 Keychain；源码、清单、包和日志不含个人路径、配对信息或用户内容。错误提供恢复路径，输出与配置有原子替换或等效的失败保护。
-- 新 Swift 文件同时加入 Xcode target。新增字段、动作、权限同步 Swift 校验、JSON Schema、说明和相关验证。
+- Xcode 直接链接同一 Swift Package 组合产品；新增 App 源码放入其所属 target，不在 Xcode 重复加入。独立实验输入法 target 仍需同步工程。新增字段、动作、权限同步 Swift 校验、JSON Schema、说明和相关验证。
 - 每个插件都检查空闲与停用后的开销；高内存、模型、图像、音视频、批处理等路径先定义输入、并发、缓存和队列预算，测量基线、峰值与释放后的多轮趋势。无界增长、停用后持续工作等回归先修复；未测指标明确标注，不凭编译或单元测试宣称性能合格。具体工具与复现记录见性能规范。
 
 ## 验证与发布
@@ -42,7 +42,7 @@ python3 scripts/package-plugins.py --tag v0.10.0
 
 焦点测试串行运行，临时目录隔离配置，fake driver 隔离系统权限。按改动做必要验证；不为文案或低影响可逆变更编写镜像测试。只在相关改动、失败或未解决疑虑存在时扩大检查范围。
 
-本机交付：每次开发更新完成并通过相关验证后，立即构建并替换 `/Applications/Untitled.app`，正常退出旧进程后从安装位置重新启动；这是用户的持续授权，无需每次询问，不要只留下 `dist/` 构建。沿用现有签名身份，保留用户配置、插件、密钥及系统授权记录；替换前校验签名，采用暂存与可回退的替换方式。构建、签名或正常退出失败时保留原应用并说明阻塞，不强杀进程、不绕过保存保护。本机更新不等同于发布，仍须如实说明验证范围。
+本机交付：每次开发更新完成并通过相关验证后，立即构建并替换 `/Applications/Untitled.app`，正常退出旧进程后从安装位置重新启动；这是用户的持续授权，无需每次询问，不要只留下 `dist/` 构建。沿用现有签名身份，保留用户配置、插件、密钥及系统授权记录；替换前校验签名，暂存旧应用仅用于本次失败回退；确认覆盖安装和正常启动后立即删除旧应用副本，不保留旧版本。构建、签名或正常退出失败时保留原应用并说明阻塞，不强杀进程、不绕过保存保护。本机更新不等同于发布，仍须如实说明验证范围。
 
 修改 `Resources/Brand/AppIcon.png` 后执行 `scripts/build-icon.sh`，同步 Xcode 使用的 `Resources/AppIcon.icns`。选定图形是黑白「裂变」，来源见 [品牌说明](docs/BRANDING.md)。
 

@@ -1,7 +1,12 @@
 import AppKit
 import ImageIO
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 struct CaptureParityTests {
     @Test @MainActor func liveRecordingAnnotationsCanReturnToScreenOperationAndUndoNumbers() {

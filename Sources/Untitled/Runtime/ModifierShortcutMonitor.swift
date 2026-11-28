@@ -1,4 +1,5 @@
 import Carbon
+import UntitledPluginSDK
 import CoreGraphics
 import Foundation
 
@@ -32,6 +33,7 @@ import Foundation
 
     private let driver: PriorityHotKeyDriver
     private let access: () -> Bool
+    private let ignoreEvent: (CGEvent) -> Bool
     private let failed: (String) -> Void
     private var registrations: [UInt32: Registration] = [:]
     private var stop: (@MainActor @Sendable () -> Void)?
@@ -47,9 +49,11 @@ import Foundation
         registrations.values.contains { $0.downTime != nil } || !pendingEnds.isEmpty
     }
 
-    init(driver: PriorityHotKeyDriver, access: @escaping () -> Bool, failed: @escaping (String) -> Void) {
+    init(driver: PriorityHotKeyDriver, access: @escaping () -> Bool,
+         ignoreEvent: @escaping (CGEvent) -> Bool = { _ in false }, failed: @escaping (String) -> Void) {
         self.driver = driver
         self.access = access
+        self.ignoreEvent = ignoreEvent
         self.failed = failed
     }
 
@@ -98,7 +102,7 @@ import Foundation
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput { fail(); return }
         guard type == .flagsChanged,
               event.getIntegerValueField(.eventSourceUnixProcessID) == 0,
-              !SharingInput.isHostShortcutReplay(event) else { return }
+              !ignoreEvent(event) else { return }
         let code = UInt32(event.getIntegerValueField(.keyboardEventKeycode))
         guard registrations[code] != nil else {
             // Any other modifier transition turns a solo candidate into a chord.

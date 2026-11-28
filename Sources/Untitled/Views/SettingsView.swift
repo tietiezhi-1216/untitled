@@ -1,15 +1,16 @@
 import AppKit
+import UntitledPluginSDK
 import SwiftUI
 
-struct SettingsView: View {
+package struct SettingsView: View {
     @ObservedObject private var permissions: HostPermissionCenter
     @AppStorage("appearance") private var appearance: AppAppearance = .system
 
-    init(permissions: HostPermissionCenter) {
+    package init(permissions: HostPermissionCenter) {
         self.permissions = permissions
     }
 
-    var body: some View {
+    package var body: some View {
         TabView(selection: $permissions.settingsPage) {
             generalSettings.tabItem { Label("通用", systemImage: "gearshape") }.tag(HostSettingsPage.general)
             PermissionManagementView(permissions: permissions)
@@ -44,7 +45,7 @@ struct SettingsView: View {
 struct PermissionManagementView: View {
     @ObservedObject var permissions: HostPermissionCenter
 
-    var body: some View {
+    package var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 if let request = permissions.pendingRequest {
@@ -89,7 +90,7 @@ private struct PermissionRow: View {
     let descriptor: HostPermissionDescriptor
     @ViewState private var showingInfo = false
 
-    var body: some View {
+    package var body: some View {
         let status = permissions.status(descriptor.id)
         let needed = status != .authorized && permissions.pendingRequest?.permissions.contains(descriptor.id) == true
         VStack(alignment: .leading, spacing: 8) {
@@ -176,7 +177,7 @@ private struct PermissionStatusBadge: View {
             scheme == .dark ? Color(red: 0.76, green: 0.64, blue: 0.96) : Color(red: 0.43, green: 0.31, blue: 0.65)
         }
     }
-    var body: some View {
+    package var body: some View {
         HStack(spacing: 5) {
             Image(systemName: symbol).font(.system(size: 9, weight: .semibold))
             Text(title).font(.system(size: 11, weight: .medium))

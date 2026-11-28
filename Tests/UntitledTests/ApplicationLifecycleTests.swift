@@ -1,12 +1,17 @@
 import AppKit
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 @Suite(.serialized) @MainActor
 struct ApplicationLifecycleTests {
     @Test(arguments: [false, true])
     func dockReopenExplicitlyOpensMainPanelEvenWhenOtherWindowsAreVisible(hasVisibleWindows: Bool) {
-        let delegate = CaptureAppDelegate()
+        let delegate = UntitledAppDelegate()
         var opens = 0
         delegate.showMainWindow = { opens += 1 }
 
@@ -18,12 +23,12 @@ struct ApplicationLifecycleTests {
 
     @Test(arguments: [false, true])
     func reopenBeforeMainSceneIsReadyPreservesDefaultHandling(hasVisibleWindows: Bool) {
-        let delegate = CaptureAppDelegate()
+        let delegate = UntitledAppDelegate()
         #expect(delegate.applicationShouldHandleReopen(NSApplication.shared, hasVisibleWindows: hasVisibleWindows))
     }
 
     @Test func repeatedDockClicksKeepUsingTheRegisteredMainPanelAction() {
-        let delegate = CaptureAppDelegate()
+        let delegate = UntitledAppDelegate()
         var opens = 0
         delegate.showMainWindow = { opens += 1 }
 

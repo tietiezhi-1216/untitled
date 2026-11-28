@@ -1,11 +1,11 @@
 import AppKit
+import UntitledPluginSDK
 
 @MainActor
 enum ActionExecutor {
-    static func execute(_ command: PluginCommand, showMainWindow: () -> Void,
-                        peripheralAction: (ActionKind) throws -> Void = { _ in throw PluginError.invalid("键鼠共享插件尚未准备好。") },
-                        dictationAction: (ActionKind) throws -> Void = { _ in throw PluginError.invalid("语音输入插件尚未准备好。") },
-                        screenshotAction: (ActionKind) async throws -> Void = { _ in throw PluginError.invalid("截图插件尚未准备好。") }) async throws {
+    static let actions: Set<ActionKind> = [.openApplication, .openURL, .runShortcut, .showMainWindow]
+
+    static func execute(_ command: PluginCommand, showMainWindow: () -> Void) async throws {
         try command.action.validateTarget(command.target)
         switch command.action {
         case .openApplication:
@@ -28,12 +28,8 @@ enum ActionExecutor {
             }
         case .showMainWindow:
             showMainWindow()
-        case .sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing:
-            try peripheralAction(command.action)
-        case .toggleDoubaoDictation, .holdDoubaoDictation, .cancelDoubaoDictation:
-            try dictationAction(command.action)
         default:
-            try await screenshotAction(command.action)
+            throw PluginError.invalid("宿主未提供此操作：\(command.action.rawValue)")
         }
     }
 

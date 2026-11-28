@@ -4,7 +4,8 @@ project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cache="$project_root/dist/helpers"
 version=1.6.0
 checksum=e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564
-arch="$(uname -m)"
+arch="${2:-$(uname -m)}"
+case "$arch" in arm64|x86_64) ;; *) echo "Unsupported tool architecture: $arch" >&2; exit 1 ;; esac
 sdk="${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path)}"
 sdk_build="$(/usr/libexec/PlistBuddy -c 'Print :ProductBuildVersion' "$sdk/System/Library/CoreServices/SystemVersion.plist")"
 source_root="$cache/webp-source-$sdk_build-$arch"
@@ -25,8 +26,14 @@ if [[ ! -f "$webp_prefix/lib/libwebpmux.a" ]]; then
         cd "$source_directory"
         # Build with the app's minimum deployment target; Homebrew libraries may target a newer OS.
         export MACOSX_DEPLOYMENT_TARGET=14.0
-        SDKROOT="$sdk" CC="$(xcrun --find clang)" CFLAGS="-O2 -mmacosx-version-min=14.0" LDFLAGS="-mmacosx-version-min=14.0" \
-            ./configure --prefix="$webp_prefix" --disable-shared --enable-static \
+        host=()
+        if [[ "$arch" != "$(uname -m)" ]]; then
+            target="$arch"
+            if [[ "$target" == arm64 ]]; then target=aarch64; fi
+            host=(--host="$target-apple-darwin")
+        fi
+        SDKROOT="$sdk" CC="$(xcrun --find clang)" CFLAGS="-O2 -arch $arch -mmacosx-version-min=14.0" LDFLAGS="-arch $arch -mmacosx-version-min=14.0" \
+            ./configure ${host[@]+"${host[@]}"} --prefix="$webp_prefix" --disable-shared --enable-static \
                 --enable-libwebpmux --disable-libwebpdemux --disable-libwebpextras \
                 --disable-sdl --disable-png --disable-jpeg --disable-tiff --disable-gif > "$cache/webp-configure.log" 2>&1
         make -j4 > "$cache/webp-make.log" 2>&1
@@ -34,7 +41,7 @@ if [[ ! -f "$webp_prefix/lib/libwebpmux.a" ]]; then
     )
 fi
 mkdir -p "$(dirname "$output")"
-xcrun --sdk macosx clang -isysroot "$sdk" -O2 -mmacosx-version-min=14.0 -I "$webp_prefix/include" \
-    "$project_root/Tools/WebPEncoder/main.c" \
+xcrun --sdk macosx clang -isysroot "$sdk" -arch "$arch" -O2 -mmacosx-version-min=14.0 -I "$webp_prefix/include" \
+    "$project_root/Plugins/screenshot/Tools/WebPEncoder/main.c" \
     "$webp_prefix/lib/libwebpmux.a" "$webp_prefix/lib/libwebp.a" "$webp_prefix/lib/libsharpyuv.a" \
     -framework CoreFoundation -framework CoreGraphics -framework ImageIO -o "$output"

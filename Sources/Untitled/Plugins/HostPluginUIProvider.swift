@@ -1,7 +1,9 @@
 import SwiftUI
+import UntitledPluginSDK
 
-struct HostPluginUIProvider: PluginUIProvider {
-    func register(in registry: PluginUIRegistry) {
+package struct HostPluginUIProvider: PluginUIProvider {
+    package init() {}
+    package func register(in registry: PluginUIRegistry) {
         registry.component("host.icon") { context in
             AnyView(
                 PluginIconView(icon: context.plugin.map { context.store.presentation(for: $0.manifest).icon } ?? nil,

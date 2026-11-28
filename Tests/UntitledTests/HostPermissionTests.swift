@@ -2,7 +2,12 @@ import Foundation
 @preconcurrency import ScreenCaptureKit
 import Testing
 
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 @Suite(.serialized) struct HostPermissionTests {
     @Test @MainActor func statusChecksAndPluginRequestsNeverPromptTheOS() throws {
