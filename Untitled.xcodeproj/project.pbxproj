@@ -27,6 +27,8 @@
 		1E79D75418236126FBEE69E3 /* HotKeyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86B01EFAD2060A830C5C766E /* HotKeyManager.swift */; };
 		ADB486BF2251A7A9AE4FA5E9 /* CommandEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2B2FC736B2AE6D1578B42C1 /* CommandEditor.swift */; };
 		0902083CFFD8260592FBE280 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFAFA4AFA4549F3ACF1E34FB /* ContentView.swift */; };
+		A92101000000000000000001 /* HostNativeCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = A92102000000000000000001 /* HostNativeCapabilities.swift */; };
+		A92101000000000000000002 /* NativeCapabilitiesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A92102000000000000000002 /* NativeCapabilitiesView.swift */; };
 		BBF12F444124E6EA4DE12608 /* PluginDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8938B8CAB0EE925EB47B4514 /* PluginDetailView.swift */; };
 		9DB2215F8EBAEBE02C3AB08E /* PluginStoreView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 819C126DF646684CE61BA047 /* PluginStoreView.swift */; };
 		CA21B623D4CC1133FDFE7E5F /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCDEEFA91BAF8AD35D711CD1 /* SettingsView.swift */; };
@@ -130,6 +132,8 @@
 		86B01EFAD2060A830C5C766E /* HotKeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotKeyManager.swift; sourceTree = "<group>"; };
 		D2B2FC736B2AE6D1578B42C1 /* CommandEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandEditor.swift; sourceTree = "<group>"; };
 		DFAFA4AFA4549F3ACF1E34FB /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A92102000000000000000001 /* HostNativeCapabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostNativeCapabilities.swift; sourceTree = "<group>"; };
+		A92102000000000000000002 /* NativeCapabilitiesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeCapabilitiesView.swift; sourceTree = "<group>"; };
 		8938B8CAB0EE925EB47B4514 /* PluginDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginDetailView.swift; sourceTree = "<group>"; };
 		819C126DF646684CE61BA047 /* PluginStoreView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginStoreView.swift; sourceTree = "<group>"; };
 		FCDEEFA91BAF8AD35D711CD1 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -295,6 +299,7 @@
 				A91702000000000000000001 /* AppCredentials.swift */,
 				969DA07488167B6C12809613 /* SystemPermissionProvider.swift */,
 				BE7F07AB744D06958059153F /* HostPermissions.swift */,
+				A92102000000000000000001 /* HostNativeCapabilities.swift */,
 				A0C3AF362AD8399E6A182311 /* ActionExecutor.swift */,
 				BD6CAAFF41B79A8326B6C63F /* HotKey.swift */,
 				86B01EFAD2060A830C5C766E /* HotKeyManager.swift */,
@@ -312,6 +317,7 @@
 				B00000000000000000000002 /* PanelStyle.swift */,
 				D2B2FC736B2AE6D1578B42C1 /* CommandEditor.swift */,
 				DFAFA4AFA4549F3ACF1E34FB /* ContentView.swift */,
+				A92102000000000000000002 /* NativeCapabilitiesView.swift */,
 				8938B8CAB0EE925EB47B4514 /* PluginDetailView.swift */,
 				819C126DF646684CE61BA047 /* PluginStoreView.swift */,
 				FCDEEFA91BAF8AD35D711CD1 /* SettingsView.swift */,
@@ -546,6 +552,8 @@
 				1E79D75418236126FBEE69E3 /* HotKeyManager.swift in Sources */,
 				ADB486BF2251A7A9AE4FA5E9 /* CommandEditor.swift in Sources */,
 				0902083CFFD8260592FBE280 /* ContentView.swift in Sources */,
+				A92101000000000000000001 /* HostNativeCapabilities.swift in Sources */,
+				A92101000000000000000002 /* NativeCapabilitiesView.swift in Sources */,
 				BBF12F444124E6EA4DE12608 /* PluginDetailView.swift in Sources */,
 				9DB2215F8EBAEBE02C3AB08E /* PluginStoreView.swift in Sources */,
 				CA21B623D4CC1133FDFE7E5F /* SettingsView.swift in Sources */,
