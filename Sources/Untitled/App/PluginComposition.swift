@@ -19,6 +19,7 @@ import UntitledPluginSpeech
         ])
         let registry = PluginUIRegistry()
         registry.register(HostPluginUIProvider())
+        registry.register(NativeCapabilityUIProvider())
         active.registerUI(in: registry)
         return registry
     }

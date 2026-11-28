@@ -29,11 +29,6 @@ extension ActionKind {
 @MainActor package final class CapturePluginRuntime: NativePluginRuntime {
     package let actions = CapturePluginActions.all
     package var actionPresentation: [ActionKind: PluginActionPresentation] { CapturePluginActions.presentation }
-    package var capabilityGroup: PluginCapabilityGroup? {
-        .init(title: "屏幕、图像与录制", symbol: "display",
-              summary: "截图、长截图、贴图和录屏，支持本地 OCR、摄像头画中画及音频选项。",
-              actions: actions.sorted { $0.rawValue < $1.rawValue })
-    }
 
     package func registerUI(in registry: PluginUIRegistry) { registry.register(CapturePluginUIProvider(runtime: self)) }
     package func legacyPermissions(for manifest: PluginManifest) -> [PluginPermissionDeclaration] {

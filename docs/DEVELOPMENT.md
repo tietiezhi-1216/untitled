@@ -19,9 +19,9 @@
 
 设置中的“软件更新”与插件商店独立，显示运行版本/构建号、手动检查正式发布版、更新说明与兼容本体包的下载页入口。没有自动轮询、后台下载或自替换安装；发布来源、资源预算及限制见 [软件更新](HOST-UPDATES.md)。
 
-### 原生能力
+### 插件的权限与能力
 
-主窗口侧栏的「原生能力」集中提供文件定位与系统分享、纯文本剪贴板、本地通知，以及已接入的插件动作和待接入能力。宿主工具放在 `Runtime/HostNativeCapabilities.swift`，权限由 `SystemPermissionProvider` 注册。插件功能继续从自己的工作区执行。接入状态和授权规则见 [权限与执行规范](PERMISSIONS.md)。
+插件从自己的「更多」菜单打开权限与能力。文件、剪贴板和通知由 `Runtime/HostNativeCapabilities.swift` 提供，`NativeCapabilityUIProvider` 注册供清单选择的组件和命令。权限驱动在 `SystemPermissionProvider` 注册。接入状态和授权规则见 [权限与执行规范](PERMISSIONS.md)。
 
 ### 构建
 
@@ -330,6 +330,30 @@ Release0.12.14/build53已沿用签名正常退出旧进程、同卷原子替换 
 
 先固定源码提交，完成测试、Release 构建、插件包与完整 Xcode CI，再从同一个提交生成应用 ZIP。确认包中版本、架构、图标、许可证和签名，生成 SHA-256；发布资产不能混入 `dist/plugins/` 中旧版本的历史 ZIP。
 
-正式分发使用 Developer ID 与 Apple 公证，公证后将票据 staple 到应用再生成最终 ZIP。公证使用独立的 notarytool 认证配置，签名证书不能代替该认证。缺少公证或完整真机验收的版本可以作为明确标注限制的预览版发布，不宣称已通过 Gatekeeper 或全部性能验收。
+## 独立发布宿主与插件
 
-先上传本版本对应的应用与插件资产并验证实际下载，再更新 `Plugins/catalog.json` 和 main，最后验证商店目录的真实下载与安装。标签指向构建提交，目录更新单独提交；不移动旧标签或替换已发布的同版本资产。发布说明列出验证范围、签名 / 公证状态、架构与已知限制。
+开发完成后，将代码经 PR 合入目标主线，再按实际产品改动创建 Release。
+
+| 改动 | 版本、标签与资产 |
+| --- | --- |
+| 宿主 Swift、原生 provider 或插件协议 | 递增宿主版本，使用 `v<宿主版本>`，上传应用 ZIP 和 `SHA256SUMS.txt` |
+| 声明式插件清单、README 或许可 | 递增该插件版本，按 `--plugin` 打包。独立仓库使用自己的标签，同仓插件使用 `plugin-<slug>-v<版本>` 并设置 `--latest=false` |
+| 两者都有 | 分别发布。插件依赖新宿主能力时先核对宿主已发，并在清单声明正确的最低版本 |
+
+### 宿主发行
+
+核对版本、构建号及上一次公开发行所含功能。常规从已合并提交构建。公开发行沿独立发行线维护时，将同一改动移植到该发行线上并对发行提交重新完成 CI，保留上个公开标签的祖先关系。标签指向实际构建提交。
+
+从干净的发行提交完成 Swift 测试、Release 构建和 Xcode CI。正式分发使用 Developer ID 和 Apple 公证，先将公证票据 staple 到应用。沿用已有签名发布预览时，明确标注签名、公证、架构和真机验收范围。签名身份缺失需在发布前确定预览渠道，避免以临时签名替换原有发行签名。可分别校验并打包宿主：
+
+```bash
+./scripts/build-app.sh release
+python3 scripts/package-app-release.py --app dist/release/Untitled.app --output dist/host-release
+# 已选定预览渠道时，在打包命令追加 --preview
+```
+
+确认标签未被占用后，使用 `gh release create` 指定已验证的源码 SHA、应用 ZIP、校验文件和发布说明。预览追加 `--prerelease --latest=false`。下载发布后的资产并核对 SHA-256。应用内的软件更新检查跟踪正式宿主 Release。
+
+### 插件发行
+
+以该插件自己的版本运行 `scripts/package-plugins.py --tag <插件标签> --plugin <slug>`，选择生成的 ZIP。实际发布并核对下载、ID、版本和 SHA-256 后，如需上架再通过 PR 更新对应 `Plugins/catalog.json` 条目。相同版本已发布的资产和标签保持不变。独立仓库打包参阅 [插件协议](../Plugins/README.md#发布)。 [GitHub Release 的 Latest 设置](https://docs.github.com/en/rest/releases/releases#create-a-release)

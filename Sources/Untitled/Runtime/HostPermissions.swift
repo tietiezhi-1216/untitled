@@ -58,7 +58,7 @@ struct HostPermissionRequest: Identifiable, Equatable {
 
 package enum HostPermissionError: LocalizedError {
     case missing
-    package var errorDescription: String? { "所需权限尚未开启，请在应用设置的“权限管理”中授权后重新执行。" }
+    package var errorDescription: String? { "请在插件的“权限与能力”中完成授权后重试。" }
 }
 
 /// No native module owns OS authorization. All status, prompting and settings links pass through this broker.
@@ -73,6 +73,7 @@ package enum HostPermissionError: LocalizedError {
     @Published var pendingRequest: HostPermissionRequest?
     @Published package var settingsPage: HostSettingsPage = .general
     package var presentManagement: () -> Void = {}
+    var presentPluginManagement: ((String) -> Void)?
 
     package init(
         drivers: [HostPermissionDriver],
@@ -91,7 +92,7 @@ package enum HostPermissionError: LocalizedError {
     package func validate(_ manifest: PluginManifest) throws {
         let declarations = declarations(for: manifest)
         guard Set(declarations.map(\.id)).count == declarations.count,
-            declarations.allSatisfy({ supportsPluginPermission($0.id) })
+            declarations.allSatisfy({ byID[$0.id] != nil })
         else {
             throw PluginError.invalid("插件声明了重复或宿主尚未支持的权限，请更新主应用。")
         }
@@ -104,9 +105,9 @@ package enum HostPermissionError: LocalizedError {
         }
         if next != statuses { statuses = next }
     }
-    func refreshForDisplay() async {
-        refresh()
-        for driver in drivers where driver.asyncStatus != nil {
+    func refreshForDisplay(_ ids: Set<HostPermissionID>? = nil) async {
+        refresh(ids)
+        for driver in drivers where driver.asyncStatus != nil && (ids?.contains(driver.descriptor.id) ?? true) {
             _ = await systemStatus(driver.descriptor.id)
         }
     }
@@ -130,25 +131,47 @@ package enum HostPermissionError: LocalizedError {
         presentManagement()
     }
     package func require(_ ids: Set<HostPermissionID>, for plugin: InstalledPlugin, displayName: String? = nil) throws {
-        guard plugin.isEnabled else { throw PluginError.invalid("插件已停用。") }
-        let declared = Set(declarations(for: plugin.manifest).map(\.id))
-        guard ids.isSubset(of: declared), ids.allSatisfy(supportsPluginPermission) else {
-            throw PluginError.invalid("插件请求了未声明或不支持的权限。")
+        try validateRequest(ids, for: plugin)
+        guard ids.allSatisfy({ byID[$0]?.asyncStatus == nil }) else {
+            throw PluginError.invalid("此权限需要异步检查。")
         }
         guard !ids.isEmpty else { return }
         // Always query the OS again: permissions can be revoked while the app is running.
         refresh(ids)
         let missing = ids.filter { status($0) != .authorized }
         guard !missing.isEmpty else { return }
-        pendingRequest = .init(pluginID: plugin.id, pluginName: displayName ?? plugin.manifest.name, permissions: Set(missing))
-        reveal()
+        try reportMissing(missing, for: plugin, displayName: displayName)
+    }
+    func requireAsynchronously(_ id: HostPermissionID, currentPlugin: () throws -> InstalledPlugin) async throws {
+        try validateRequest([id], for: currentPlugin())
+        let status = await systemStatus(id)
+        try Task.checkCancellation()
+        let plugin = try currentPlugin()
+        try validateRequest([id], for: plugin)
+        if status != .authorized { try reportMissing([id], for: plugin) }
+    }
+
+    private func validateRequest(_ ids: Set<HostPermissionID>, for plugin: InstalledPlugin) throws {
+        guard plugin.isEnabled else { throw PluginError.invalid("插件已停用。") }
+        let declared = Set(declarations(for: plugin.manifest).map(\.id))
+        guard ids.isSubset(of: declared), ids.allSatisfy({ byID[$0] != nil }) else {
+            throw PluginError.invalid("插件请求了未声明或不支持的权限。")
+        }
+    }
+
+    private func reportMissing(_ ids: Set<HostPermissionID>, for plugin: InstalledPlugin, displayName: String? = nil) throws -> Never {
+        let name = displayName ?? PluginPresentationIndex.bundled.appearance(id: plugin.id, repository: plugin.manifest.repository,
+                                                              version: plugin.manifest.version)?.name ?? plugin.manifest.name
+        pendingRequest = .init(pluginID: plugin.id, pluginName: name, permissions: ids)
+        if let presentPluginManagement { presentPluginManagement(plugin.id) }
+        else { reveal() }
         throw HostPermissionError.missing
     }
     /// Optional capabilities must not present permission management or steal the user's
     /// insertion focus. Check the live driver, declaration and plugin state without prompting.
     package func isAuthorized(_ id: HostPermissionID, for plugin: InstalledPlugin) -> Bool {
-        plugin.isEnabled && supportsPluginPermission(id) && declarations(for: plugin.manifest).contains { $0.id == id }
-            && byID[id]?.status() == .authorized
+        plugin.isEnabled && declarations(for: plugin.manifest).contains { $0.id == id }
+            && byID[id]?.asyncStatus == nil && byID[id]?.status() == .authorized
     }
     package func request(_ id: HostPermissionID) async {
         guard requesting == nil, let driver = byID[id] else { return }
@@ -175,9 +198,4 @@ package enum HostPermissionError: LocalizedError {
         reveal()
     }
 
-    private func supportsPluginPermission(_ id: HostPermissionID) -> Bool {
-        // Plugin clients check permissions synchronously at the point of use.
-        guard let driver = byID[id] else { return false }
-        return driver.asyncStatus == nil
-    }
 }

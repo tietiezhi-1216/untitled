@@ -3,7 +3,6 @@ import UntitledPluginSDK
 import SwiftUI
 
 package struct ContentView: View {
-    private static let nativeCapabilitiesID = "__native_capabilities__"
     @EnvironmentObject private var store: PluginStore
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
@@ -22,10 +21,6 @@ package struct ContentView: View {
         store.installed.first { $0.id == selection }
     }
 
-    private var showingStore: Bool {
-        selection != Self.nativeCapabilitiesID && selectedPlugin == nil
-    }
-
     package var body: some View {
         HStack(spacing: 0) {
             sidebar
@@ -33,16 +28,14 @@ package struct ContentView: View {
             Divider()
                 .opacity(0.45)
             Group {
-                if selection == Self.nativeCapabilitiesID {
-                    NativeCapabilitiesView { selection = "__store__" }
-                } else if let plugin = selectedPlugin {
+                if let plugin = selectedPlugin {
                     PluginWorkspaceView(pluginID: plugin.id).id(plugin.id)
                 } else {
                     PluginStoreView(navigation: marketplace) { selection = $0 }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background((showingStore ? PanelPalette.store(scheme) : PanelPalette.content(scheme)).opacity(contentBackgroundOpacity))
+            .background((selectedPlugin == nil ? PanelPalette.store(scheme) : PanelPalette.content(scheme)).opacity(contentBackgroundOpacity))
         }
         .frame(minWidth: 880, minHeight: 580)
         .background {
@@ -74,6 +67,7 @@ package struct ContentView: View {
                 NSApplication.shared.activate(ignoringOtherApps: true)
                 settings()
             }
+            store.permissions.presentPluginManagement = { [weak store] id in store?.showPluginAccess(id) }
             if let id = store.requestedPluginID { selection = id; store.requestedPluginID = nil }
         }
         .onChange(of: store.requestedPluginID) { _, id in
@@ -82,6 +76,9 @@ package struct ContentView: View {
         .onChange(of: marketplace.search) { _, _ in
             marketplace.selectedID = nil
             selection = "__store__"
+        }
+        .sheet(item: $store.accessSelection) { selection in
+            PluginAccessView(pluginID: selection.id).environmentObject(store)
         }
         .alert("操作未完成", isPresented: Binding(
             get: { store.errorMessage != nil },
@@ -106,7 +103,6 @@ package struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
                     navigationItem("插件商店", symbol: "storefront", id: "__store__")
-                    navigationItem("原生能力", symbol: "macwindow.badge.plus", id: Self.nativeCapabilitiesID)
                     Text("我的插件")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
@@ -121,6 +117,9 @@ package struct ContentView: View {
                             id: plugin.id, icon: store.presentation(for: plugin.manifest).icon,
                             enabled: plugin.isEnabled
                         )
+                        .contextMenu {
+                            Button("权限与能力…") { store.showPluginAccess(plugin.id) }
+                        }
                     }
                     if store.installed.isEmpty {
                         Text("安装的插件会显示在这里")
@@ -154,7 +153,7 @@ package struct ContentView: View {
     }
 
     private func isSelected(_ id: String) -> Bool {
-        if id == "__store__" { return showingStore }
+        if id == "__store__" { return selectedPlugin == nil }
         return selection == id
     }
 

@@ -17,6 +17,17 @@
     "templates",
     "ui"
   ],
+  "allOf": [
+    {
+      "if": { "properties": { "actions": { "contains": { "const": "sendNotification" } } } },
+      "then": {
+        "required": ["permissions"],
+        "properties": {
+          "permissions": { "contains": { "required": ["id"], "properties": { "id": { "const": "system.notifications" } } } }
+        }
+      }
+    }
+  ],
   "properties": {
     "schemaVersion": {
       "const": 2

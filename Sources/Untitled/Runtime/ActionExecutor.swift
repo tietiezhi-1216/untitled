@@ -3,9 +3,10 @@ import UntitledPluginSDK
 
 @MainActor
 enum ActionExecutor {
-    static let actions: Set<ActionKind> = [.openApplication, .openURL, .runShortcut, .showMainWindow]
+    static let actions: Set<ActionKind> = Set(ActionKind.hostPresentation.keys)
 
-    static func execute(_ command: PluginCommand, showMainWindow: () -> Void) async throws {
+    static func execute(_ command: PluginCommand, showMainWindow: () -> Void,
+                        nativeUtility: (PluginCommand) async throws -> Void) async throws {
         try command.action.validateTarget(command.target)
         switch command.action {
         case .openApplication:
@@ -28,6 +29,8 @@ enum ActionExecutor {
             }
         case .showMainWindow:
             showMainWindow()
+        case .revealFile, .shareFile, .readClipboardText, .copyText, .sendNotification:
+            try await nativeUtility(command)
         default:
             throw PluginError.invalid("宿主未提供此操作：\(command.action.rawValue)")
         }

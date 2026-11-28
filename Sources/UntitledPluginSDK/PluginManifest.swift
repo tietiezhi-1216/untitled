@@ -2,7 +2,8 @@ import Foundation
 
 package enum HostInfo {
     package static let name = "Untitled"
-    package static let version = "0.13.52"
+    package static let version = "0.13.54"
+    package static let nativeCapabilityVersion = "0.13.53"
     package static let bundleIdentifier = "com.untitled.app"
     package static let repository = URL(string: "https://github.com/tietiezhi-1216/untitled")!
     package static let catalog = URL(string: "https://raw.githubusercontent.com/tietiezhi-1216/untitled/main/Plugins/catalog.json")!
@@ -122,8 +123,17 @@ package struct PluginManifest: Codable, Equatable, Sendable, Identifiable {
         }
         guard (1...100).contains(actions.count), Set(actions).count == actions.count,
               actions.allSatisfy(\.isValid), templates.count <= 100, Set(templates.map(\.id)).count == templates.count,
-              templates.allSatisfy({ !$0.id.isEmpty && !$0.title.isEmpty && $0.title.count <= 100 && actions.contains($0.action) }) else {
+              templates.allSatisfy({ !$0.id.isEmpty && !$0.title.isEmpty && $0.title.count <= 100 && actions.contains($0.action) && $0.action.canBindCommand }) else {
             throw PluginError.invalid("插件的操作声明无效。")
+        }
+        let notificationDeclared = permissions?.contains { $0.id == .notifications } == true
+        if actions.contains(where: \.isNativeUtility) || notificationDeclared {
+            guard schemaVersion == 2, minimum >= Version(HostInfo.nativeCapabilityVersion)! else {
+                throw PluginError.invalid("文件、剪贴板和通知能力需要 0.13.53 或更高版本宿主。")
+            }
+        }
+        if actions.contains(.sendNotification), !notificationDeclared {
+            throw PluginError.invalid("发送通知需要声明 system.notifications 权限。")
         }
         if templates.contains(where: { $0.defaultHotKey != nil || $0.installByDefault != nil }) {
             guard minimum >= Version("0.6.0")! else { throw PluginError.invalid("默认动作声明需要 0.6.0 或更高版本宿主。") }
@@ -239,12 +249,33 @@ package struct ActionKind: RawRepresentable, Hashable, Codable, Sendable {
     package static let openURL = Self(rawValue: "openURL")
     package static let runShortcut = Self(rawValue: "runShortcut")
     package static let showMainWindow = Self(rawValue: "showMainWindow")
+    package static let revealFile = Self(rawValue: "revealFile")
+    package static let shareFile = Self(rawValue: "shareFile")
+    package static let readClipboardText = Self(rawValue: "readClipboardText")
+    package static let copyText = Self(rawValue: "copyText")
+    package static let sendNotification = Self(rawValue: "sendNotification")
+
+    package var isNativeUtility: Bool {
+        switch self {
+        case .revealFile, .shareFile, .readClipboardText, .copyText, .sendNotification: true
+        default: false
+        }
+    }
+
+    package var canBindCommand: Bool { self != .readClipboardText }
+    package var title: String { Self.hostPresentation[self]?.title ?? rawValue }
+    package var symbol: String { Self.hostPresentation[self]?.symbol ?? "puzzlepiece.extension" }
 
     package static let hostPresentation: [ActionKind: PluginActionPresentation] = [
         .openApplication: .init(title: "打开应用", symbol: "app"),
         .openURL: .init(title: "打开网址", symbol: "link"),
         .runShortcut: .init(title: "运行快捷指令", symbol: "command.square"),
-        .showMainWindow: .init(title: "显示主面板", symbol: "macwindow")
+        .showMainWindow: .init(title: "显示主面板", symbol: "macwindow"),
+        .revealFile: .init(title: "在 Finder 中定位文件", symbol: "folder"),
+        .shareFile: .init(title: "系统分享文件", symbol: "square.and.arrow.up"),
+        .readClipboardText: .init(title: "读取剪贴板文本", symbol: "doc.on.clipboard"),
+        .copyText: .init(title: "复制文本到剪贴板", symbol: "doc.on.clipboard"),
+        .sendNotification: .init(title: "发送本地通知", symbol: "bell")
     ]
     package func validateTarget(_ target: String) throws {
         switch self {
@@ -261,8 +292,37 @@ package struct ActionKind: RawRepresentable, Hashable, Codable, Sendable {
             guard !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, target.count <= 500 else {
                 throw PluginError.invalid("请输入 macOS「快捷指令」中的名称。")
             }
+        case .revealFile, .shareFile:
+            guard target.isEmpty else { throw PluginError.invalid("运行时请选择要使用的文件。") }
+        case .readClipboardText:
+            throw PluginError.invalid("读取剪贴板由插件面板或原生 provider 调用。")
+        case .copyText:
+            try NativeCapabilityInput.validateClipboardText(target)
+        case .sendNotification:
+            _ = try NativeCapabilityInput.notificationTitle(target, body: "")
         default: break
         }
+    }
+}
+
+package enum NativeCapabilityInput {
+    package static let clipboardByteLimit = 16 * 1024
+    package static let notificationTitleByteLimit = 240
+    package static let notificationBodyByteLimit = 1024
+
+    package static func validateClipboardText(_ text: String) throws {
+        guard !text.isEmpty, text.utf8.count <= clipboardByteLimit else {
+            throw PluginError.invalid("剪贴板文本须为 1 字节至 16 KiB。")
+        }
+    }
+
+    package static func notificationTitle(_ title: String, body: String) throws -> String {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, title.utf8.count <= notificationTitleByteLimit,
+              body.utf8.count <= notificationBodyByteLimit else {
+            throw PluginError.invalid("请输入标题，标题最多 240 字节，正文最多 1 KiB。")
+        }
+        return title
     }
 }
 
@@ -346,7 +406,12 @@ package struct InstalledPlugin: Codable, Equatable, Sendable, Identifiable {
     package var installedAt = Date()
     package var initializedDefaultTemplateIDs: [String]? = nil
     package var readme: String? = nil
+    package var blockedNativeActions: Set<ActionKind>? = nil
     package var id: String { manifest.id }
+
+    package func allowsAction(_ action: ActionKind) -> Bool {
+        manifest.actions.contains(action) && (!action.isNativeUtility || blockedNativeActions?.contains(action) != true)
+    }
 
     /// Upgrade defaults once; user edits, cleared bindings and deleted defaults survive later upgrades.
     @discardableResult package mutating func initializeDefaultCommands(

@@ -15,20 +15,6 @@ package enum PluginRuntimeEvent {
 package enum PluginShortcutChannel { case ordinary, modifier, eventTap }
 package enum PluginShortcutRegistration { case exclusive, shared, window }
 
-package struct PluginCapabilityGroup {
-    let title: String
-    let symbol: String
-    let summary: String?
-    let actions: [ActionKind]
-
-    package init(title: String, symbol: String, summary: String? = nil, actions: [ActionKind]) {
-        self.title = title
-        self.symbol = symbol
-        self.summary = summary
-        self.actions = actions
-    }
-}
-
 /// A module may opt into a press/release gesture instead of a one-shot command.
 /// The host still owns the system binding, activation checks and cancellation.
 package struct PluginShortcutGesture {
@@ -45,7 +31,6 @@ package struct PluginShortcutGesture {
 @MainActor package protocol NativePluginRuntime: AnyObject {
     var actions: Set<ActionKind> { get }
     var actionPresentation: [ActionKind: PluginActionPresentation] { get }
-    var capabilityGroup: PluginCapabilityGroup? { get }
     var styleNames: Set<String> { get }
     func registerUI(in registry: PluginUIRegistry)
     func legacyPermissions(for manifest: PluginManifest) -> [PluginPermissionDeclaration]
@@ -67,7 +52,6 @@ package struct PluginShortcutGesture {
 
 package extension NativePluginRuntime {
     var actionPresentation: [ActionKind: PluginActionPresentation] { [:] }
-    var capabilityGroup: PluginCapabilityGroup? { nil }
     var styleNames: Set<String> { [] }
     func registerUI(in registry: PluginUIRegistry) {}
     func legacyPermissions(for manifest: PluginManifest) -> [PluginPermissionDeclaration] { [] }
@@ -118,16 +102,6 @@ package extension NativePluginRuntime {
     }
     package func presentation(for action: ActionKind) -> PluginActionPresentation {
         catalog[action] ?? .init(title: action.rawValue, symbol: "puzzlepiece.extension")
-    }
-    var capabilityGroups: [PluginCapabilityGroup] {
-        let host = PluginCapabilityGroup(title: "应用与快捷指令", symbol: "command",
-            summary: "启动应用、打开网页、运行 macOS 快捷指令及全局热键。",
-            actions: [.openApplication, .openURL, .runShortcut, .showMainWindow])
-        var groups = [host] + modules.compactMap(\.capabilityGroup)
-        let grouped = Set(groups.flatMap(\.actions))
-        let other = owners.keys.filter { !grouped.contains($0) }.sorted { $0.rawValue < $1.rawValue }
-        if !other.isEmpty { groups.append(.init(title: "其他能力", symbol: "puzzlepiece.extension", actions: other)) }
-        return groups
     }
     package func owner(of action: ActionKind) -> (any NativePluginRuntime)? { owners[action] }
     package func validate(_ manifest: PluginManifest) throws {

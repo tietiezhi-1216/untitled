@@ -26,10 +26,6 @@ extension ActionKind {
     }
     package let actions = Set(SharingPluginRuntime.presentation.keys)
     package var actionPresentation: [ActionKind: PluginActionPresentation] { Self.presentation }
-    package var capabilityGroup: PluginCapabilityGroup? {
-        .init(title: "外设与局域网", symbol: "network", summary: "经过配对的 Mac 可以共享键鼠，按需同步麦克风。",
-              actions: [.sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing])
-    }
     package func registerUI(in registry: PluginUIRegistry) { registry.register(SharingPluginUIProvider(runtime: self)) }
 
     private let forwardCopiedImage: (PeripheralSharingController, Data, Int) -> Void

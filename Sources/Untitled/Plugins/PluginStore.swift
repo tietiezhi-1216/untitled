@@ -26,12 +26,16 @@ package final class PluginStore: ObservableObject {
     package let runtime: PluginRuntimeRegistry
     package let uiRegistry: PluginUIRegistry
     package let permissions: HostPermissionCenter
+    struct AccessSelection: Identifiable { let id: String }
+    @Published var accessSelection: AccessSelection?
+    private var nativeFilePicker: NativeFilePicker?
+    private var nativeCapabilityLeases: [String: UUID] = [:]
     private var isPreparingForQuit = false
     package var allowsPluginActivity: Bool { !isPreparingForQuit }
 
     package func enabledPlugin(_ pluginID: String, allowing action: ActionKind) -> InstalledPlugin? {
         guard allowsPluginActivity else { return nil }
-        return installed.first { $0.id == pluginID && $0.isEnabled && $0.manifest.actions.contains(action) }
+        return installed.first { $0.id == pluginID && $0.isEnabled && $0.allowsAction(action) }
     }
     package func publishRuntimeEvent(_ event: PluginRuntimeEvent) { runtime.receive(event, in: self) }
     package var pluginPreferencesDirectory: URL { directory.appendingPathComponent("Preferences", isDirectory: true) }
@@ -57,6 +61,8 @@ package final class PluginStore: ObservableObject {
 
     package func prepareForQuit() async -> Bool {
         isPreparingForQuit = true
+        nativeCapabilityLeases.removeAll()
+        nativeFilePicker?.cancel()
         cancelPriorityRecovery(); priorityHotKeyRecoveryNeeded = false
         hotKeys.clear(); priorityHotKeys.shutdown(); sideButtons.shutdown(); modifierKeys.clear()
         let ready = await runtime.prepareForQuit()
@@ -336,6 +342,7 @@ package final class PluginStore: ObservableObject {
             let conflicts = record.initializeDefaultCommands(occupiedHotKeys: occupiedHotKeys(excluding: manifest.id))
             // A failed write must not interrupt the currently running module.
             try save(record, reloadBindings: false)
+            invalidateNativeCapabilities(for: record.id)
             runtime.didReplace(previous, with: record, in: self)
             reloadHotKeys()
             reportDefaultConflicts(conflicts)
@@ -423,8 +430,28 @@ package final class PluginStore: ObservableObject {
         record.isEnabled = enabled
         do { try save(record) }
         catch { errorMessage = error.localizedDescription; return }
+        if !enabled { invalidateNativeCapabilities(for: pluginID) }
         runtime.didSetEnabled(record, in: self)
         publishRuntimeEvent(.installedPluginsChanged)
+    }
+
+    func showPluginAccess(_ pluginID: String) {
+        guard installed.contains(where: { $0.id == pluginID }) else { return }
+        requestedPluginID = pluginID
+        accessSelection = .init(id: pluginID)
+        showMainWindow()
+    }
+
+    func setNativeActionAllowed(_ allowed: Bool, action: ActionKind, pluginID: String) {
+        guard action.isNativeUtility, var record = installed.first(where: { $0.id == pluginID }),
+              record.manifest.actions.contains(action), record.allowsAction(action) != allowed else { return }
+        var blocked = record.blockedNativeActions ?? []
+        if allowed { blocked.remove(action) } else { blocked.insert(action) }
+        record.blockedNativeActions = blocked.isEmpty ? nil : blocked
+        do {
+            try save(record)
+            invalidateNativeCapabilities(for: pluginID)
+        } catch { errorMessage = error.localizedDescription }
     }
 
     package func saveCommand(_ command: PluginCommand, pluginID: String) throws {
@@ -462,6 +489,8 @@ package final class PluginStore: ObservableObject {
             try runtime.willUninstall(plugin, in: self)
             try FileManager.default.removeItem(at: directory.appendingPathComponent(pluginID + ".json"))
             installed.removeAll { $0.id == pluginID }
+            invalidateNativeCapabilities(for: pluginID)
+            if accessSelection?.id == pluginID { accessSelection = nil }
             reloadHotKeys()
         } catch { errorMessage = "卸载失败：\(error.localizedDescription)" }
         publishRuntimeEvent(.installedPluginsChanged)
@@ -474,7 +503,9 @@ package final class PluginStore: ObservableObject {
             if let owner = runtime.owner(of: command.action) {
                 try await owner.perform(command, for: pluginID, in: self)
             } else {
-                try await ActionExecutor.execute(command, showMainWindow: showMainWindow)
+                try await ActionExecutor.execute(command, showMainWindow: showMainWindow) { [self] command in
+                    try await nativeCapabilities(for: pluginID).execute(command)
+                }
             }
         } catch { handleExecutionError(error) }
     }
@@ -513,8 +544,31 @@ package final class PluginStore: ObservableObject {
         }
     }
 
+    func nativeCapabilities(for pluginID: String) -> PluginNativeCapabilityClient {
+        let lease = nativeCapabilityLeases[pluginID] ?? UUID()
+        if installed.contains(where: { $0.id == pluginID }) { nativeCapabilityLeases[pluginID] = lease }
+        let picker = nativeFilePicker ?? NativeFilePicker()
+        nativeFilePicker = picker
+        return PluginNativeCapabilityClient(
+            pluginID: pluginID, permissions: permissions, filePicker: picker,
+            currentPlugin: { [weak self] action in
+                guard let self, !self.isPreparingForQuit,
+                      let plugin = self.installed.first(where: { $0.id == pluginID }), plugin.isEnabled else {
+                    throw PluginError.invalid("请先启用插件。")
+                }
+                guard self.nativeCapabilityLeases[pluginID] == lease else { throw CancellationError() }
+                guard plugin.allowsAction(action) else { throw PluginError.invalid("此能力尚未声明或已在插件设置中停用。") }
+                return plugin
+            }, presentFilePicker: { [weak self] in self?.showMainWindow() })
+    }
+
+    private func invalidateNativeCapabilities(for pluginID: String) {
+        nativeCapabilityLeases.removeValue(forKey: pluginID)
+        nativeFilePicker?.cancel(for: pluginID)
+    }
+
     package func handleExecutionError(_ error: Error) {
-        if error is HostPermissionError { return } // The host has already opened permission management.
+        if error is HostPermissionError || error is CancellationError { return }
         errorMessage = "执行失败：\(error.localizedDescription)"
         showMainWindow()
     }
@@ -547,7 +601,7 @@ package final class PluginStore: ObservableObject {
         var identities = Set<String>()
         var bindings: [(pluginID: String, command: PluginCommand, key: HotKey, exclusive: Bool)] = []
         for plugin in installed where plugin.isEnabled {
-            for command in plugin.commands where command.isEnabled {
+            for command in plugin.commands where command.isEnabled && plugin.allowsAction(command.action) {
                 guard runtime.includesShortcut(command, in: plugin), let key = command.hotKey else { continue }
                 do {
                     try command.validate(allowedActions: plugin.manifest.actions)

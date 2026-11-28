@@ -28,7 +28,7 @@ jobs:
       - name: Validate plugin packages
         run: |
           python3 scripts/prepare-plugin-resources.py --check
-          python3 scripts/package-plugins.py --tag v0.13.52
+          python3 scripts/package-plugins.py --tag v0.13.54
       - name: Build app
         env:
           UNTITLED_SIGNING_IDENTITY: '-'

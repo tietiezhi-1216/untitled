@@ -20,10 +20,6 @@ extension ActionKind {
     ]
     package let actions = Set(DoubaoSpeechPluginRuntime.presentation.keys)
     package var actionPresentation: [ActionKind: PluginActionPresentation] { Self.presentation }
-    package var capabilityGroup: PluginCapabilityGroup? {
-        .init(title: "麦克风与听写", symbol: "mic", summary: "语音输入插件可用麦克风听写并处理定稿。",
-              actions: [.toggleDoubaoDictation, .holdDoubaoDictation, .cancelDoubaoDictation])
-    }
     package func registerUI(in registry: PluginUIRegistry) { registry.register(DoubaoSpeechPluginUIProvider(runtime: self)) }
     package let styleNames: Set<String> = [DictationHUDStyle.name]
 

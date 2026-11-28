@@ -25,6 +25,7 @@ package extension PluginUIProvider {
     package var plugin: InstalledPlugin? { store.installed.first { $0.id == pluginID } }
     package var interface: PluginInterface? { plugin.map { store.uiRegistry.interface(for: $0.manifest) } }
     package var permissions: PluginPermissionClient { store.permissionClient(for: pluginID) }
+    package var nativeCapabilities: PluginNativeCapabilityClient { store.nativeCapabilities(for: pluginID) }
 }
 
 package struct PluginCommandPresentation {
@@ -114,7 +115,7 @@ package struct PluginCommandPresentation {
     package func execute(_ commandID: String, context: PluginUIContext) async throws {
         guard let plugin = context.plugin, plugin.isEnabled,
             let command = commands[commandID],
-            command.requiredActions.isSubset(of: Set(plugin.manifest.actions)),
+            command.requiredActions.allSatisfy(plugin.allowsAction),
             command.presentation(context).isEnabled
         else { throw PluginError.invalid("此插件操作当前不可用。") }
         try await command.perform(context)
