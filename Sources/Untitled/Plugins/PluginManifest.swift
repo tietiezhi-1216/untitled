@@ -2,7 +2,8 @@ import Foundation
 
 enum HostInfo {
     static let name = "Untitled"
-    static let version = "0.13.51"
+    static let version = "0.13.53"
+    static let nativeCapabilityVersion = "0.13.53"
     static let bundleIdentifier = "com.untitled.app"
     static let repository = URL(string: "https://github.com/tietiezhi-1216/untitled")!
     static let catalog = URL(string: "https://raw.githubusercontent.com/tietiezhi-1216/untitled/main/Plugins/catalog.json")!
@@ -97,8 +98,17 @@ struct PluginManifest: Codable, Equatable, Sendable, Identifiable {
         }
         guard !actions.isEmpty, Set(actions).count == actions.count,
               templates.count <= 100, Set(templates.map(\.id)).count == templates.count,
-              templates.allSatisfy({ !$0.id.isEmpty && !$0.title.isEmpty && $0.title.count <= 100 && actions.contains($0.action) }) else {
+              templates.allSatisfy({ !$0.id.isEmpty && !$0.title.isEmpty && $0.title.count <= 100 && actions.contains($0.action) && $0.action.canBindCommand }) else {
             throw PluginError.invalid("插件的操作声明无效。")
+        }
+        let notificationDeclared = permissions?.contains { $0.id == .notifications } == true
+        if actions.contains(where: \.isNativeUtility) || notificationDeclared {
+            guard schemaVersion == 2, minimum >= Version(HostInfo.nativeCapabilityVersion)! else {
+                throw PluginError.invalid("文件、剪贴板和通知能力需要 0.13.53 或更高版本宿主。")
+            }
+        }
+        if actions.contains(.sendNotification), !notificationDeclared {
+            throw PluginError.invalid("发送通知需要声明 system.notifications 权限。")
         }
         if actions.contains(where: { [.toggleDoubaoDictation, .holdDoubaoDictation, .cancelDoubaoDictation].contains($0) }),
            minimum < Version("0.9.8")! {
@@ -154,6 +164,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
     case openURL
     case runShortcut
     case showMainWindow
+    case revealFile, shareFile, readClipboardText, copyText, sendNotification
     case sharePeripherals, switchPeripheralControl, stopPeripheralSharing
     case shareWirelessMicrophone
     case toggleDoubaoDictation, holdDoubaoDictation, cancelDoubaoDictation
@@ -166,10 +177,20 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
     var isScreenshotAction: Bool {
         switch self {
         case .openApplication, .openURL, .runShortcut, .showMainWindow, .sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing,
-             .shareWirelessMicrophone, .toggleDoubaoDictation, .holdDoubaoDictation, .cancelDoubaoDictation: false
+             .shareWirelessMicrophone, .toggleDoubaoDictation, .holdDoubaoDictation, .cancelDoubaoDictation,
+             .revealFile, .shareFile, .readClipboardText, .copyText, .sendNotification: false
         default: true
         }
     }
+
+    var isNativeUtility: Bool {
+        switch self {
+        case .revealFile, .shareFile, .readClipboardText, .copyText, .sendNotification: true
+        default: false
+        }
+    }
+
+    var canBindCommand: Bool { self != .readClipboardText }
 
     var title: String {
         switch self {
@@ -177,6 +198,11 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
         case .openURL: "打开网址"
         case .runShortcut: "运行快捷指令"
         case .showMainWindow: "显示主面板"
+        case .revealFile: "在 Finder 中定位文件"
+        case .shareFile: "系统分享文件"
+        case .readClipboardText: "读取剪贴板文本"
+        case .copyText: "复制文本到剪贴板"
+        case .sendNotification: "发送本地通知"
         case .sharePeripherals: "启动或停止键鼠共享"
         case .switchPeripheralControl: "切换键鼠控制目标"
         case .stopPeripheralSharing: "停止全部键鼠共享"
@@ -211,6 +237,10 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
         case .openURL: "link"
         case .runShortcut: "command.square"
         case .showMainWindow: "macwindow"
+        case .revealFile: "folder"
+        case .shareFile: "square.and.arrow.up"
+        case .readClipboardText, .copyText: "doc.on.clipboard"
+        case .sendNotification: "bell"
         case .sharePeripherals: "network"
         case .switchPeripheralControl: "keyboard"
         case .stopPeripheralSharing: "stop.circle"
@@ -254,6 +284,14 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
             guard !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, target.count <= 500 else {
                 throw PluginError.invalid("请输入 macOS「快捷指令」中的名称。")
             }
+        case .revealFile, .shareFile:
+            guard target.isEmpty else { throw PluginError.invalid("运行时请选择要使用的文件。") }
+        case .readClipboardText:
+            throw PluginError.invalid("读取剪贴板由插件面板或原生 provider 调用。")
+        case .copyText:
+            try HostNativeCapabilities.validateClipboardText(target)
+        case .sendNotification:
+            _ = try HostNativeCapabilities.notificationTitle(target, body: "")
         default: break
         }
     }
@@ -318,7 +356,12 @@ struct InstalledPlugin: Codable, Equatable, Sendable, Identifiable {
     var installedAt = Date()
     var initializedDefaultTemplateIDs: [String]? = nil
     var readme: String? = nil
+    var blockedNativeActions: Set<ActionKind>? = nil
     var id: String { manifest.id }
+
+    func allowsAction(_ action: ActionKind) -> Bool {
+        manifest.actions.contains(action) && (blockedNativeActions?.contains(action) != true || !action.isNativeUtility)
+    }
 
     /// Upgrade defaults once; user edits, cleared bindings and deleted defaults survive later upgrades.
     @discardableResult mutating func initializeDefaultCommands(

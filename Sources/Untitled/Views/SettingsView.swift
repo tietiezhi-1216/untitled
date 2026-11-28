@@ -84,14 +84,18 @@ struct PermissionManagementView: View {
     }
 }
 
-private struct PermissionRow: View {
+struct PermissionRow: View {
     @ObservedObject var permissions: HostPermissionCenter
     let descriptor: HostPermissionDescriptor
+    var declaration: PluginPermissionDeclaration? = nil
+    var pluginID: String? = nil
     @ViewState private var showingInfo = false
 
     var body: some View {
         let status = permissions.status(descriptor.id)
-        let needed = status != .authorized && permissions.pendingRequest?.permissions.contains(descriptor.id) == true
+        let pending = permissions.pendingRequest
+        let needed = status != .authorized && pending?.permissions.contains(descriptor.id) == true
+            && (pluginID == nil || pending?.pluginID == pluginID)
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
                 Image(systemName: descriptor.symbol)
@@ -102,6 +106,9 @@ private struct PermissionRow: View {
                 Text(descriptor.title).font(.callout.weight(needed ? .medium : .regular))
                     .foregroundStyle(needed ? Color.accentColor : Color.primary)
                     .accessibilityLabel(needed ? "\(descriptor.title)，当前需要" : descriptor.title)
+                if declaration?.isOptional == true {
+                    Text("可选").font(.caption).foregroundStyle(.secondary)
+                }
                 Button {
                     showingInfo.toggle()
                 } label: {
@@ -139,6 +146,11 @@ private struct PermissionRow: View {
                 }
             }
             .frame(minHeight: 38)
+            if let declaration {
+                Text(declaration.reason).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 34)
+            }
         }
     }
 

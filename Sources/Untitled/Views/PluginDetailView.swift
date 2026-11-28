@@ -61,7 +61,7 @@ struct PluginDetailView: View {
     }
 
     private func canRun(_ command: PluginCommand, plugin: InstalledPlugin) -> Bool {
-        plugin.isEnabled && command.isEnabled && command.isConfigured
+        plugin.isEnabled && plugin.allowsAction(command.action) && command.isEnabled && command.isConfigured
     }
 
     private func keyBadge(_ command: PluginCommand) -> some View {
@@ -240,6 +240,7 @@ struct PluginHeaderControlView: View {
             }
             if includesDetails {
                 Divider()
+                Button("权限与能力…") { store.showPluginAccess(plugin.id) }
                 Link("查看源码", destination: plugin.manifest.repository)
                 Button("卸载插件…", role: .destructive) { confirmUninstall = true }
             }
@@ -278,10 +279,11 @@ struct PluginAddCommandView: View {
     @ViewState private var editingCommand: PluginCommand?
     let pluginID: String
     var body: some View {
-        if let plugin = store.installed.first(where: { $0.id == pluginID }) {
+        if let plugin = store.installed.first(where: { $0.id == pluginID }),
+           plugin.manifest.actions.contains(where: \.canBindCommand) {
             Menu {
                 if plugin.manifest.templates.isEmpty {
-                    ForEach(plugin.manifest.actions, id: \.self) { action in
+                    ForEach(plugin.manifest.actions.filter(\.canBindCommand), id: \.self) { action in
                         Button(action.title) { editingCommand = PluginCommand(action: action) }
                     }
                 } else {

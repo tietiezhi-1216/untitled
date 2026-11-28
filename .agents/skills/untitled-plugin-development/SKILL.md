@@ -15,7 +15,7 @@ description: Create, modify, debug, and package plugins for the Untitled macOS a
 
 ## 开发
 
-1. 检查 `git status --short`，保留用户现有改动。读相关清单，以及 `Plugins/PluginManifest.swift`、`Plugins/PluginUIRegistry.swift`、`Runtime/HostPermissions.swift` 中涉及的接口；这些 Swift 路径均相对 `Sources/Untitled/`。
+1. 检查 `git status --short`，保留用户现有改动。常规开发从最新 `origin/main` 创建独立 worktree。读相关清单，以及 `Plugins/PluginManifest.swift`、`Plugins/PluginUIRegistry.swift`、`Runtime/HostPermissions.swift` 中涉及的接口。这些 Swift 路径均相对 `Sources/Untitled/`。
 2. 新插件可运行脚手架；它生成可安装、可打开主面板的示例，随后按需求替换业务内容：
 
    ```bash
@@ -42,4 +42,4 @@ AppKit 焦点测试串行运行。TestingMacros 兼容命令及 Xcode 构建见 
 
 独立发布可指定 `--repository alice/my-plugin`；`--plugin` 也接受仓库外插件目录，这时必须附带自己的 LICENSE。默认只生成本地 ZIP 和目录，不更新在线商店。对应 Release 资产确已发布并可下载后才使用 `--write-catalog`；已发布同版本资产保持不变。
 
-交付说明写明文件、构建产物、验证及仍需真机验收的部分。除非任务包含发布，不自动上传 Release、推送代码或安装系统驱动。
+验证后推送并经 PR 合并。合并后按 [独立发布宿主与插件](../../../docs/DEVELOPMENT.md#独立发布宿主与插件) 分别发布有改动的产品，验证下载与 SHA-256。交付说明写明 PR、Release、安装状态及待验收项。
