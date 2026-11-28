@@ -14,6 +14,7 @@ struct HostPermissionID: RawRepresentable, Hashable, Codable, Sendable {
     static let inputMonitoring = Self(rawValue: "system.inputMonitoring")
     static let camera = Self(rawValue: "system.camera")
     static let microphone = Self(rawValue: "system.microphone")
+    static let notifications = Self(rawValue: "system.notifications")
 }
 
 struct PluginPermissionDeclaration: Codable, Equatable, Sendable {
@@ -24,7 +25,7 @@ struct PluginPermissionDeclaration: Codable, Equatable, Sendable {
 }
 
 enum HostPermissionStatus: Equatable {
-    case authorized, notDetermined, notGranted, denied, restricted
+    case authorized, notDetermined, notGranted, denied, restricted, unknown
     var title: String {
         switch self {
         case .authorized: "已授权"
@@ -32,6 +33,7 @@ enum HostPermissionStatus: Equatable {
         case .notGranted: "未授权"
         case .denied: "已拒绝"
         case .restricted: "受系统限制"
+        case .unknown: "状态未知"
         }
     }
 }
@@ -48,6 +50,7 @@ struct HostPermissionDescriptor: Identifiable {
     let status: () -> HostPermissionStatus
     let request: () async -> Void
     let openSettings: () -> Void
+    var asyncStatus: (() async -> HostPermissionStatus)? = nil
 }
 
 enum HostSettingsPage: String, CaseIterable { case general, permissions }
@@ -85,6 +88,7 @@ enum HostPermissionError: LocalizedError {
     let drivers: [HostPermissionDriver]
     private let byID: [HostPermissionID: HostPermissionDriver]
     private let legacyDeclarations: (PluginManifest) -> [PluginPermissionDeclaration]
+    private var statusQueries: [HostPermissionID: UUID] = [:]
     @Published private(set) var statuses: [HostPermissionID: HostPermissionStatus] = [:]
     @Published private(set) var requesting: HostPermissionID?
     @Published private(set) var messages: [HostPermissionID: String] = [:]
@@ -109,18 +113,38 @@ enum HostPermissionError: LocalizedError {
     func validate(_ manifest: PluginManifest) throws {
         let declarations = declarations(for: manifest)
         guard Set(declarations.map(\.id)).count == declarations.count,
-            declarations.allSatisfy({ byID[$0.id] != nil })
+            declarations.allSatisfy({ supportsPluginPermission($0.id) })
         else {
             throw PluginError.invalid("插件声明了重复或宿主尚未支持的权限，请更新主应用。")
         }
     }
-    func status(_ id: HostPermissionID) -> HostPermissionStatus { statuses[id] ?? .notGranted }
+    func status(_ id: HostPermissionID) -> HostPermissionStatus { statuses[id] ?? .unknown }
     func refresh(_ ids: Set<HostPermissionID>? = nil) {
         var next = statuses
-        for driver in drivers where ids?.contains(driver.descriptor.id) ?? true {
+        for driver in drivers where driver.asyncStatus == nil && (ids?.contains(driver.descriptor.id) ?? true) {
             next[driver.descriptor.id] = driver.status()
         }
         if next != statuses { statuses = next }
+    }
+    func refreshForDisplay() async {
+        refresh()
+        for driver in drivers where driver.asyncStatus != nil {
+            _ = await systemStatus(driver.descriptor.id)
+        }
+    }
+    func systemStatus(_ id: HostPermissionID) async -> HostPermissionStatus {
+        guard let query = byID[id]?.asyncStatus else {
+            refresh([id])
+            return status(id)
+        }
+        let token = UUID()
+        statusQueries[id] = token
+        let result = await query()
+        if statusQueries[id] == token {
+            statusQueries[id] = nil
+            if statuses[id] != result { statuses[id] = result }
+        }
+        return result
     }
     func reveal() {
         settingsPage = .permissions
@@ -130,7 +154,7 @@ enum HostPermissionError: LocalizedError {
     func require(_ ids: Set<HostPermissionID>, for plugin: InstalledPlugin) throws {
         guard plugin.isEnabled else { throw PluginError.invalid("插件已停用。") }
         let declared = Set(declarations(for: plugin.manifest).map(\.id))
-        guard ids.isSubset(of: declared), ids.allSatisfy({ byID[$0] != nil }) else {
+        guard ids.isSubset(of: declared), ids.allSatisfy({ supportsPluginPermission($0) }) else {
             throw PluginError.invalid("插件请求了未声明或不支持的权限。")
         }
         guard !ids.isEmpty else { return }
@@ -151,14 +175,13 @@ enum HostPermissionError: LocalizedError {
     }
     func request(_ id: HostPermissionID) async {
         guard requesting == nil, let driver = byID[id] else { return }
-        refresh()
-        guard status(id) != .authorized else { return }
-        guard status(id) != .restricted, status(id) != .denied else { return }
         requesting = id
         defer { requesting = nil }
+        let before = await systemStatus(id)
+        guard before == .notGranted || before == .notDetermined else { return }
         await driver.request()
-        refresh()
-        messages[id] = status(id) == .authorized ? nil : "请在系统隐私设置中允许 \(HostInfo.name)；部分权限更改后需要重新启动应用。"
+        let after = await systemStatus(id)
+        messages[id] = after == .authorized ? nil : "请在系统设置中允许 \(HostInfo.name)；部分权限更改后需要重新启动应用。"
     }
     func openSettings(_ id: HostPermissionID) { byID[id]?.openSettings() }
 
@@ -173,6 +196,12 @@ enum HostPermissionError: LocalizedError {
         refresh(Self.shortcutRoutingPermissions)
         pendingRequest = .init(hostShortcutRouting: Self.shortcutRoutingPermissions)
         reveal()
+    }
+
+    private func supportsPluginPermission(_ id: HostPermissionID) -> Bool {
+        // Plugin clients currently check permissions synchronously at the point of use.
+        guard let driver = byID[id] else { return false }
+        return driver.asyncStatus == nil
     }
 }
 

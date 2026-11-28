@@ -16,9 +16,9 @@ struct SettingsView: View {
                 .tabItem { Label("权限管理", systemImage: "hand.raised") }.tag(HostSettingsPage.permissions)
         }
         .frame(width: 640, height: 440)
-        .onAppear { permissions.refresh() }
+        .task { await permissions.refreshForDisplay() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            permissions.refresh()
+            Task { await permissions.refreshForDisplay() }
         }
     }
 
@@ -61,7 +61,7 @@ struct PermissionManagementView: View {
                 }
                 Spacer(minLength: 0)
                 Button {
-                    permissions.refresh()
+                    Task { await permissions.refreshForDisplay() }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
@@ -154,6 +154,7 @@ private struct PermissionStatusBadge: View {
         case .notDetermined, .notGranted: "未授权"
         case .denied: "已拒绝"
         case .restricted: "受限制"
+        case .unknown: "状态未知"
         }
     }
     private var symbol: String {
@@ -162,6 +163,7 @@ private struct PermissionStatusBadge: View {
         case .notDetermined, .notGranted: "minus"
         case .denied: "xmark"
         case .restricted: "lock.fill"
+        case .unknown: "questionmark"
         }
     }
     private var color: Color {
@@ -174,6 +176,7 @@ private struct PermissionStatusBadge: View {
             scheme == .dark ? Color(red: 1, green: 0.51, blue: 0.48) : Color(red: 0.72, green: 0.20, blue: 0.17)
         case .restricted:
             scheme == .dark ? Color(red: 0.76, green: 0.64, blue: 0.96) : Color(red: 0.43, green: 0.31, blue: 0.65)
+        case .unknown: .secondary
         }
     }
     var body: some View {

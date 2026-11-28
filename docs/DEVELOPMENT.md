@@ -15,6 +15,10 @@
 
 设计依据：[Apple Liquid Glass 采用指南](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass)、[材质规范](https://developer.apple.com/design/human-interface-guidelines/materials)。
 
+### 原生能力
+
+主窗口侧栏的「原生能力」集中提供文件定位与系统分享、纯文本剪贴板、本地通知，以及已接入的插件动作和待接入能力。宿主工具放在 `Runtime/HostNativeCapabilities.swift`，权限由 `SystemPermissionProvider` 注册。插件功能继续从自己的工作区执行。接入状态和授权规则见 [权限与执行规范](PERMISSIONS.md)。
+
 ### 构建
 
 ```bash

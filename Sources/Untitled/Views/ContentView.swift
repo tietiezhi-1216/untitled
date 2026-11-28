@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct ContentView: View {
+    private static let nativeCapabilitiesID = "__native_capabilities__"
     @EnvironmentObject private var store: PluginStore
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
@@ -20,6 +21,10 @@ struct ContentView: View {
         store.installed.first { $0.id == selection }
     }
 
+    private var showingStore: Bool {
+        selection != Self.nativeCapabilitiesID && selectedPlugin == nil
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             sidebar
@@ -27,14 +32,16 @@ struct ContentView: View {
             Divider()
                 .opacity(0.45)
             Group {
-                if let plugin = selectedPlugin {
+                if selection == Self.nativeCapabilitiesID {
+                    NativeCapabilitiesView { selection = "__store__" }
+                } else if let plugin = selectedPlugin {
                     PluginWorkspaceView(pluginID: plugin.id).id(plugin.id)
                 } else {
                     PluginStoreView(navigation: marketplace) { selection = $0 }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background((selectedPlugin == nil ? PanelPalette.store(scheme) : PanelPalette.content(scheme)).opacity(contentBackgroundOpacity))
+            .background((showingStore ? PanelPalette.store(scheme) : PanelPalette.content(scheme)).opacity(contentBackgroundOpacity))
         }
         .frame(minWidth: 880, minHeight: 580)
         .background {
@@ -98,6 +105,7 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
                     navigationItem("插件商店", symbol: "storefront", id: "__store__")
+                    navigationItem("原生能力", symbol: "macwindow.badge.plus", id: Self.nativeCapabilitiesID)
                     Text("我的插件")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
@@ -145,7 +153,7 @@ struct ContentView: View {
     }
 
     private func isSelected(_ id: String) -> Bool {
-        if id == "__store__" { return selectedPlugin == nil }
+        if id == "__store__" { return showingStore }
         return selection == id
     }
 
