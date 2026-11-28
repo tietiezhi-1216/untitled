@@ -365,7 +365,7 @@ Release0.12.14/build53已沿用签名正常退出旧进程、同卷原子替换 
 gh workflow run release.yml --ref main -f source_sha="$MERGE_SHA" -f dry_run=true
 ```
 
-主线已进入更新版本、仍需补发指定旧版本时，先在受保护 PR 中更新 `.github/approved-release-sources.json`，记录精确候选提交、它包含的公开宿主基线及本次允许发布的标签。手动启动主线 workflow 并设 `approved_source=true`。流水线仍在同一候选提交重新执行 Swift 测试、打包及 Xcode 构建。该入口只发布已记录的版本，适用于日常自动发布暂停期间的单次发布。
+主线已进入更新版本、仍需补发指定旧版本时，先在受保护 PR 中更新 `.github/approved-release-sources.json`，记录精确候选提交、它包含的公开宿主基线及本次允许发布的标签。手动启动主线 workflow 并设 `approved_source=true`。流水线仍在同一候选提交重新执行 Swift 测试、打包及 Xcode 构建。该入口只发布已记录的版本，适用于日常自动发布暂停期间的单次发布。 当已有更新的公开宿主时，批准记录可用 `allow_older_preview` 补发明确指定的预览。预览由已公开的旧基线继续构建。成对补发会先核对公开宿主的下载，再发布配对插件。
 
 独立发行线有已验证的旧候选提交时，仍可在本机沿该发行线完成签名和打包。标签须指向实际 CI 验证、签名和打包的提交。正式版先完成 Apple 公证及 stapling，公开预览追加 `--preview`，并标明签名、公证及验收范围。
 

@@ -131,7 +131,7 @@ class ReleasePlanTests(GitFixture):
         self.git(self.main, "update-ref", "refs/remotes/origin/main", approval_sha)
         self.write(filename, "{}")
         with contextlib.chdir(self.main):
-            self.assertEqual(release_plan.require_approved_source(source, "v1.0.1"), {"v1.0.1"})
+            self.assertEqual(release_plan.require_approved_source(source, "v1.0.1")["tags"], ["v1.0.1"])
             with self.assertRaisesRegex(ValueError, "not approved"):
                 release_plan.require_approved_source(source, "v1.0.2")
             with self.assertRaisesRegex(ValueError, "no release approval"):
@@ -231,6 +231,25 @@ class ReleaseAssetsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "published baseline v1.0.0"):
                 release_assets.require_host_baseline(published, SOURCE, "1.0.1", "")
             release_assets.require_host_baseline(published, SOURCE, "1.0.1", f"v1.0.0:{baseline}")
+
+
+    def test_only_recorded_preview_can_use_its_older_public_baseline(self):
+        releases = [
+            {"tag_name": tag, "draft": False,
+             "assets": [{"name": f"Untitled-macOS-arm64-{tag}.zip", "state": "uploaded"}]}
+            for tag in ("v1.0.0", "v1.0.2")
+        ]
+        approval = {"baseline": "v1.0.0", "allow_older_preview": True}
+        with patch.object(release_assets, "tag_source", return_value="b" * 40) as tag_source, \
+                patch.object(release_assets, "is_ancestor", return_value=True):
+            for channel, record in [("preview", {}), ("stable", approval)]:
+                with self.subTest(channel=channel, record=record):
+                    with self.assertRaisesRegex(ValueError, "already at v1.0.2"):
+                        release_assets.require_host_release_baseline(releases, SOURCE, "1.0.1", "", channel, record)
+            with self.assertRaisesRegex(ValueError, "has no public host ZIP"):
+                release_assets.require_host_release_baseline(releases[1:], SOURCE, "1.0.1", "", "preview", approval)
+            release_assets.require_host_release_baseline(releases, SOURCE, "1.0.1", "", "preview", approval)
+            tag_source.assert_called_once_with("v1.0.0")
 
 
 class LocalFinishTests(GitFixture):
