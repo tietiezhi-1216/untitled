@@ -189,7 +189,7 @@ import UntitledPluginSDK
         try fixture.store.installManifest(fixture.manifest)
         let upgraded = try #require(fixture.store.installed.first)
         #expect(upgraded.manifest.id == "com.untitled.wireless-microphone")
-        #expect(upgraded.manifest.version == "2.0.1")
+        #expect(upgraded.manifest.version == fixture.manifest.version)
         #expect(upgraded.commands == [command])
         #expect(upgraded.manifest.permissions?.map(\.id) == [.bluetooth])
         #expect(fixture.link.discoveries == 0)

@@ -42,7 +42,7 @@
   {
     "id": "com.untitled.peripheral-sharing",
     "repository": "https://github.com/tietiezhi-1216/untitled",
-    "version": "1.4.3",
+    "version": "1.4.5",
     "name": "键鼠共享",
     "summary": "在两台 Mac 之间共享键盘和鼠标。",
     "icon": {
@@ -82,7 +82,7 @@
   {
     "id": "com.untitled.wireless-microphone",
     "repository": "https://github.com/tietiezhi-1216/untitled",
-    "version": "2.0.1",
+    "version": "2.0.2",
     "name": "无线麦",
     "summary": "查找和配对小米蓝牙遥控器 2 和 2 Pro，按住语音键即可在 Mac 收音。",
     "icon": {

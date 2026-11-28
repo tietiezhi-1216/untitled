@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact source commit to verify before publishing
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -12,7 +18,16 @@ jobs:
   verify:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify host and plugin version transitions
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/release_plan.py --source "$GITHUB_SHA" --base "$BASE"
       - name: Toolchain
         run: |
           xcodebuild -version

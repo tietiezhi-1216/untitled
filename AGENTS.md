@@ -35,11 +35,11 @@ Untitled 是由用户通过 agents 持续定制的原生 macOS 软件。功能�
 
 - 默认交付流程为 **拉取最新主线并创建独立 worktree → 开发、验证及提交 → 推送并经受保护 PR 合并 → 验证合并提交 → 分别发布受影响的宿主与插件并验证下载 → 清理工作区和同步本地 main**。这是正常开发任务的持续授权。用户要求只改本地、不发布、Draft 或暂停时，按其范围保留现场。
 - 每项任务先 `git fetch origin`，再从最新 `origin/main` 创建独立 worktree 和 `agent/<task>` 分支，兼容已有 `codex/<task>`；无论主工作区是否干净，都不直接在主工作区开发。记录本任务 worktree 路径、分支及 main 工作区位置。不暂存或提交其他任务文件，不直接推送 main、force-push、关闭保护或使用管理员绕过。
-- 完成必要验证并提交本任务改动后，执行 `python3 scripts/submit-agent-pr.py --body-file <PR说明.md>`。说明实际行为、验证及未验收项；脚本使用本机已有 `gh` 登录，幂等推送、创建 PR、登记受保护的自动合并，不上传个人凭据到 CI。该脚本只完成提交与登记，后续仍必须确认合并、清理和同步。
+- 完成必要验证并提交本任务改动后，从 main 工作区运行 `python3 <任务worktree>/scripts/deliver-agent-task.py --worktree <任务worktree> --body-file <PR说明.md>`。说明实际行为、验证及未验收项。收尾命令使用本机 `gh` 登录推送、创建 PR、登记受保护自动合并，随后验证合并和发布，保存记录并清理。已有 PR 用 `--pr` 恢复。Codex 管理的 worktree 加 `--keep-worktree`，交付验证完成后用 Codex 归档任务附件并同步 main。
 - GitHub 对同仓库、有写权限作者的 Agent 分支提供自动 PR 兜底；只处理已登记的 PR，不接管旧 PR 或 fork。CI 只读运行；有写权限的编排工作流只运行受保护 `main` 的代码，不检出或执行 PR 代码。
 - `verify` 等必需检查通过且无冲突才会合并；基线落后时正常合入 `main` 后重跑检查。失败不伪造成功，冲突不强合。需要暂停时设为 Draft 或添加 `no-automerge` 标签。
 - 自动合并后核对 PR 确为 `MERGED`、目标为 main，记录合并提交并确认它已进入最新 `origin/main`。仅推送、排队或 CI 通过不能报告“已合并”；Squash 后也不能仅凭原功能提交是否为 main 祖先判断交付。失败或冲突时保留 worktree，报告阻塞，不进入清理。
-- 按 [独立发布流程](docs/DEVELOPMENT.md#独立发布宿主与插件)从通过检查的源码提交发布。宿主用 `v<宿主版本>` 和应用 ZIP。插件用自己的版本及 ZIP，独立仓库用自己的标签，同仓插件用 `plugin-<slug>-v<版本>`。宿主内编译的能力需要对应的宿主版本，声明式包改动才递增插件版本。公开预览和正式签名公证版须标明渠道。
+- 按 [独立发布流程](docs/DEVELOPMENT.md#独立发布宿主与插件)选择通过只读 CI 的受保护 main 提交。自动发版由双机验收后的仓库设置启用。宿主使用 Developer ID 签名，正式版另完成 Apple 公证。宿主用 `v<宿主版本>` 和应用 ZIP。插件用自己的版本及 ZIP，独立仓库用自己的标签，同仓插件用 `plugin-<slug>-v<版本>`。宿主内编译的能力需要对应的宿主版本，声明式包改动才递增插件版本。公开预览和正式签名公证版须标明渠道。
 - 核对对应 Release 已公开、资产可下载且 SHA-256 一致后，再检查本任务 worktree 干净并移动需保留的产物、验收记录。从 worktree 外安全移除本任务创建的 worktree。发布或清理阻塞时保留现场并说明原因。
 - 清理后在干净、确实检出 main 的工作区执行 `git pull --ff-only origin main`，核对本地 main 与最新 `origin/main` 一致。main 已在其他 worktree 检出时在该处同步。原主目录有并行改动时保留现场。交付分别核对源码、发布资产、本机安装及真机验证。
 - 配置、权限、事件安全边界和恢复流程见 [Agent 自动交付](docs/AGENT-WORKFLOW.md)。

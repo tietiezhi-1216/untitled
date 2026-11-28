@@ -14,7 +14,7 @@ def run(*args):
     return subprocess.run(args, check=True, capture_output=True, text=True)
 
 
-def package(app, output, preview):
+def package(app, output, preview, require_developer_id=False, team=None):
     app = app.resolve(strict=True)
     if app.name != "Untitled.app" or not app.is_dir():
         raise ValueError("Expected a built Untitled.app")
@@ -29,9 +29,12 @@ def package(app, output, preview):
     run("/usr/bin/codesign", "--verify", "--deep", "--strict", app)
     signature = run("/usr/bin/codesign", "-dv", "--verbose=4", app).stderr.splitlines()
     developer_id = any(line.startswith("Authority=Developer ID Application:") for line in signature)
-    if not preview:
+    if require_developer_id or not preview or team:
         if not developer_id or not any(line.startswith("CodeDirectory ") and "(runtime)" in line for line in signature):
-            raise ValueError("A formal release requires a Hardened Runtime Developer ID signature")
+            raise ValueError("A public release requires a Hardened Runtime Developer ID signature")
+        if team and f"TeamIdentifier={team}" not in signature:
+            raise ValueError("The Developer ID signature does not match the configured Apple team")
+    if not preview:
         run("/usr/bin/xcrun", "stapler", "validate", app)
 
     architectures = set(run("/usr/bin/lipo", "-archs", app / "Contents/MacOS/Untitled").stdout.split())
@@ -66,9 +69,12 @@ def main():
     parser.add_argument("--app", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True, help="New directory for the application ZIP and SHA-256")
     parser.add_argument("--preview", action="store_true", help="Package an explicitly selected preview channel")
+    parser.add_argument("--require-developer-id", action="store_true", help="Require Developer ID even for a preview")
+    parser.add_argument("--team", help="Require this Apple Developer Team ID")
     arguments = parser.parse_args()
     try:
-        package(arguments.app, arguments.output, arguments.preview)
+        package(arguments.app, arguments.output, arguments.preview,
+                arguments.require_developer_id, arguments.team)
     except (OSError, ValueError, plistlib.InvalidFileException, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Cannot package Untitled: {error}\n")
 

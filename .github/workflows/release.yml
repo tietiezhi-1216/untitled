@@ -1,0 +1,177 @@
+name: Untitled release
+run-name: Release ${{ inputs.source_sha || github.sha }}${{ inputs.dry_run && ' (dry run)' || '' }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact source commit on protected main
+        required: true
+        type: string
+      dry_run:
+        description: Plan and run CI without signing or publishing
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+# Different main commits can each require a release. Keep pending runs instead
+# of replacing them with the latest merge while a signed build is in progress.
+concurrency:
+  group: untitled-releases
+  queue: max
+
+jobs:
+  plan:
+    if: >-
+      ${{ github.ref == 'refs/heads/main' && !github.event.repository.fork
+          && (vars.UNTITLED_AUTO_RELEASES_ENABLED == 'true'
+              || (github.event_name == 'workflow_dispatch' && inputs.dry_run)) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      source: ${{ steps.plan.outputs.source }}
+      host: ${{ steps.plan.outputs.host }}
+      plugins: ${{ steps.plan.outputs.plugins }}
+      has_products: ${{ steps.plan.outputs.has_products }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: plan
+        name: Determine host and plugin versions
+        env:
+          SOURCE: ${{ inputs.source_sha || github.sha }}
+          BASE: ${{ github.event_name == 'push' && github.event.before || '' }}
+        run: |
+          arguments=(--source "$SOURCE" --protected-main --actions)
+          if [[ -n "$BASE" && "$BASE" != 0000000000000000000000000000000000000000 ]]; then
+            arguments+=(--base "$BASE")
+          fi
+          python3 scripts/release_plan.py "${arguments[@]}"
+
+  verify-release:
+    needs: plan
+    if: ${{ needs.plan.outputs.has_products == 'true' }}
+    uses: ./.github/workflows/ci.yml
+    with:
+      source_sha: ${{ needs.plan.outputs.source }}
+
+  sign-host:
+    if: ${{ !inputs.dry_run && needs.plan.outputs.host != 'null' }}
+    needs: [plan, verify-release]
+    runs-on: macos-26
+    timeout-minutes: 80
+    environment: release
+    env:
+      SOURCE: ${{ needs.plan.outputs.source }}
+      TAG: ${{ fromJSON(needs.plan.outputs.host).tag }}
+      CHANNEL: ${{ vars.UNTITLED_HOST_RELEASE_CHANNEL || 'preview' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check the published host baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UNTITLED_ADOPTED_HOST_BASELINE: ${{ vars.UNTITLED_ADOPTED_HOST_BASELINE }}
+        run: python3 scripts/release_assets.py check-host --repo "$GITHUB_REPOSITORY" --source "$SOURCE" --tag "$TAG" --channel "$CHANNEL"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          path: release-source
+          persist-credentials: false
+      - name: Build, sign, and package the host
+        working-directory: release-source
+        env:
+          UNTITLED_DEVELOPER_ID_P12: ${{ secrets.UNTITLED_DEVELOPER_ID_P12 }}
+          UNTITLED_DEVELOPER_ID_PASSWORD: ${{ secrets.UNTITLED_DEVELOPER_ID_PASSWORD }}
+          UNTITLED_DEVELOPER_ID_TEAM: ${{ vars.UNTITLED_DEVELOPER_ID_TEAM }}
+          UNTITLED_NOTARY_APPLE_ID: ${{ secrets.UNTITLED_NOTARY_APPLE_ID }}
+          UNTITLED_NOTARY_PASSWORD: ${{ secrets.UNTITLED_NOTARY_PASSWORD }}
+        run: bash ../scripts/sign-release-app.sh "$CHANNEL" "$RUNNER_TEMP/host-package"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: host-${{ env.TAG }}
+          path: ${{ runner.temp }}/host-package/
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
+          if-no-files-found: error
+
+  publish-host:
+    needs: [plan, sign-host]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      SOURCE: ${{ needs.plan.outputs.source }}
+      TAG: ${{ fromJSON(needs.plan.outputs.host).tag }}
+      CHANNEL: ${{ vars.UNTITLED_HOST_RELEASE_CHANNEL || 'preview' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: host-${{ env.TAG }}
+          path: packages
+      - name: Publish and download the signed host
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UNTITLED_ADOPTED_HOST_BASELINE: ${{ vars.UNTITLED_ADOPTED_HOST_BASELINE }}
+        run: |
+          python3 scripts/release_assets.py publish --repo "$GITHUB_REPOSITORY" --source "$SOURCE" \
+            --tag "$TAG" --channel "$CHANNEL" --directory packages | tee -a "$GITHUB_STEP_SUMMARY"
+
+  publish-plugin:
+    needs: [plan, verify-release, publish-host]
+    if: ${{ always() && !cancelled() && !inputs.dry_run && needs.verify-release.result == 'success' && needs.plan.outputs.plugins != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: ${{ fromJSON(needs.plan.outputs.plugins) }}
+    name: Publish ${{ matrix.plugin.slug }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      SOURCE: ${{ needs.plan.outputs.source }}
+      SLUG: ${{ matrix.plugin.slug }}
+      TAG: ${{ matrix.plugin.tag }}
+      MINIMUM: ${{ matrix.plugin.minimum }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.source }}
+          path: release-source
+          persist-credentials: false
+      - name: Build declarative ZIP
+        working-directory: release-source
+        run: python3 scripts/package-plugins.py --tag "$TAG" --plugin "./Plugins/$SLUG" --repository "$GITHUB_REPOSITORY" --output "$RUNNER_TEMP/plugin-package"
+      - name: Publish and download the plugin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release_assets.py publish --repo "$GITHUB_REPOSITORY" --source "$SOURCE" \
+            --tag "$TAG" --minimum "$MINIMUM" --directory "$RUNNER_TEMP/plugin-package" | tee -a "$GITHUB_STEP_SUMMARY"
