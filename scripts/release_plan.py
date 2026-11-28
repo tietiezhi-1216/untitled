@@ -152,6 +152,7 @@ def main():
         if args.actions:
             with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
                 print(f"source={result['source']}", file=output)
+                print("source_policy=approved" if args.approved_source else "source_policy=main", file=output)
                 print(f"host={json.dumps(result['host'])}", file=output)
                 print(f"plugins={json.dumps(result['plugins'])}", file=output)
                 print(f"has_products={str(bool(result['host'] or result['plugins'])).lower()}", file=output)

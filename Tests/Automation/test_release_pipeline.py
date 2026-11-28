@@ -119,6 +119,40 @@ class ReleasePlanTests(GitFixture):
             self.plan()
 
 
+    def test_maintenance_source_uses_immutable_approval_from_protected_main(self):
+        self.git(self.main, "tag", "v1.0.0", self.base)
+        self.git(self.main, "switch", "-qc", "release/v1.0.1")
+        self.host("1.0.1", "2")
+        source = self.commit()
+        self.git(self.main, "switch", "-q", "main")
+        filename = ".github/approved-release-sources.json"
+        self.write(filename, json.dumps({source: {"baseline": "v1.0.0", "tags": ["v1.0.1"]}}))
+        approval_sha = self.commit()
+        self.git(self.main, "update-ref", "refs/remotes/origin/main", approval_sha)
+        self.write(filename, "{}")
+        with contextlib.chdir(self.main):
+            self.assertEqual(release_plan.require_approved_source(source, "v1.0.1"), {"v1.0.1"})
+            with self.assertRaisesRegex(ValueError, "not approved"):
+                release_plan.require_approved_source(source, "v1.0.2")
+            with self.assertRaisesRegex(ValueError, "no release approval"):
+                release_plan.require_approved_source(self.base)
+            with self.assertRaisesRegex(ValueError, "protected origin/main"):
+                release_plan.require_main(source)
+
+    def test_maintenance_source_must_include_its_host_baseline(self):
+        self.git(self.main, "switch", "-qc", "release/v1.0.2")
+        self.host("1.0.2", "3")
+        source = self.commit()
+        self.git(self.main, "switch", "-q", "main")
+        filename = ".github/approved-release-sources.json"
+        self.write(filename, json.dumps({source: {"baseline": "v1.0.1", "tags": ["v1.0.2"]}}))
+        approval_sha = self.commit()
+        self.git(self.main, "tag", "v1.0.1", approval_sha)
+        self.git(self.main, "update-ref", "refs/remotes/origin/main", approval_sha)
+        with contextlib.chdir(self.main), self.assertRaises(subprocess.CalledProcessError):
+            release_plan.require_approved_source(source)
+
+
 class ReleaseAssetsTests(unittest.TestCase):
     def test_plugin_release_draft_upload_publish_and_public_download(self):
         with tempfile.TemporaryDirectory() as name:

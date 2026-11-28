@@ -55,7 +55,7 @@
 - GitHub 当前对 token 创建的 PR 可能将 CI 置于 approval-required。编排只批准已登记、受信任同仓库 PR 的准确 head 上、本仓库既定 CI workflow 的 `action_required` run；不批准 fork、部署 environment 或 PR review，不伪造检查。
 - GitHub token 产生的 push 通常不会再触发 push 工作流。因此正常 update-branch 后显式 `workflow_dispatch` 只读 CI；该事件是 GitHub 明确支持的例外，新 run 绑定更新后的分支 SHA。普通 Agent 用本机 `gh` 建 PR 则正常触发 PR CI，无需此兜底。
 - `Untitled release` 监听 main 的 push。PR 编排也会为受保护合并补发指向准确合并 SHA 的事件。自动发版在双机验收后的仓库设置启用；此前可显式派发只读演练、在签发机手动发布验收包。
-- 发布流水线只接受受保护 main 第一父链上的提交。签名任务通过 `release` 环境读取凭据，独立的发布任务只在上传时使用写令牌。PR 检查和插件打包无签名凭据。发布重试验证已存在的标签和资产，继续自己的草稿或验证已公开的包。
+- 日常发版要求源码提交位于受保护 main 的第一父链。需要补发旧版本时，可在 main 经 PR 记录并审核固定的发行提交和标签，再手动启动该次发版。签名任务通过 `release` 环境读取凭据，独立的发布任务只在上传时使用写令牌。PR 检查和插件打包无签名凭据。发布重试验证已存在的标签和资产，继续自己的草稿或验证已公开的包。
 
 官方事件说明：[触发工作流](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow)、[workflow_run 安全边界](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run)。
 

@@ -10,6 +10,10 @@ on:
         description: Exact source commit to verify before publishing
         required: true
         type: string
+      approved_source:
+        description: Allow an explicitly approved maintenance snapshot with the older source layout
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -33,10 +37,12 @@ jobs:
           xcodebuild -version
           xcrun --sdk macosx --show-sdk-version
       - name: Validate agent delivery automation without credentials
+        if: ${{ !inputs.approved_source || hashFiles('.github/scripts/agent-pr.test.cjs') != '' }}
         run: |
           node --test .github/scripts/agent-pr.test.cjs
           python3 -m unittest discover -s Tests/Automation
       - name: Validate SwiftPM and Xcode module boundaries
+        if: ${{ !inputs.approved_source || hashFiles('scripts/check-module-boundaries.py') != '' }}
         run: python3 scripts/check-module-boundaries.py
       - name: Build and test
         run: swift test --sdk "$(xcrun --sdk macosx --show-sdk-path)" --no-parallel
@@ -52,4 +58,6 @@ jobs:
         run: |
           xcodebuild -project Untitled.xcodeproj -scheme Untitled -configuration Debug -sdk macosx \
             -derivedDataPath "$RUNNER_TEMP/untitled-xcode" CODE_SIGNING_ALLOWED=NO build
-          /bin/bash scripts/check-app-sdk.sh "$RUNNER_TEMP/untitled-xcode/Build/Products/Debug/Untitled.app"
+      - name: Verify the Xcode-built app SDK
+        if: ${{ !inputs.approved_source || hashFiles('scripts/check-app-sdk.sh') != '' }}
+        run: /bin/bash scripts/check-app-sdk.sh "$RUNNER_TEMP/untitled-xcode/Build/Products/Debug/Untitled.app"
