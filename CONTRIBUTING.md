@@ -29,8 +29,8 @@ python3 scripts/new-plugin.py my-plugin --id dev.alice.my-plugin --name "My Plug
 ## 安装与独立分发
 
 ```bash
-# 仓库内单个插件，只生成本地产物
-python3 scripts/package-plugins.py --tag v1.0.0 --plugin my-plugin
+# 仓库内单个插件，使用插件独立标签，只生成本地产物
+python3 scripts/package-plugins.py --tag plugin-my-plugin-v1.0.0 --plugin my-plugin
 
 # 插件自行托管源码与 GitHub Release
 python3 scripts/package-plugins.py --tag v1.0.0 \
@@ -38,6 +38,8 @@ python3 scripts/package-plugins.py --tag v1.0.0 \
 ```
 
 独立目录必须带 README 和 LICENSE。打包器优先使用插件自己的许可，不改写成宿主的 MIT。用户可通过商店“从 ZIP 安装…”导入；独立分享不必先进入中央商店。当前源码地址和商店下载地址支持 HTTPS GitHub 仓库与 GitHub Release，离线 ZIP 可自行传递。
+
+插件和宿主各用自己的版本及发行资产。同仓插件发布其独立标签时设置 `--latest=false`。具体发布和验证流程见 [开发说明](docs/DEVELOPMENT.md#独立发布宿主与插件)。
 
 中央目录 `Plugins/catalog.json` 可收录独立 Release，提供准确 ID、版本、下载地址和 SHA-256。宿主核对校验值、包身份、宿主能力和清单。统一打包可用 `--write-catalog`，但须等资产实际上传且可下载后执行；局部或独立打包不会覆盖中央目录。
 

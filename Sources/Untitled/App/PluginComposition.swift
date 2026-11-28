@@ -7,6 +7,7 @@
     static func makeUIRegistry() -> PluginUIRegistry {
         let registry = PluginUIRegistry()
         registry.register(HostPluginUIProvider())
+        registry.register(NativeCapabilityUIProvider())
         registry.register(CapturePluginUIProvider())
         registry.register(SharingPluginUIProvider())
         registry.register(WirelessMicrophonePluginUIProvider())
