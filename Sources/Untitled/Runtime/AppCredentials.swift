@@ -1,14 +1,15 @@
 import Foundation
+import UntitledPluginSDK
 import Security
 
 /// Injectable Security boundary: tests never read or modify the user's Keychain.
-struct CredentialBackend {
+package struct CredentialBackend {
     var read: (_ service: String, _ account: String) -> (OSStatus, Data?)
     var update: (_ service: String, _ account: String, _ data: Data) -> OSStatus
     var add: (_ service: String, _ account: String, _ data: Data) -> OSStatus
     var delete: (_ service: String, _ account: String) -> OSStatus
 
-    static var system: Self {
+    package static var system: Self {
         func query(_ service: String, _ account: String) -> [String: Any] {
             [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
         }
@@ -30,8 +31,8 @@ struct CredentialBackend {
     }
 }
 
-enum AppCredentials {
-    static func read(service: String, account: String, backend: CredentialBackend = .system) throws -> Data? {
+package enum AppCredentials {
+    package static func read(service: String, account: String, backend: CredentialBackend = .system) throws -> Data? {
         let (status, value) = backend.read(service, account)
         if status == errSecSuccess {
             guard let value else { throw failure(status) }
@@ -55,7 +56,7 @@ enum AppCredentials {
         return result
     }
 
-    static func save(_ data: Data, service: String, account: String, backend: CredentialBackend = .system) throws {
+    package static func save(_ data: Data, service: String, account: String, backend: CredentialBackend = .system) throws {
         let updated = backend.update(service, account, data)
         let status = updated == errSecItemNotFound ? backend.add(service, account, data) : updated
         guard status == errSecSuccess else { throw failure(status) }
@@ -66,7 +67,7 @@ enum AppCredentials {
         }
     }
 
-    static func delete(service: String, account: String, backend: CredentialBackend = .system) throws {
+    package static func delete(service: String, account: String, backend: CredentialBackend = .system) throws {
         // Remove the import source first: a denied deletion must not resurrect a revoked new item.
         for name in [IdentityMigration.legacyService(for: service), service].compactMap({ $0 }) {
             let status = backend.delete(name, account)

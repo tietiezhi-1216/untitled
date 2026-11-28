@@ -1,7 +1,10 @@
 import SwiftUI
+import UntitledPluginSDK
 
-struct NativeCapabilityUIProvider: PluginUIProvider {
-    func register(in registry: PluginUIRegistry) {
+package struct NativeCapabilityUIProvider: PluginUIProvider {
+    package init() {}
+
+    package func register(in registry: PluginUIRegistry) {
         for action in [ActionKind.revealFile, .shareFile] {
             registry.command("native.\(action.rawValue)", requiredActions: [action], presentation: { context in
                 .init(title: action.title, symbol: action.symbol, isEnabled: context.plugin?.allowsAction(action) == true)
@@ -39,8 +42,8 @@ private struct NativeCapabilityTextControl: View {
                 TextField("要复制的文本", text: bounded($text, limit: HostNativeCapabilities.clipboardByteLimit), axis: .vertical)
                     .lineLimit(2...4)
             case .sendNotification:
-                TextField("通知标题", text: bounded($text, limit: HostNativeCapabilities.notificationTitleByteLimit))
-                TextField("正文（可选）", text: bounded($notificationBody, limit: HostNativeCapabilities.notificationBodyByteLimit), axis: .vertical)
+                TextField("通知标题", text: bounded($text, limit: NativeCapabilityInput.notificationTitleByteLimit))
+                TextField("正文（可选）", text: bounded($notificationBody, limit: NativeCapabilityInput.notificationBodyByteLimit), axis: .vertical)
                     .lineLimit(1...3)
             default:
                 EmptyView()

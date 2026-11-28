@@ -13,9 +13,9 @@ Untitled 是由用户通过 agents 持续定制的原生 macOS 软件。功能�
 
 ## 技术边界
 
-- 只支持 macOS。Swift 6、SwiftUI / AppKit，部署最低 macOS 14；较新 API 保留相应 availability 检查。源码使用 macOS 26+ SDK，不增加其他系统适配层。
-- 清单在 `Plugins/<slug>/`；通用协议与存储在 `Sources/Untitled/Plugins/`，系统接口在 `Runtime/`，组合入口在 `App/PluginComposition.swift`。
-- 现有 `Capture/`、`Sharing/` 是原生能力模块。新业务使用自己的模块与 provider；通用渲染器只访问注册表，不按插件 ID 硬编码页面。
+- 只支持 macOS。Swift 6、SwiftUI / AppKit，部署最低 macOS 14；较新 API 保留相应 availability 检查。开发和打包使用所选工具链的 macOS 26 或更新的 SDK，并校验产物实际链接的版本。不增加其他系统适配层。
+- 清单在 `Plugins/<slug>/`；通用清单模型在 `Sources/UntitledPluginSDK/`，宿主存储和系统接口在 `Sources/Untitled/`，内置模块只在 `Sources/Untitled/App/PluginComposition.swift` 组装。
+- 原生插件的源码、资源和专用工具归 `Plugins/<slug>/`。插件注册自己的视图、动作、状态与生命周期；宿主只做通用调度和系统能力授权，不按插件 ID 硬编码页面、操作或启停逻辑。见 [宿主与插件边界](docs/PLUGIN-BOUNDARY.md)。
 - 当前 ZIP 是声明式包，仅允许根目录 `manifest.json`、`README.md`、`LICENSE`。新增原生能力随宿主编译。任意代码加载、agent 执行器及完全接管是独立的运行时工作，未实现时不得宣称可用。
 - 命令行与 Xcode 构建均不启用 App Sandbox，保留系统授权与 Hardened Runtime。系统能力通过统一 driver 和绑定插件身份的客户端接入。
 - 原生 provider 同进程运行；权限声明是宿主接口约束，不是对恶意原生代码的隔离沙盒。共享与独立分发不代表自动获得系统权限。
@@ -23,12 +23,12 @@ Untitled 是由用户通过 agents 持续定制的原生 macOS 软件。功能�
 ## 实现与兼容
 
 - 开始前看 `git status --short`。保留已有未提交改动，不用 reset、clean 或整文件回退覆盖其他工作。
-- 产品、Swift package / module / target / scheme 和可执行文件统一为 `Untitled`，仓库名 `untitled`，工程 `Untitled.xcodeproj`。应用命名空间 `com.untitled.app`，内置插件 `com.untitled.*`，环境变量 `UNTITLED_*`；不新增旧命名别名。历史身份仅用于显式的数据迁移与驱动清理，规则见 [迁移说明](docs/IDENTITY-MIGRATION.md)。
+- 产品、Swift package、应用 target / scheme 和可执行文件统一为 `Untitled`，内部 Swift 模块用 `Untitled` 前缀，仓库名 `untitled`，工程 `Untitled.xcodeproj`。应用命名空间 `com.untitled.app`，内置插件 `com.untitled.*`，环境变量 `UNTITLED_*`；不新增旧命名别名。历史身份仅用于显式的数据迁移与驱动清理，规则见 [迁移说明](docs/IDENTITY-MIGRATION.md)。
 - 新插件使用自己的命名空间；fork 独立分发时换插件 ID，保留作者与许可。版本、模板 ID、命令 ID 稳定，升级不重置用户配置。
 - 安装、启用、打开界面不自动启动采集、远端控制、安装 helper 或申请整套权限。长任务可取消；禁用、卸载和退出释放自身热键、监听、连接与任务。
 - Swift 6 的 actor 和 Sendable 问题按真实所有权解决，不靠普遍添加 `@unchecked Sendable` 或忽略错误。
 - 密钥放 Keychain；源码、清单、包和日志不含个人路径、配对信息或用户内容。错误提供恢复路径，输出与配置有原子替换或等效的失败保护。
-- 新 Swift 文件同时加入 Xcode target。新增字段、动作、权限同步 Swift 校验、JSON Schema、说明和相关验证。
+- Xcode 直接链接同一 Swift Package 组合产品；新增 App 源码放入其所属 target，不在 Xcode 重复加入。独立实验输入法 target 仍需同步工程。新增字段、动作、权限同步 Swift 校验、JSON Schema、说明和相关验证。
 - 每个插件都检查空闲与停用后的开销；高内存、模型、图像、音视频、批处理等路径先定义输入、并发、缓存和队列预算，测量基线、峰值与释放后的多轮趋势。无界增长、停用后持续工作等回归先修复；未测指标明确标注，不凭编译或单元测试宣称性能合格。具体工具与复现记录见性能规范。
 
 ## 分支、自动 PR、合并与发布
@@ -39,7 +39,7 @@ Untitled 是由用户通过 agents 持续定制的原生 macOS 软件。功能�
 - GitHub 对同仓库、有写权限作者的 Agent 分支提供自动 PR 兜底；只处理已登记的 PR，不接管旧 PR 或 fork。CI 只读运行；有写权限的编排工作流只运行受保护 `main` 的代码，不检出或执行 PR 代码。
 - `verify` 等必需检查通过且无冲突才会合并；基线落后时正常合入 `main` 后重跑检查。失败不伪造成功，冲突不强合。需要暂停时设为 Draft 或添加 `no-automerge` 标签。
 - 自动合并后核对 PR 确为 `MERGED`、目标为 main，记录合并提交并确认它已进入最新 `origin/main`。仅推送、排队或 CI 通过不能报告“已合并”；Squash 后也不能仅凭原功能提交是否为 main 祖先判断交付。失败或冲突时保留 worktree，报告阻塞，不进入清理。
-- 受保护 main 的合并触发 [独立发布流程](docs/DEVELOPMENT.md#独立发布宿主与插件)，对同一提交重新运行只读 CI。宿主自动使用 Developer ID 签名，正式版另完成 Apple 公证。宿主用 `v<宿主版本>` 和应用 ZIP。插件用自己的版本及 ZIP，独立仓库用自己的标签，同仓插件用 `plugin-<slug>-v<版本>`。宿主内编译的能力需要对应的宿主版本，声明式包改动才递增插件版本。公开预览和正式签名公证版须标明渠道。
+- 按 [独立发布流程](docs/DEVELOPMENT.md#独立发布宿主与插件)选择通过只读 CI 的受保护 main 提交。自动发版由双机验收后的仓库设置启用。宿主使用 Developer ID 签名，正式版另完成 Apple 公证。宿主用 `v<宿主版本>` 和应用 ZIP。插件用自己的版本及 ZIP，独立仓库用自己的标签，同仓插件用 `plugin-<slug>-v<版本>`。宿主内编译的能力需要对应的宿主版本，声明式包改动才递增插件版本。公开预览和正式签名公证版须标明渠道。
 - 核对对应 Release 已公开、资产可下载且 SHA-256 一致后，再检查本任务 worktree 干净并移动需保留的产物、验收记录。从 worktree 外安全移除本任务创建的 worktree。发布或清理阻塞时保留现场并说明原因。
 - 清理后在干净、确实检出 main 的工作区执行 `git pull --ff-only origin main`，核对本地 main 与最新 `origin/main` 一致。main 已在其他 worktree 检出时在该处同步。原主目录有并行改动时保留现场。交付分别核对源码、发布资产、本机安装及真机验证。
 - 配置、权限、事件安全边界和恢复流程见 [Agent 自动交付](docs/AGENT-WORKFLOW.md)。

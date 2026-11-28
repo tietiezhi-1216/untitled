@@ -1,4 +1,5 @@
 import SwiftUI
+import UntitledPluginSDK
 
 struct PluginStoreDetailView: View {
     @EnvironmentObject private var store: PluginStore

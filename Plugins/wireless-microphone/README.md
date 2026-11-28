@@ -17,6 +17,6 @@
 
 16 kHz IMA ADPCM 在内存解码，虚拟输入只写入 Untitled 自己的 Feed。单条音频通知、协商帧均限制为 512 字节。队列保存至多 200 ms PCM。松键后输出最多保留 260 ms 尾音。收音时电平最多每秒更新 10 次。语音会话在两秒没有音频或达到 65 秒时结束。连接和音频都在这台 Mac 处理。
 
-参考 [SayAll 技术文档](https://github.com/HD838A/remote-mic-app/blob/main/TECHNICAL.md)、[RC001 兼容记录](https://github.com/HD838A/remote-mic-app/blob/main/Bugs/2026-08-08-rc001-voice-remote-compatibility.md) 和 [MiRemoteVoice 的 ATVV 资料](https://github.com/VincentKingHsu/MiRemoteVoice)。Untitled 原生实现使用本仓库的 MIT 许可。虚拟麦克风使用随宿主提供的 [Untitled HAL 驱动](../../Tools/SharingMicrophone/README.md)。
+参考 [SayAll 技术文档](https://github.com/HD838A/remote-mic-app/blob/main/TECHNICAL.md)、[RC001 兼容记录](https://github.com/HD838A/remote-mic-app/blob/main/Bugs/2026-08-08-rc001-voice-remote-compatibility.md) 和 [MiRemoteVoice 的 ATVV 资料](https://github.com/VincentKingHsu/MiRemoteVoice)。Untitled 原生实现使用本仓库的 MIT 许可。虚拟麦克风使用随宿主提供的 [Untitled HAL 驱动](../peripheral-sharing/Tools/SharingMicrophone/README.md)。
 
 自动测试覆盖设备名称、配对确认和取消、发现多个候选时由用户选择、协商、ADPCM 分片、启动门禁、松键尾音、无驱动试音、权限拒绝、停用和从 1.0.0 升级。未配对设备发现、蓝牙配对、实物按键收音与实际 HAL 输入仍需要在 RC001 或 RC003 上验证。

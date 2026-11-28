@@ -1,13 +1,13 @@
 import AppKit
 
-enum AppAppearance: String, CaseIterable, Identifiable {
+package enum AppAppearance: String, CaseIterable, Identifiable {
     case system
     case light
     case dark
 
-    var id: String { rawValue }
+    package var id: String { rawValue }
 
-    var title: String {
+    package var title: String {
         switch self {
         case .system: "跟随系统"
         case .light: "浅色"
@@ -15,7 +15,7 @@ enum AppAppearance: String, CaseIterable, Identifiable {
         }
     }
 
-    var appKitAppearance: NSAppearance? {
+    package var appKitAppearance: NSAppearance? {
         switch self {
         case .system: nil
         case .light: NSAppearance(named: .aqua)

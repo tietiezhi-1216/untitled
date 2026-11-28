@@ -21,9 +21,10 @@
 | `templates` | 用户添加操作时的模板，包含 `id`、`title`、`action` |
 | `permissions` | 0.5.0+ 插件显式声明所需权限；无需权限时为 `[]` |
 | `ui` | 界面协议：`version: 1`、可选 SF Symbol `icon`、`slots` 和 `panels` |
+| `styles` | 0.13.51+ 可选的版本化样式数据；仅能使用该插件已声明动作对应的注册样式，例如 [`doubao.hud`](doubao-speech-input/README.md#独立更新浮条样式) |
 | `icon` | 0.11.0+ 商店、侧栏和页头共用的图标：`symbol`、`tint` 与可选内嵌 PNG |
 
-支持动作：`openApplication`、`openURL`、`runShortcut`、`showMainWindow`、`captureRegion`、`captureWindow`、`captureScreen`、`captureScrolling`、`captureRecording`、`pinClipboard`、`togglePins`、`captureHistory`。安装、注册界面或加载清单不会执行这些动作；显式声明的默认操作会在安装时注册快捷键。
+支持动作：`openApplication`、`openURL`、`runShortcut`、`showMainWindow`、`captureRegion`、`captureWindow`、`captureScreen`、`captureScrolling`、`captureRecording`、`pinSelection`、`togglePins`、`captureHistory`。安装、注册界面或加载清单不会执行这些动作；显式声明的默认操作会在安装时注册快捷键。
 
 0.13.1+ 支持 `pinSelection`，由截图选区窗口处理已配置的贴图键。其他截图全局快捷键以非独占方式注册。宿主内同一组合键只能绑定一个启用的操作。两个应用以非独占方式注册同一键位时都可能响应，独占注册方可能先收到按键。让出键位后可通过「暂停截图快捷键 → 恢复截图快捷键」重新注册。
 
@@ -31,15 +32,15 @@
 
 0.13.52+ 支持原生[无线麦](wireless-microphone/README.md)。`shareWirelessMicrophone` 能力注册 `wirelessMicrophone.dashboard` 组件和 `wirelessMicrophone.toggle` 命令。无线麦使用宿主的蓝牙权限连接小米遥控器，可将按住语音键时的声音送入用户显式安装的虚拟音频驱动。
 
-0.9.8+ 支持原生[豆包语音输入](doubao-speech-input/README.md)：`toggleDoubaoDictation`、`holdDoubaoDictation`、`cancelDoubaoDictation`，以及 `doubao.dictation` / `doubao.preferences` 组件、`doubao.toggle` / `doubao.cancel` 命令。清单使用最低宿主 0.9.8；切换与按住两种操作各自使用通用默认模板，按住动作由 Carbon 的按下 / 松开事件驱动，重绑、停用会结束未松开的动作。安装或渲染界面不录音、不联网；实际采集与实时输入通过绑定插件身份的麦克风 / 辅助功能权限客户端检查。禁用、升级、卸载和退出停止本插件的设备、连接、任务与黑白非激活浮条。ZIP 不携带动态原生代码。
+0.9.8+ 支持原生[豆包语音输入](doubao-speech-input/README.md)：`toggleDoubaoDictation`、`holdDoubaoDictation`、`cancelDoubaoDictation`，以及 `doubao.dictation` / `doubao.preferences` 组件、`doubao.toggle` / `doubao.cancel` 命令。清单使用最低宿主 0.9.8；切换与按住两种操作各自使用通用默认模板，普通按键与独立修饰键按各自通道分派按下 / 松开事件，重绑、停用会结束未松开的动作。安装或渲染界面不录音、不联网；实际采集与实时输入通过绑定插件身份的麦克风 / 辅助功能权限客户端检查。禁用、升级、卸载和退出停止本插件的设备、连接、任务与非激活浮条。ZIP 不携带动态原生代码。
 
-0.10.0 部署构建对语音实时上屏设置生产默认关闭的 readiness gate。0.10.1 的豆信 1.1.1 自测版保留 `realtimeInputVerified: false`，另提供用户明确 opt-in 的私有 `experimentalRealtimeInput` 偏好，旧 JSON 默认 false；安装 / 升级不自动开启。未 opt-in 的实时热键仍在权限 / 录音 / 联网前拒绝，显式试音仅预览仍可用。开启自测只是允许用户尝试，不代表端到端已验收，不改原绑定或增加权限；不能把 fake 输入测试或其他插件测试当作实时上屏验收。
+0.13.38 / 语音输入 1.2.9 起，无需预先聚焦输入框即可开始。实时草稿只更新非激活气泡；收到定稿后才定位此刻的可编辑输入框并尝试插入一次，没有安全目标或未获写入确认则复制完整定稿。取消或没有定稿不动剪贴板，不安装 / 切换输入法。未改选的设备、命令绑定和历史不迁移；默认在本机保留最近 100 条定稿，可调上限或清空。
 
 ## 商店展示、图标与文档（0.12.0+）
 
-商店采用 App Store 风格：左侧提供搜索、插件商店和「我的插件」快捷入口，右侧为两列图文卡片，不另设已安装页。每张卡片上方显示图标、名称、作者和「获取 / 打开 / 更新」按钮，下方展示宣传图。点击图标、名称或宣传图打开 README 与信息详情；没有评分与下载量来源时不显示虚构数值。筛选菜单提供排序、仅未安装、刷新与 ZIP 导入，安装和打开不自动采集或申请系统权限。
+商店采用 App Store 风格：左侧提供搜索、插件商店和「我的插件」快捷入口，不另设已安装页，右侧为两列图文卡片。每张卡片上方显示图标、名称、作者和「获取 / 打开 / 更新」按钮，下方展示宣传图。点击图标、名称或宣传图打开 README 与信息详情；没有评分与下载量来源时不显示虚构数值。筛选菜单提供排序、仅未安装、刷新与 ZIP 导入，安装和打开不自动采集或申请系统权限。
 
-名称直接表达用途，完整能力、权限、兼容限制和使用步骤写入 README。内置名称为「快捷键」「语音输入」「截图」「外设共享」「无线麦」；插件 ID、操作 ID 与用户配置保持稳定。
+名称直接表达用途，完整能力、权限、兼容限制和使用步骤写入 README。内置名称为「快捷键」「语音输入」「截图」「键鼠共享」「无线麦」；插件 ID、操作 ID 与用户配置保持稳定。
 
 ```json
 "icon": {"symbol": "waveform", "tint": "#D77A36", "png": "<base64 PNG>"},
@@ -47,7 +48,7 @@
   "category": "语音与文本",
   "categorySymbol": "waveform",
   "headline": "说出来，\n就成文字",
-  "caption": "快捷键听写；实验性实时输入需开启",
+  "caption": "快捷键实时听写；识别历史可复制",
   "jpeg": "<base64 JPEG>"
 }
 ```
@@ -76,9 +77,11 @@ README 使用 UTF-8 Markdown，最大 128 KiB，包含用途、步骤、权限�
 | `footer.leading` / `footer.trailing` | 页面底部两侧 |
 | `menuBar` | 系统菜单栏里的插件子菜单 |
 
-**宿主内容边界（0.9.7+）**：软件本体为插件主内容提供左右各 28 pt、上下各 16 pt 的固定留白，内容与页面标题、工具栏、页脚对齐。宿主显式限定可用尺寸并裁剪越界绘制，插件的固定尺寸或偏移不能把面板画进外侧留白。组件只负责内部卡片/行间距，无需再补整页边距。标签页和内嵌面板继承已有边界，不重复叠加；独立 sheet/popover 会建立自己的边界，调整窗口大小后仍有效。原生组件若兼顾独立使用，可读取 `EnvironmentValues.pluginContentHasInsets` 避免重复留白；清单不提供取消宿主边界的开关。
+**宿主内容边界（0.9.7+）**：软件本体为插件主内容提供左右各 28 pt、上下各 16 pt 的固定留白，内容与页面标题、工具栏、页脚对齐。宿主显式限定可用尺寸并裁剪越界绘制，插件的固定尺寸或偏移不能把面板画进外侧留白。组件只负责内部卡片/行间距，无需再补整页边距。标签页和内嵌面板继承已有边界，不重复叠加；独立 sheet/popover 会建立自己的边界，调整窗口大小后仍有效。宿主注册的原生组件可在单组件根布局中使用外侧留白放置圆头滚动条，正文仍保留自己的边距。截图历史和商店首页共用内收的样式，有溢出时滑块常显。原生组件若兼顾独立使用，可读取 `EnvironmentValues.pluginContentHasInsets` 避免重复留白；清单不提供取消宿主边界的开关。
 
 插件可以自行选择标题、图标、启停、更多、简介、设置按钮的位置。宿主组件不会自动插入；不声明就不显示。应用级设置始终在侧边栏底部和 macOS 应用菜单中，不占用插件槽位。
+
+**插件操作栏（0.13.2+）**：根布局的 `header.trailing` 使用统一的 32 pt 圆形图标按钮。声明式 `button` 与 `menu` 用 `symbol`（或命令提供的图标），名称保留作提示和辅助功能标签；菜单中的条目仍显示名称。0.13.16+ 由宿主在按钮下方显示悬停标签（包括不可用的命令按钮），打开菜单、点击或移出时收起，不占用版面。原生自定义组件、正文、嵌套面板和普通 `toolbar.*` 槽位不变。`host.more` 排在操作栏末尾并提供启停；旧清单同时声明两者时不再渲染右上角的独立开关。若只声明了 `host.enabled`，右上角会提供可启停的管理菜单。
 
 每个元素必须有全局唯一 `id` 和一种 `kind`：
 
@@ -88,7 +91,7 @@ README 使用 UTF-8 Markdown，最大 128 KiB，包含用途、步骤、权限�
 | `button` | `command` 或 `panel` 二选一，可加 `title`、`symbol`、`style` |
 | `menu` | `title` 与 `items`，内部支持按钮与子菜单 |
 | `panel` | 在 `content` 内嵌一个已定义的 `panel` |
-| `tabs` | 在 `content` 放置分段页面切换，`panels` 为面板 ID 数组 |
+| `tabs` | 在 `content` 放置分段页面切换，`panels` 为面板 ID 数组；`style: "plain"` 在 0.13.4+ 使用紧凑的左对齐分段控件 |
 
 命令按钮默认使用命令提供的动态名称和图标，例如录屏中的“停止录屏”。`title` / `symbol` 可覆盖默认值；仅图标的面板按钮省略 `title`。`style` 可选 `plain`、`standard`（默认）、`prominent`。菜单栏只支持命令按钮和菜单。
 
@@ -142,12 +145,14 @@ struct ExampleProvider: PluginUIProvider {
 | `host.icon` / `host.identity` | 插件图标、名称和版本 |
 | `host.enabled` / `host.more` / `host.info` | 启停、权限与能力和源码/卸载菜单、插件详情 |
 | `host.commandHeading` / `host.addCommand` / `host.commands` / `host.commandStatus` | 操作标题、添加、列表、状态提示 |
+| `host.compactCommands` | 紧凑操作列表（0.13.4+）；点击一行编辑，执行与删除位于右键菜单 |
 | `capture.history` / `capture.status` | 截图历史、数量；需要 `captureHistory` |
 | `capture.preferences` | 截图设置；需要 `captureRegion` |
+| `capture.options` / `capture.localShortcuts` | 截图通用设置、编辑与贴图快捷键（0.13.5+）；需要 `captureRegion` |
 
-命令：`host.openPlugin`；`capture.region`、`capture.window`、`capture.screen`、`capture.scrollVertical`、`capture.scrollHorizontal`、`capture.record`、`capture.pinClipboard`、`capture.togglePins`、`capture.history`、`capture.importImage`。分别需要相应截图动作；导入需要 `captureRegion`。
+命令：`host.openPlugin`；`capture.region`、`capture.window`、`capture.screen`、`capture.scrollVertical`、`capture.scrollHorizontal`、`capture.record`、`capture.pinSelection`、`capture.togglePins`、`capture.history`、`capture.importImage`。分别需要相应截图动作；导入需要 `captureRegion`。
 
-当前 ZIP 是声明式扩展包，可自由组合已注册的原生能力与界面。新增全新的原生组件或命令需实现 provider 并随宿主编译；本版不动态加载 Swift 二进制、JavaScript 或 Shell。v1 包只在兼容适配器中生成旧版布局，v2 原样采用清单中的布局。
+当前 ZIP 是声明式扩展包，可自由组合已注册的原生能力与界面。新增原生能力由 `Plugins/<slug>/Sources/` 自己实现，在组合入口登记组件、命令及生命周期；Swift Package 和 Xcode 将信任的内置模块编入应用。本版不动态加载 Swift 二进制、JavaScript 或 Shell。v1 包只在兼容适配器中生成旧版布局，v2 原样采用清单中的布局。见 [宿主与插件边界](../docs/PLUGIN-BOUNDARY.md)。
 
 ## 文件、剪贴板与本地通知（0.13.53+）
 
@@ -178,7 +183,9 @@ struct ExampleProvider: PluginUIProvider {
 
 显式声明需要 `minimumHostVersion: "0.5.0"` 或更高；此版本及以上的插件必须包含 `permissions`。最多 32 项，ID 无重复，每项用途 1–240 字。`optional` 表示按功能选项使用，默认 false；所有权限仍然在实际操作时检查，不会因为安装或启用插件就请求授权。旧包通过原生能力的兼容声明继续使用。
 
-当前宿主管理 `system.screenRecording`、`system.accessibility`、`system.inputMonitoring`、`system.camera`、`system.microphone` 和 `system.notifications`。全局热键采用 Carbon 注册，不需要输入监控或辅助功能授权。
+当前宿主管理：`system.screenRecording`、`system.accessibility`、`system.inputMonitoring`、`system.camera`、`system.microphone`、`system.notifications`。普通全局键盘快捷键采用 Carbon 注册，不需要输入监控或辅助功能授权。全局鼠标侧键使用单独的鼠标事件监听，需要宿主的辅助功能授权，不要求开启键盘优先模式。
+
+宿主 0.13.3+ 可由用户从菜单栏 Untitled →「快捷键」→「优先使用插件快捷键…」明确开启优先模式；0.12.1–0.13.2 的入口在应用通用设置。这是独立的宿主命令触发模式，使用辅助功能授权的 active event tap，不修改清单、默认绑定或插件权限，也不向插件提供原始输入。匹配时尝试阻止下游响应；安全输入及其他过滤器可能限制优先级。按键重绑、录制、停用和退出均清理逻辑动作，共享交接/控制期间普通快捷键让行，失败显示回退状态。权限边界与预算见[宿主优先模式](../docs/PERMISSIONS.md#宿主快捷键优先模式0121)。
 
 插件只调用绑定到自身身份的客户端：
 
@@ -214,7 +221,11 @@ python3 scripts/package-plugins.py --tag v1.0.0 --plugin my-plugin --repository 
 
 ### 默认动作（宿主 0.6.0+）
 
-模板可选声明 `installByDefault: true` 和 `defaultHotKey: {"keyCode":18,"modifiers":4096,"key":"1"}`。键码使用 macOS 虚拟键码，修饰键使用 Carbon 位掩码；默认全局按键必须包含 ⌘、⌥ 或 ⌃。默认动作不能要求用户先填写目标。同一清单的默认组合键不能重复，声明这些字段时请设置 `minimumHostVersion` 至少为 `0.6.0`。
+模板可选声明 `installByDefault: true` 和 `defaultHotKey: {"keyCode":18,"modifiers":4096,"key":"1"}`。键码使用 macOS 虚拟键码，修饰键使用 Carbon 位掩码；原有组合键格式与标识不变。默认动作不能要求用户先填写目标，同一清单的默认绑定不能重复。旧格式默认动作要求 `minimumHostVersion` 至少为 `0.6.0`。
+
+**0.13.29+**：所有插件的全局操作默认可绑定普通单键（例如 Space、F8、A）、组合键（包括仅加 ⇧）或鼠标侧键。键盘示例：`{"keyCode":100,"modifiers":0,"key":"F8"}`；第一枚侧键：`{"mouseButton":3,"modifiers":0}`，第二枚为 4，也可加修饰键。侧键编号使用系统 button number 3–31，不包括左、右、中键。**0.13.31+** 另支持独立右 ⌘（`{"keyCode":54,"modifiers":0,"key":"右 ⌘"}`，属于 `singleKey`，随包预设时最低宿主也须为 0.13.31）。**0.13.32+** 支持独立右 ⌃（`{"keyCode":62,"modifiers":0,"key":"右 ⌃"}`）。按住类动作单独持键约 0.2 秒才启动，其他动作单独松开时触发；组合键始终放行。语音 1.2.4 将右 ⌘作为「按住说话」的默认键，其他操作可改为右 ⌃。独立修饰键只订阅修饰键状态变化，不读取组合键中的字符；其余独立修饰键或硬件媒体功能不是普通键盘按键；系统保留或鼠标驱动改写的输入未必能到达应用。键盘和鼠标不共用冲突标识。按住/松开由操作决定，录制器收到匹配的松开才完成绑定。
+
+插件可以在 v2 清单顶层声明 `"shortcutInputs":["keyCombination"]` 等白名单；取值为 `singleKey`、`keyCombination`、`mouseButton`，省略即全部允许，空数组仅停用快捷键而不禁止手动运行。声明白名单或随包预设新类型需要最低宿主 **0.13.29**；用户在新版中给既有插件重绑不必升级插件。更严格的插件升级不会删除原绑定，而会停止注册并在操作旁显示原因。原生 provider 也可验证命令的业务约束。
 
 宿主安装或升级时按模板 ID 初始化一次；已编辑、清空、停用或删除的默认操作在后续升级中保持原样。旧配置会按动作匹配到模板，保留原操作 ID。冲突时不会覆盖其他操作，新动作不绑定并显示提示。`host.restoreDefaultCommands` 命令显式恢复默认模板，保留其他自建操作。此机制对所有插件通用。
 

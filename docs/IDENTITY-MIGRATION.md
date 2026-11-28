@@ -46,7 +46,7 @@ macOS 可能要求用户允许新代码身份访问旧 Keychain；此权限不�
 应用构建仅生成随包驱动，不安装。用户明确选择升级时运行：
 
 ```bash
-sudo ./Tools/SharingMicrophone/install.sh install "dist/SharingMicrophone/UntitledMicrophone.driver"
+sudo ./Plugins/peripheral-sharing/Tools/SharingMicrophone/install.sh install "dist/SharingMicrophone/UntitledMicrophone.driver"
 ```
 
 安装器验证新包签名与元数据，也核对固定历史路径中的身份；确认后将新旧现有包移至 `/Library/Application Support/com.untitled.app/AudioDriverBackups/` 的 root 私有备份，再装入新包。失败尝试回滚两者，备份不会随临时目录删除。卸载同时移出已验证的历史驱动与新驱动。不会下载或执行包内 helper，不重启音频服务、不修改默认音频设备、不关闭系统安全功能。

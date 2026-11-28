@@ -1,8 +1,8 @@
 {
   "schemaVersion": 2,
   "id": "com.untitled.peripheral-sharing",
-  "name": "外设共享",
-  "version": "1.4.4",
+  "name": "键鼠共享",
+  "version": "1.4.5",
   "summary": "在两台 Mac 之间共享键盘和鼠标。",
   "author": "tietiezhi-1216",
   "repository": "https://github.com/tietiezhi-1216/untitled",

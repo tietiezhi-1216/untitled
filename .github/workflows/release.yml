@@ -30,7 +30,10 @@ concurrency:
 
 jobs:
   plan:
-    if: ${{ github.ref == 'refs/heads/main' && !github.event.repository.fork }}
+    if: >-
+      ${{ github.ref == 'refs/heads/main' && !github.event.repository.fork
+          && (vars.UNTITLED_AUTO_RELEASES_ENABLED == 'true'
+              || (github.event_name == 'workflow_dispatch' && inputs.dry_run)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

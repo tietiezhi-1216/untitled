@@ -2,7 +2,12 @@ import AppKit
 import Foundation
 import SwiftUI
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 @Suite(.serialized)
 struct PluginMarketplaceTests {
@@ -183,11 +188,23 @@ struct PluginMarketplaceTests {
                 #expect(cards.allSatisfy { $0.minY >= controls.maxY && $0.minX >= 27 && $0.maxX <= width - 27 })
                 let firstRow = cards.filter { abs($0.minY - (cards.first?.minY ?? 0)) < 1 }
                 #expect(firstRow.count == 2)
+                let scroll = try #require(galleryScroll(in: host))
+                let indicator = try #require(scroll.verticalScroller as? PanelGalleryScroller)
+                let indicatorFrame = indicator.convert(indicator.bounds, to: host)
+                let lastCardEdge = try #require(cards.map(\.maxX).max())
+                #expect(abs(host.bounds.maxX - indicatorFrame.maxX - 8) < 1)
+                #expect(indicatorFrame.minX - lastCardEdge >= 7)
+                #expect(scroll.scrollerStyle == .legacy && !scroll.autohidesScrollers)
+                if appearance == .darkAqua && width == 815 {
+                    try await Task.sleep(for: .milliseconds(1250))
+                }
+                #expect(indicator.isEnabled && !indicator.isHiddenOrHasHiddenAncestor && indicator.alphaValue == 1)
                 try snapshot(host, filename: "store-\(appearance.rawValue)-\(Int(width)).png")
                 navigation.search = "语音输入"
                 await settle(host, window: window)
                 let matches = observation.frames.keys.filter { $0.hasPrefix("store.card.") && !$0.hasSuffix(".header") && !$0.hasSuffix(".identity") && !$0.hasSuffix(".action") && !$0.hasSuffix(".preview") }
                 #expect(matches.count == 1)
+                #expect(!indicator.isEnabled)
                 if appearance == .darkAqua && width == 815 {
                     navigation.search = "效率工具"
                     await settle(host, window: window)
@@ -242,6 +259,11 @@ struct PluginMarketplaceTests {
                           minimumHostVersion: String = "0.2.0") -> PluginManifest {
         PluginManifest(schemaVersion: 1, id: id, name: name, version: version, summary: "简洁的功能说明。", author: author,
                        repository: HostInfo.repository, minimumHostVersion: minimumHostVersion, actions: [.showMainWindow], templates: [])
+    }
+
+    @MainActor private func galleryScroll(in view: NSView) -> NSScrollView? {
+        if let scroll = view as? NSScrollView, scroll.verticalScroller is PanelGalleryScroller { return scroll }
+        return view.subviews.lazy.compactMap { galleryScroll(in: $0) }.first
     }
 
     @MainActor private func makeWindow(_ host: NSView, width: CGFloat) -> NSWindow {

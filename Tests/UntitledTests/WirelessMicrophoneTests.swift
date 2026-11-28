@@ -1,7 +1,10 @@
 import Foundation
 import Testing
 
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginSharing
+@testable import UntitledComposition
 
 @Suite(.serialized) struct WirelessMicrophoneTests {
     @Test func recognizesSupportedRemoteNames() {
@@ -151,7 +154,7 @@ import Testing
         defer { fixture.cleanup() }
         fixture.driver.state = .denied
         #expect(throws: HostPermissionError.self) {
-            try fixture.store.performWirelessMicrophoneAction(pluginID: fixture.manifest.id)
+            try fixture.toggle()
         }
         #expect(fixture.link.discoveries == 0)
         #expect(fixture.store.permissions.pendingRequest?.permissions == [.bluetooth])
@@ -186,7 +189,7 @@ import Testing
         try fixture.store.installManifest(fixture.manifest)
         let upgraded = try #require(fixture.store.installed.first)
         #expect(upgraded.manifest.id == "com.untitled.wireless-microphone")
-        #expect(upgraded.manifest.version == "2.0.1")
+        #expect(upgraded.manifest.version == fixture.manifest.version)
         #expect(upgraded.commands == [command])
         #expect(upgraded.manifest.permissions?.map(\.id) == [.bluetooth])
         #expect(fixture.link.discoveries == 0)
@@ -216,6 +219,7 @@ import Testing
         let driver = TestPermissions()
         let store: PluginStore
         let controller: WirelessMicrophoneController
+        let runtime: WirelessMicrophonePluginRuntime
 
         init(installLegacy: Bool = false) throws {
             let data = try Data(contentsOf: URL(fileURLWithPath: "Plugins/wireless-microphone/manifest.json"))
@@ -233,11 +237,14 @@ import Testing
             } else {
                 try store.installManifest(manifest)
             }
-            controller = store.wirelessMicrophone(for: manifest.id)
+            runtime = try #require(store.runtime.owner(of: .shareWirelessMicrophone) as? WirelessMicrophonePluginRuntime)
+            controller = runtime.controller(for: manifest.id, in: store)
         }
 
+        func toggle() throws { try runtime.toggle(pluginID: manifest.id, in: store) }
+
         func connect() throws {
-            try store.performWirelessMicrophoneAction(pluginID: manifest.id)
+            try toggle()
             link.emit(.devices([device]))
             try controller.connect(device.id)
             #expect(link.connectedID == device.id)

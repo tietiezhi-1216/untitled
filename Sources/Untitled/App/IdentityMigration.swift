@@ -1,9 +1,10 @@
 import AppKit
+import UntitledPluginSDK
 import Foundation
 
 /// Historical identifiers are import inputs only, never runtime aliases.
 /// Moves assets without loading/copying model or media payloads; JSON is capped at 16 MiB.
-enum IdentityMigration {
+package enum IdentityMigration {
     static let legacyBundleID = "com.tietiezhi.tools"
     static let completionKey = "identityMigration.completed.v1"
     static let pluginIDs = [
@@ -34,7 +35,8 @@ enum IdentityMigration {
         return PluginManifest(schemaVersion: value.schemaVersion, id: id, name: value.name, version: value.version,
                               summary: value.summary, author: value.author, repository: value.repository,
                               minimumHostVersion: value.minimumHostVersion, actions: value.actions,
-                              templates: value.templates, ui: value.ui, permissions: value.permissions, icon: value.icon, storefront: value.storefront)
+                              templates: value.templates, ui: value.ui, permissions: value.permissions, icon: value.icon, storefront: value.storefront,
+                              shortcutInputs: value.shortcutInputs, styles: value.styles)
     }
 
     /// Keep published URLs, versions and SHA-256 intact; only the installed identity changes.
@@ -44,7 +46,7 @@ enum IdentityMigration {
                             author: value.author, downloadURL: value.downloadURL, sha256: value.sha256, icon: value.icon, storefront: value.storefront)
     }
 
-    @MainActor static func prepare() throws {
+    @MainActor package static func prepare() throws {
         let defaults = UserDefaults.standard
         guard NSRunningApplication.runningApplications(withBundleIdentifier: legacyBundleID).isEmpty else {
             throw PluginError.invalid("请先退出旧版本，再重新打开 Untitled；两个身份不能同时写入数据或配对信息。")
@@ -170,7 +172,7 @@ enum IdentityMigration {
     }
 
     /// Custom output folders migrate their index on the next explicit save, not at app launch.
-    static func migrateExportIndex(in folder: URL) throws {
+    package static func migrateExportIndex(in folder: URL) throws {
         let source = folder.appendingPathComponent(".tietiezhi-exports.json")
         guard exists(source) else { return }
         let destination = folder.appendingPathComponent(".untitled-exports.json")

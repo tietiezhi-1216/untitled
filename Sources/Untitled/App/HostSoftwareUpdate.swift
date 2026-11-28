@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import UntitledPluginSDK
 
 struct HostInstalledVersion: Equatable, Sendable {
     let version: String
