@@ -11,7 +11,7 @@
 
 插件商店采用 App Store 风格的左侧搜索与导航，右侧为两列展示区。页面标题与筛选菜单同排；已安装插件可从侧栏「我的插件」直接打开，不另设已安装页，下方每个插件用图标、名称、作者和胶囊形获取按钮组成条目头部，再展示 1.6:1 宣传大图。列间距 26 pt，行间距 34 pt，窗口变宽仍保持两列；最小 880 pt 主窗口下也保留双列。图片与文案声明来自通用注册数据，界面不按插件 ID 编排。宣传图全部通过 Codex 内置图像工具生成，来源与提示词见 Resources/StoreArtwork/README.md。
 
-窗口采用低透色的中性材质：深色模式以石墨黑为底，浅色模式使用对应的浅灰色，侧栏与正文只有轻微明暗差。原生 `underWindowBackground` 背景保留少量桌面层次，避免壁纸颜色大幅染色。玻璃效果集中在搜索与操作控件；Xcode 26+（或包含 macOS 26+ SDK 的命令行工具）构建时使用官方 `glassEffect`、`.glass` / `.glassProminent`，配合收敛的圆角、选中态细边缘和蓝色重点操作。开启系统“减少透明度”或增加对比度时提高背景遮罩的不透明度。macOS 14–15 或旧 SDK 构建保留兼容样式。
+窗口采用低透色的中性材质：深色模式以石墨黑为底，浅色模式使用对应的浅灰色，侧栏与正文只有轻微明暗差。原生 `underWindowBackground` 背景保留少量桌面层次，避免壁纸颜色大幅染色。玻璃效果集中在搜索与操作控件；Xcode 26+（或包含 macOS 26+ SDK 的命令行工具）构建时使用官方 `glassEffect`、`.glass` / `.glassProminent`，配合收敛的圆角、选中态细边缘和蓝色重点操作。开启系统“减少透明度”或增加对比度时提高背景遮罩的不透明度。macOS 14–15 运行时保留兼容样式。
 
 设计依据：[Apple Liquid Glass 采用指南](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass)、[材质规范](https://developer.apple.com/design/human-interface-guidelines/materials)。
 
@@ -33,6 +33,8 @@ swift test --no-parallel \
   -Xswiftc -load-plugin-library \
   -Xswiftc /Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib
 ```
+
+应用打包以 `xcrun --sdk macosx` 选出的 SDK 为准，最低构建 SDK 为 26，本机工具链为 27.0。需要更新 SDK 时请更新或切换 Xcode / Command Line Tools，无需更改最低运行版本 macOS 14.0。`build-app.sh` 在签名前校验主程序、WebP helper 和随包音频驱动各架构的 Mach-O SDK 与最低版本。CI 使用 `macos-26` 运行器上的工具链。
 
 构建结果位于 `dist/debug/Untitled.app` 或 `dist/release/Untitled.app`，使用当前 Mac 的架构。命令行与 Xcode 均不启用 App Sandbox，保留系统隐私授权。图标由 `scripts/build-icon.sh` 从选定的裂变原图生成，随应用打包。
 
@@ -304,6 +306,8 @@ Release0.12.14/build53已沿用签名正常退出旧进程、同卷原子替换 
 318项／19套串行优化Debug回归及原180ms十轮4K释放检查完成；优化Debug不等于Release测试。用户视频内容仅私有暂存，不写入仓库或发布物。实际Paseo初步矩形对照、受控原生ScreenCaptureKit呈现、最终用户原场景复测是不同层级的证据，不把合成命中或未覆盖的窗口／屏幕条件宣称为实际场景验收。详见忽略的`dist/performance/capture-hover-padding/README.md`。
 
 ## 发布次序
+
+跨设备安装、公证与签名身份连续性见[签发机流程](RELEASE-WORKER.md)。验收签发不更新在线插件目录，也不替代正式发布。
 
 先固定源码提交，完成测试、Release 构建、插件包与完整 Xcode CI，再从同一个提交生成应用 ZIP。确认包中版本、架构、图标、许可证和签名，生成 SHA-256；发布资产不能混入 `dist/plugins/` 中旧版本的历史 ZIP。
 
