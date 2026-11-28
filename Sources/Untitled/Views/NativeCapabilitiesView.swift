@@ -61,7 +61,9 @@ struct NativeCapabilitiesView: View {
             }
             GroupBox {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(group.summary).font(.callout).foregroundStyle(.secondary)
+                    if let summary = group.summary {
+                        Text(summary).font(.callout).foregroundStyle(.secondary)
+                    }
                     if plugins.isEmpty {
                         Button("浏览插件商店", action: openStore)
                     } else {
@@ -97,16 +99,24 @@ struct NativeCapabilitiesView: View {
         }
     }
 
-    private static let pluginGroups: [(title: String, symbol: String, summary: String, actions: [ActionKind])] = [
-        ("应用与快捷指令", "command", "启动应用、打开网页、运行 macOS 快捷指令及全局热键。",
-         [.openApplication, .openURL, .runShortcut, .showMainWindow]),
-        ("屏幕、图像与录制", "display", "截图、长截图、贴图和录屏，支持本地 OCR、摄像头画中画及音频选项。",
-         ActionKind.allCases.filter(\.isScreenshotAction)),
-        ("麦克风与听写", "mic", "语音输入插件可用麦克风听写并处理定稿。",
-         [.toggleDoubaoDictation, .holdDoubaoDictation, .cancelDoubaoDictation]),
-        ("外设与局域网", "network", "经过配对的 Mac 可以共享键鼠，按需同步麦克风。",
-         [.sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing]),
-    ]
+    private typealias PluginGroup = (title: String, symbol: String, summary: String?, actions: [ActionKind])
+
+    private static let pluginGroups: [PluginGroup] = {
+        var groups: [PluginGroup] = [
+            ("应用与快捷指令", "command", "启动应用、打开网页、运行 macOS 快捷指令及全局热键。",
+             [.openApplication, .openURL, .runShortcut, .showMainWindow]),
+            ("屏幕、图像与录制", "display", "截图、长截图、贴图和录屏，支持本地 OCR、摄像头画中画及音频选项。",
+             ActionKind.allCases.filter(\.isScreenshotAction)),
+            ("麦克风与听写", "mic", "语音输入插件可用麦克风听写并处理定稿。",
+             [.toggleDoubaoDictation, .holdDoubaoDictation, .cancelDoubaoDictation]),
+            ("外设与局域网", "network", "经过配对的 Mac 可以共享键鼠，按需同步麦克风。",
+             [.sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing]),
+        ]
+        let groupedActions = Set(groups.flatMap(\.actions))
+        let otherActions = ActionKind.allCases.filter { !groupedActions.contains($0) }
+        if !otherActions.isEmpty { groups.append(("其他能力", "puzzlepiece.extension", nil, otherActions)) }
+        return groups
+    }()
 
     private static let gaps: [(title: String, symbol: String, summary: String)] = [
         ("目录与磁盘访问", "folder", "持续的目录授权、文件批处理与完全磁盘访问管理。"),
