@@ -125,6 +125,44 @@ struct CaptureCompletionTests {
         #expect(completions == 1 && view.postAction == .copy)
     }
 
+    @Test(arguments: [true, false])
+    func commandCAfterDraggingCopiesTheSelectionBeforeTheAppMenu(eventTargetsPanel: Bool) throws {
+        let application = NSApplication.shared
+        let previousMenu = application.mainMenu
+        defer { application.mainMenu = previousMenu }
+        let copyTarget = CopyMenuTarget()
+        let menu = NSMenu()
+        let edit = NSMenu(title: "Edit")
+        let copy = edit.addItem(withTitle: "Copy", action: #selector(CopyMenuTarget.copy(_:)), keyEquivalent: "c")
+        copy.target = copyTarget
+        menu.addItem(withTitle: "Edit", action: nil, keyEquivalent: "").submenu = edit
+        application.mainMenu = menu
+
+        let panel = CaptureSelectionPanel(contentRect: CGRect(x: 80, y: 80, width: 640, height: 420),
+                                          styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
+        defer { panel.close(); panel.contentView = nil }
+        let view = CaptureSelectionView(image: try image(width: 640, height: 420), allowsShapes: true)
+        panel.contentView = view
+        panel.makeKeyAndOrderFront(nil)
+        let commandC = try key(8, "c", flags: .command, in: eventTargetsPanel ? panel : nil)
+        #expect(!panel.performKeyEquivalent(with: commandC))
+        try drag(view, from: CGPoint(x: 30, y: 30), to: CGPoint(x: 230, y: 150))
+        try #require(panel.isKeyWindow && view.session.hasSelection)
+
+        let field = NSTextField(string: "Caption")
+        field.frame = CGRect(x: 16, y: 16, width: 120, height: 24)
+        view.addSubview(field)
+        try #require(panel.makeFirstResponder(field))
+        try #require(field.currentEditor() != nil)
+        #expect(!view.handleCopyKeyEquivalent(commandC))
+        try #require(panel.makeFirstResponder(view))
+        application.sendEvent(commandC)
+
+        #expect(view.postAction == .copy)
+        #expect(copyTarget.count == 0)
+    }
+
     @Test(arguments: [CaptureShortcutAction.copy, .copyAndClose])
     func copyingAnnotatedImageClosesBothPanelsAndRetainsTheLatestPixels(action: CaptureShortcutAction) throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("CaptureCopy-" + UUID().uuidString)
@@ -238,9 +276,9 @@ struct CaptureCompletionTests {
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: view.window?.windowNumber ?? 0,
             context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
     }
-    private func key(_ code: UInt16, _ characters: String, flags: NSEvent.ModifierFlags = [], in window: NSWindow) throws -> NSEvent {
+    private func key(_ code: UInt16, _ characters: String, flags: NSEvent.ModifierFlags = [], in window: NSWindow?) throws -> NSEvent {
         try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
-            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window?.windowNumber ?? 0,
             context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code))
     }
     private func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
@@ -249,4 +287,9 @@ struct CaptureCompletionTests {
         context.setFillColor(NSColor.white.cgColor); context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         return try #require(context.makeImage())
     }
+}
+
+private final class CopyMenuTarget: NSObject {
+    private(set) var count = 0
+    @objc func copy(_ sender: Any?) { count += 1 }
 }
