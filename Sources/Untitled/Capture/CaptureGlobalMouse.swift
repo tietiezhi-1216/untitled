@@ -90,8 +90,13 @@ struct CaptureGlobalMousePreferences {
     private var permissions:PluginPermissionClient?
     private var allowed:(()->Bool)?
     private var completion:((CaptureSelection,CaptureGlobalMouseAction) async throws -> Void)?
-    private var service=CaptureService()
+    private let service:CaptureService
     private var generation=0
+    var hasActiveCapture:Bool { startPoint != nil || task != nil }
+    private let readPreferences: () -> CaptureGlobalMousePreferences
+    init(service:CaptureService = CaptureService(), preferences:@escaping () -> CaptureGlobalMousePreferences = { CaptureGlobalMousePreferences() }) {
+        self.service=service;readPreferences=preferences
+    }
 
     func start(isAllowed:@escaping ()->Bool,permissions:PluginPermissionClient,
                completion:@escaping (CaptureSelection,CaptureGlobalMouseAction) async throws -> Void) {
@@ -108,7 +113,7 @@ struct CaptureGlobalMousePreferences {
         catch { status=error is HostPermissionError ? "请在应用权限管理中授权":"\(error.localizedDescription)" }
     }
     private func refresh() {
-        let preferences=CaptureGlobalMousePreferences()
+        let preferences=readPreferences()
         guard preferences.enabled,preferences.hasEnabledBindings,allowed?()==true else { removeTap();clearGesture();status="";return }
         guard AXIsProcessTrusted(),CGPreflightScreenCaptureAccess() else { removeTap();status="需要屏幕录制和辅助功能权限";return }
         guard tap==nil else { return }
@@ -153,7 +158,7 @@ struct CaptureGlobalMousePreferences {
             return true
         }
         guard startPoint==nil,down,task==nil,allowed?()==true else { return false }
-        let prefs=CaptureGlobalMousePreferences()
+        let prefs=readPreferences()
         guard let binding=prefs.match(button:Int(button),flags:event.flags,application:NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""),let original=event.copy() else { return false }
         startPoint=event.location;lastPoint=event.location;initialEvent=original;activeButton=button;action=binding.action
         return true
@@ -172,17 +177,21 @@ struct CaptureGlobalMousePreferences {
         overlay?.setFrame(rect,display:true);overlay?.orderFrontRegardless()
     }
     private func clearGesture() { startPoint=nil;lastPoint=nil;initialEvent=nil;overlay?.orderOut(nil);overlay?.close();overlay=nil }
-    private func capture(_ rect:CGRect,action:CaptureGlobalMouseAction) {
+    func capture(_ rect:CGRect,action:CaptureGlobalMouseAction) {
+        guard task == nil,allowed?()==true,let permissions else { return }
         let current=generation
         task=Task { [weak self] in
-            guard let self,let permissions=self.permissions else { return }
-            defer { self.task=nil }
+            guard let self else { return }
+            defer { if generation==current { self.task=nil } }
             do {
                 try permissions.require([.screenRecording,.accessibility])
                 let selection=try await service.captureGlobalRegion(rect,permissions:permissions)
                 guard !Task.isCancelled,generation==current,allowed?()==true else { return }
                 try await completion?(selection,action)
-            } catch { status=error is HostPermissionError ? "请在应用权限管理中授权":error.localizedDescription }
+            } catch {
+                guard !Task.isCancelled,generation==current else { return }
+                status=error is HostPermissionError ? "请在应用权限管理中授权":error.localizedDescription
+            }
         }
     }
 }

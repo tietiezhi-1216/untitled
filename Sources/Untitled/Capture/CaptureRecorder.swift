@@ -1,6 +1,7 @@
 import AppKit
 @preconcurrency import AVFoundation
 import Combine
+import Darwin
 import ImageIO
 @preconcurrency import ScreenCaptureKit
 import UniformTypeIdentifiers
@@ -8,6 +9,16 @@ import UniformTypeIdentifiers
 struct RecordingOptions: Equatable {
     var fps = 30
     var maximumEdge = 4096
+
+    /// Use the display's own pixels unless the resolution limit is smaller.
+    /// H.264 dimensions are rounded down to the nearest even number.
+    func pixelSize(for points: CGSize, scale: CGFloat) -> CGSize {
+        let width = max(2, points.width * scale), height = max(2, points.height * scale)
+        let factor = min(1, CGFloat(maximumEdge) / max(width, height))
+        return CGSize(width: max(2, Int(width * factor) / 2 * 2),
+                      height: max(2, Int(height * factor) / 2 * 2))
+    }
+
     static var current: Self {
         let defaults = UserDefaults.standard
         let fps = defaults.integer(forKey: "capture.recordingFPS")
@@ -48,10 +59,9 @@ struct RecordingOptions: Equatable {
         errorMessage = nil; recordedTime = 0; segments = []
         let config = SCStreamConfiguration()
         config.sourceRect = selection.rect
-        let width = selection.rect.width * selection.scale, height = selection.rect.height * selection.scale
-        let ratio = min(1, CGFloat(options.maximumEdge) / max(width, height))
-        config.width = max(2, Int(width * ratio) / 2 * 2)
-        config.height = max(2, Int(height * ratio) / 2 * 2)
+        let pixels = options.pixelSize(for: selection.rect.size, scale: max(1, CGFloat(selection.filter.pointPixelScale)))
+        config.width = Int(pixels.width); config.height = Int(pixels.height)
+        config.captureResolution = .best
         config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(options.fps))
         config.showsCursor = false; config.showMouseClicks = false // Cursor and clicks are editable metadata.
         config.capturesAudio = audio; config.excludesCurrentProcessAudio = true
@@ -283,7 +293,7 @@ struct RecordingEditOptions: Equatable, Sendable {
         output.renderSize = CGSize(width: max(2, Int(crop.width) / 2 * 2), height: max(2, Int(crop.height) / 2 * 2))
         let sourceFPS = try await video.load(.nominalFrameRate)
         output.frameDuration = CMTime(value: 1, timescale: Int32(min(60, max(5, sourceFPS.rounded()))))
-        if let events = RecordingEventArchive.read(for: url), !events.events.isEmpty {
+        if options.effects.isEnabled, let events = RecordingEventArchive.read(for: url), !events.events.isEmpty {
             let transform = transform.concatenating(CGAffineTransform(translationX: -oriented.minX - crop.minX, y: -oriented.minY - crop.minY))
             let effects = RecordingEffects.composition(asset: composition, cgTransform: transform, sourceSize: size, outputSize: output.renderSize,
                 orientedSize: oriented.size, crop: crop, frameDuration: output.frameDuration,
@@ -351,8 +361,7 @@ struct RecordingEditOptions: Equatable, Sendable {
                 guard process.terminationStatus == 0 else { throw PluginError.invalid("WebP 编码失败，请尝试缩短片段或降低尺寸。") }
             }.value
         }
-        try Task.checkCancellation()
-        try Data(contentsOf: staged, options: .mappedIfSafe).write(to: destination, options: .atomic)
+        try await publishFile(staged, to: destination)
     }
     static func join(_ urls: [URL], to destination: URL) async throws {
         guard !urls.isEmpty else { throw PluginError.invalid("录屏没有有效片段。") }
@@ -393,6 +402,30 @@ struct RecordingEditOptions: Equatable, Sendable {
             exporter.outputURL = staged; exporter.outputFileType = .mp4; await exporter.export()
             guard exporter.status == .completed else { throw exporter.error ?? PluginError.invalid("视频导出失败。") }
         }
-        try Data(contentsOf: staged, options: .mappedIfSafe).write(to: destination, options: .atomic)
+        try await publishFile(staged, to: destination)
+    }
+
+    /// Stage on the destination volume; don't buffer the movie on the main actor
+    /// or replace an existing file until the entire new file was written.
+    static func publishFile(_ source: URL, to destination: URL) async throws {
+        try Task.checkCancellation()
+        let copying = Task.detached(priority: .userInitiated) {
+            let manager = FileManager.default
+            let staging = destination.deletingLastPathComponent()
+                .appendingPathComponent(".untitled-export-\(UUID().uuidString)", isDirectory: true)
+            try manager.createDirectory(at: staging, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            defer { try? manager.removeItem(at: staging) }
+            let file = staging.appendingPathComponent(destination.lastPathComponent)
+            try manager.copyItem(at: source, to: file)
+            try Task.checkCancellation()
+            let result = file.withUnsafeFileSystemRepresentation { src in
+                destination.withUnsafeFileSystemRepresentation { dst in
+                    guard let src, let dst else { return EINVAL }
+                    return Darwin.rename(src, dst) == 0 ? 0 : errno
+                }
+            }
+            if result != 0 { throw NSError(domain: NSPOSIXErrorDomain, code: Int(result)) }
+        }
+        try await withTaskCancellationHandler { try await copying.value } onCancel: { copying.cancel() }
     }
 }

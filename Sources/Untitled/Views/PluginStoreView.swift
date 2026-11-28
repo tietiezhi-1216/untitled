@@ -118,14 +118,14 @@ struct PluginStoreView: View {
                 }.padding(.horizontal, PanelLayout.contentInset).padding(.bottom, 16)
             }
 
-            ScrollView {
+            PanelGalleryScroll(leadingInset: PanelLayout.contentInset, trailingInset: PanelLayout.contentInset) {
                 LazyVGrid(columns: [GridItem(.flexible(minimum: 250), spacing: 26), GridItem(.flexible(minimum: 250), spacing: 26)],
                           alignment: .leading, spacing: 34) {
                     ForEach(items) { item in
                         PluginStoreCard(item: item, openPlugin: openPlugin) { navigation.selectedID = item.id }
                     }
                 }
-                .padding(.horizontal, PanelLayout.contentInset).padding(.bottom, 36)
+                .padding(.bottom, 36)
             }
             .panelRegion("store.gallery").frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay {

@@ -89,6 +89,11 @@
         ]
       }
     },
+    "shortcutInputs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["singleKey", "keyCombination", "mouseButton"] }
+    },
     "templates": {
       "type": "array",
       "maxItems": 100,
@@ -149,13 +154,14 @@
           "defaultHotKey": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "keyCode",
-              "modifiers",
-              "key"
+            "oneOf": [
+              { "required": ["keyCode", "modifiers", "key"], "not": { "required": ["mouseButton"] } },
+              { "required": ["mouseButton", "modifiers"], "not": { "anyOf": [{ "required": ["keyCode"] }, { "required": ["key"] }] } }
             ],
             "properties": {
+              "mouseButton": { "type": "integer", "minimum": 3, "maximum": 31 },
               "keyCode": {
+                "description": "macOS 虚拟键码；54 搭配 modifiers: 0 是独立右 Command，62 搭配 modifiers: 0 是独立右 Control（最低宿主 0.13.32），属于 singleKey。",
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 127

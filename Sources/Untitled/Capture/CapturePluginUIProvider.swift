@@ -6,24 +6,78 @@ extension PluginManifest {
     var hasCaptureCapability: Bool { actions.contains(where: \.isScreenshotAction) }
 }
 
+/// Deliberate migration of the built-in screenshot plugin to three configurable
+/// commands. Leave every other plugin and all non-shortcut capture capabilities alone.
+enum CaptureShortcutProfile {
+    static let pluginID = "com.untitled.screenshot"
+    static let actions: [ActionKind] = [.captureRegion, .pinSelection, .restorePin]
+
+    static func applies(to manifest: PluginManifest) -> Bool {
+        manifest.id == pluginID && manifest.actions.contains(.pinSelection)
+    }
+
+    static func retainBindings(in record: inout InstalledPlugin, for manifest: PluginManifest) {
+        let templates = manifest.templates.filter { actions.contains($0.action) && $0.installByDefault == true }
+        let before = record.commands
+        record.commands = templates.compactMap { template in
+            let matches = before.filter {
+                $0.action == template.action || (template.action == .pinSelection && $0.action == .pinClipboard)
+            }
+            guard var command = matches.first(where: { $0.templateID == template.id }) ?? matches.first else { return nil }
+            command.action = template.action
+            command.templateID = template.id
+            return command
+        }
+        let ids = Set(templates.map(\.id))
+        record.initializedDefaultTemplateIDs = record.initializedDefaultTemplateIDs?.filter { ids.contains($0) }
+    }
+}
+
 struct CapturePluginUIProvider: PluginUIProvider {
-    nonisolated static func migrateSelectionPinBinding(in record: inout InstalledPlugin, to manifest: PluginManifest) {
-        guard record.id == "com.untitled.screenshot",
-              record.manifest.templates.contains(where: { $0.id == "pin" && $0.action == .pinClipboard }),
-              manifest.templates.contains(where: { $0.id == "pin" && $0.action == .pinSelection }),
-              let index = record.commands.firstIndex(where: { $0.templateID == "pin" && $0.action == .pinClipboard }) else { return }
-        record.commands[index].action = .pinSelection
+    func validateBinding(_ command: PluginCommand, in plugin: InstalledPlugin) throws {
+        guard CaptureShortcutProfile.applies(to: plugin.manifest) else { return }
+        guard CaptureShortcutProfile.actions.contains(command.action),
+              plugin.manifest.templates.contains(where: { $0.id == command.templateID && $0.action == command.action }),
+              !plugin.commands.contains(where: { $0.id != command.id && $0.templateID == command.templateID }) else {
+            throw PluginError.invalid("截图只支持修改已有的三个快捷键。")
+        }
+    }
+    func migrateBindings(in plugin: inout InstalledPlugin, to manifest: PluginManifest, occupiedHotKeys: Set<String>) {
+        if CaptureShortcutProfile.applies(to: manifest) { CaptureShortcutProfile.retainBindings(in: &plugin, for: manifest) }
     }
 
     func register(in registry: PluginUIRegistry) {
-        registry.component("capture.history", requiredActions: [.captureHistory]) { context in
-            AnyView(CaptureHistoryView(pluginID: context.pluginID, capture: context.store.screenshots))
+        registry.component("capture.history", requiredActions: [.captureHistory], usesTrailingScrollGutter: true) { context in
+            let hasFooterStatus = [PluginUISlot.footerLeading, .footerTrailing].contains { slot in
+                context.interface?.items(in: slot).contains { $0.component == "capture.status" } == true
+            }
+            return AnyView(CaptureHistoryView(pluginID: context.pluginID, capture: context.store.screenshots,
+                                              showSummary: !hasFooterStatus))
         }
         registry.component("capture.pins", requiredActions: [.pinClipboard]) { context in
             AnyView(CapturePinsView(manager: context.store.screenshots.pinManager))
         }
+        registry.component("capture.pinLibrary", requiredActions: [.restorePin]) { context in
+            AnyView(CapturePinsView(manager: context.store.screenshots.pinManager))
+        }
+        registry.component("capture.shortcuts", requiredActions: Set(CaptureShortcutProfile.actions)) { context in
+            AnyView(CaptureGlobalShortcutSettingsView(pluginID: context.pluginID))
+        }
         registry.component("capture.preferences", requiredActions: [.captureRegion]) { context in
-            AnyView(ScreenshotSettingsView(mouse: context.store.screenshots.globalMouse, capture: context.store.screenshots))
+            let capture = context.store.screenshots
+            return AnyView(ScreenshotSettingsView(mouse: capture.globalMouse, capture: capture))
+        }
+        registry.component("capture.options", requiredActions: [.captureRegion]) { context in
+            let capture = context.store.screenshots
+            return AnyView(ScreenshotSettingsView(mouse: capture.globalMouse, capture: capture, showLocalShortcuts: false))
+        }
+        registry.component("capture.localShortcuts", requiredActions: [.captureRegion]) { _ in
+            AnyView(
+                ScrollView {
+                    CaptureLocalShortcutSettingsView().padding(.trailing, 12)
+                }
+                .panelRegion("capture.settings.localShortcuts")
+            )
         }
         registry.component("capture.status", requiredActions: [.captureHistory]) { context in
             AnyView(CaptureStatusView(capture: context.store.screenshots))
@@ -43,19 +97,21 @@ struct CapturePluginUIProvider: PluginUIProvider {
                 "capture.\(name)", requiredActions: [action],
                 presentation: { context in
                     let capture = context.store.screenshots
+                    if #unavailable(macOS 15), action == .captureRecording {
+                        return .init(title: "录屏（需要 macOS 15）", symbol: action.symbol, isEnabled: false)
+                    }
                     let title: String =
                         switch name {
                         case "scrollVertical": "纵向长截图"
                         case "scrollHorizontal": "横向长截图"
                         case "record": capture.isRecording ? "停止录屏" : "录屏"
-                        case "pinClipboard": "剪贴板贴图"
                         case "toggleHotKeys": context.store.captureHotKeysPaused ? "恢复截图快捷键" : "暂停截图快捷键"
                         default: action.title
                         }
                     return .init(
                         title: title,
                         symbol: name == "record" && capture.isRecording ? "stop.circle.fill" : action.symbol,
-                        isEnabled: action == .pinSelection || !capture.busy)
+                        isEnabled: !capture.busy || (action == .captureRecording && capture.isRecording))
                 },
                 updates: { context in
                     context.store.screenshots.objectWillChange.eraseToAnyPublisher()
@@ -126,8 +182,8 @@ struct CapturePluginUIProvider: PluginUIProvider {
         case .captureScreen: "capture.screen"
         case .captureScrolling: "capture.scrollVertical"
         case .captureRecording: "capture.record"
-        case .pinClipboard: "capture.pinClipboard"
         case .pinSelection: "capture.pinSelection"
+        case .pinClipboard: "capture.pinClipboard"
         case .togglePins: "capture.togglePins"
         case .captureHistory: "capture.history"
         default: nil

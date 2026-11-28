@@ -17,6 +17,36 @@ enum CaptureSelectionHandle: Int, CaseIterable {
     }
 }
 
+enum CaptureInteractionCursor: Equatable {
+    case arrow, crosshair, openHand, closedHand, text, resize(CaptureSelectionHandle)
+    static func tool(_ tool: CaptureTool) -> Self {
+        switch tool {
+        case .move: .openHand
+        case .select: .arrow
+        case .text, .watermark: .text
+        default: .crosshair
+        }
+    }
+    @MainActor var native: NSCursor {
+        switch self {
+        case .arrow: return .arrow
+        case .crosshair: return .crosshair
+        case .openHand: return .openHand
+        case .closedHand: return .closedHand
+        case .text: return .iBeam
+        case .resize(let handle):
+            if #available(macOS 15, *) {
+                let position: NSCursor.FrameResizePosition = switch handle {
+                case .topLeft: .topLeft; case .top: .top; case .topRight: .topRight; case .right: .right
+                case .bottomRight: .bottomRight; case .bottom: .bottom; case .bottomLeft: .bottomLeft; case .left: .left
+                }
+                return .frameResize(position: position, directions: .all)
+            }
+            return handle == .top || handle == .bottom ? .resizeUpDown : handle == .left || handle == .right ? .resizeLeftRight : .crosshair
+        }
+    }
+}
+
 enum CaptureSelectionGeometry {
     static func constrain(_ rect: CGRect, in bounds: CGRect, minimum: CGFloat = 8) -> CGRect {
         guard !rect.isNull, rect.minX.isFinite, rect.minY.isFinite, rect.width.isFinite, rect.height.isFinite else { return .zero }

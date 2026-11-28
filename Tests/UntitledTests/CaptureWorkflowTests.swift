@@ -8,16 +8,44 @@ struct CaptureWorkflowTests {
     private func manifest() throws -> PluginManifest {
         try JSONDecoder().decode(PluginManifest.self, from: Data(contentsOf: URL(fileURLWithPath: "Plugins/screenshot/manifest.json")))
     }
-    @Test func screenshotDefaultsPreserveOccupiedKeys() throws {
+    @Test func onlyThreeDefaultsAreInstalledAndConflictsAreNotStolen() throws {
         let manifest = try manifest()
         try manifest.validate()
         var plugin = InstalledPlugin(manifest: manifest, commands: [])
         let conflicts = plugin.initializeDefaultCommands(occupiedHotKeys: ["18:4096"])
         #expect(conflicts == ["区域截图"])
-        let expected: [ActionKind: String] = [.captureDelayed: "18:2048", .captureAndCopy: "18:6144", .pinSelection: "19:4096", .restorePin: "20:4096", .cyclePinGroup: "50:4096"]
-        #expect(plugin.commands.count == 6)
+        let expected: [ActionKind: String] = [.pinSelection: "19:4096", .restorePin: "20:4096"]
+        #expect(plugin.commands.count == 3)
         #expect(plugin.commands.first { $0.action == .captureRegion }?.hotKey == nil)
         for (action, identity) in expected { #expect(plugin.commands.first { $0.action == action }?.hotKey?.identity == identity) }
+    }
+    @Test @MainActor func captureUsesSharedGlobalRegistrationAndKeepsKeyboardPinLocal() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("CaptureRouting-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let screenshot = try manifest()
+        let drivers = (screenshot.permissions ?? []).map { permission in
+            HostPermissionDriver(descriptor: .init(id: permission.id, title: "Test", summary: "Test", symbol: "lock"),
+                                 status: { .notGranted }, request: {}, openSettings: {})
+        }
+        var registrations: [String: Bool] = [:]
+        let store = PluginStore(directory: folder, captureDirectory: folder.appendingPathComponent("Capture"),
+                                permissions: HostPermissionCenter(drivers: drivers), ordinaryHotKeyDriver: .init(register: { key, exclusive, _ in
+            registrations[key.identity] = exclusive
+            return { _ = registrations.removeValue(forKey: key.identity) }
+        }))
+        try store.installManifest(screenshot)
+        #expect(registrations == ["18:4096": false, "20:4096": false])
+        #expect(store.matchesSelectionPinShortcut(keyCode: 19, modifiers: UInt32(controlKey), pluginID: screenshot.id))
+
+        var pin = try #require(store.installed.first?.commands.first { $0.action == .pinSelection })
+        pin.hotKey = HotKey(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(controlKey | optionKey), key: "P")
+        try store.saveCommand(pin, pluginID: screenshot.id)
+        #expect(!store.matchesSelectionPinShortcut(keyCode: 19, modifiers: UInt32(controlKey), pluginID: screenshot.id))
+        #expect(store.matchesSelectionPinShortcut(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(controlKey | optionKey), pluginID: screenshot.id))
+        #expect(registrations == ["18:4096": false, "20:4096": false])
+        store.setHotKeysPaused(true)
+        #expect(registrations.isEmpty)
+        #expect(!store.matchesSelectionPinShortcut(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(controlKey | optionKey), pluginID: screenshot.id))
     }
     @Test func upgradingPreservesCustomClearedDisabledAndDeletedDefaults() throws {
         var legacy = PluginCommand(action: .captureRegion, hotKey: HotKey(keyCode: 15, modifiers: UInt32(cmdKey), key: "R"), isEnabled: false)
@@ -36,23 +64,8 @@ struct CaptureWorkflowTests {
         let decoded = try JSONDecoder().decode(InstalledPlugin.self, from: JSONEncoder().encode(plugin))
         #expect(decoded == plugin)
         #expect(plugin.initializeDefaultCommands(restoring: true).isEmpty)
-        #expect(plugin.commands.count == 6)
+        #expect(plugin.commands.count == 3)
         #expect(plugin.commands.first { $0.action == .captureRegion }?.hotKey?.identity == "18:4096")
-    }
-    @Test func migratingTheDefaultPinPreservesItsBindingAndCustomClipboardActions() throws {
-        let updated = try manifest()
-        let legacyTemplate = CommandTemplate(id: "pin", title: "剪贴板贴图", action: .pinClipboard)
-        let legacy = PluginManifest(schemaVersion: 2, id: updated.id, name: updated.name, version: "1.6.1",
-                                    summary: updated.summary, author: updated.author, repository: updated.repository,
-                                    minimumHostVersion: "0.12.0", actions: [.pinClipboard], templates: [legacyTemplate])
-        let customKey = HotKey(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(controlKey), key: "P")
-        let defaultPin = PluginCommand(action: .pinClipboard, hotKey: customKey, isEnabled: false, templateID: "pin")
-        let custom = PluginCommand(action: .pinClipboard)
-        var record = InstalledPlugin(manifest: legacy, commands: [defaultPin, custom], initializedDefaultTemplateIDs: ["pin"])
-        CapturePluginUIProvider.migrateSelectionPinBinding(in: &record, to: updated)
-        var expected = defaultPin
-        expected.action = .pinSelection
-        #expect(record.commands == [expected, custom])
     }
     @Test func restoringSwappedDefaultsDoesNotReportFalseConflicts() throws {
         var plugin = InstalledPlugin(manifest: try manifest(), commands: [])
@@ -61,7 +74,45 @@ struct CaptureWorkflowTests {
         plugin.commands[0].hotKey = plugin.commands[1].hotKey
         plugin.commands[1].hotKey = first
         #expect(plugin.initializeDefaultCommands(restoring: true).isEmpty)
-        #expect(Set(plugin.commands.compactMap { $0.hotKey?.identity }).count == 6)
+        #expect(Set(plugin.commands.compactMap { $0.hotKey?.identity }).count == 3)
+    }
+    @Test @MainActor func upgradingOldScreenshotActionsKeepsTheThreeBindingsAndDropsOnlyRetiredCommands() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("ShortcutUpgrade-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let updated = try manifest()
+        let legacyActions: [ActionKind] = [.captureRegion, .pinClipboard, .restorePin, .captureDelayed, .cyclePinGroup]
+        let legacyTemplates = zip(["region", "pin", "restore-pin", "delayed", "cycle-group"], legacyActions).map { id, action in
+            CommandTemplate(id: id, title: action.title, action: action)
+        }
+        let legacy = PluginManifest(schemaVersion: 2, id: updated.id, name: updated.name, version: "1.9.5",
+                                    summary: updated.summary, author: updated.author, repository: updated.repository,
+                                    minimumHostVersion: "0.13.5", actions: legacyActions, templates: legacyTemplates,
+                                    ui: .init(slots: ["content": [.component("commands", "host.commands")]]),
+                                    permissions: updated.permissions)
+        let store = PluginStore(directory: folder, captureDirectory: folder.appendingPathComponent("Capture"),
+                                ordinaryHotKeyDriver: .init(register: { _, _ in {} }))
+        try store.installManifest(legacy)
+        let other = try JSONDecoder().decode(PluginManifest.self,
+            from: Data(contentsOf: URL(fileURLWithPath: "Plugins/global-shortcuts/manifest.json")))
+        try store.installManifest(other)
+        let otherBefore = try Data(contentsOf: folder.appendingPathComponent(other.id + ".json"))
+        let region = PluginCommand(action: .captureRegion, hotKey: HotKey(keyCode: 15, modifiers: UInt32(cmdKey), key: "R"),
+                                   isEnabled: false, templateID: "region")
+        let pin = PluginCommand(action: .pinClipboard, hotKey: nil, templateID: "pin")
+        for command in [region, pin, PluginCommand(action: .captureDelayed), PluginCommand(action: .cyclePinGroup)] {
+            try store.saveCommand(command, pluginID: updated.id)
+        }
+        try store.installManifest(updated)
+        let config = try #require(store.installed.first { $0.id == updated.id })
+        #expect(config.commands.map(\.action) == [.captureRegion, .pinSelection, .restorePin])
+        #expect(config.commands[0] == region)
+        #expect(config.commands[1].id == pin.id && config.commands[1].hotKey == nil)
+        #expect(config.commands[2].hotKey?.identity == "20:4096")
+        #expect(throws: PluginError.self) { try store.saveCommand(PluginCommand(action: .captureWindow), pluginID: updated.id) }
+        #expect(throws: PluginError.self) {
+            try store.saveCommand(PluginCommand(action: .pinSelection, templateID: "pin"), pluginID: updated.id)
+        }
+        #expect(try Data(contentsOf: folder.appendingPathComponent(other.id + ".json")) == otherBefore)
     }
     @Test @MainActor func localBindingsAreScopedAndClearedBindingsPersist() throws {
         let name = "CaptureShortcutsTest-" + UUID().uuidString
@@ -82,32 +133,53 @@ struct CaptureWorkflowTests {
             #expect(Set(keys).count == keys.count)
         }
     }
-    @Test @MainActor func closedPinsRestoreInOrderAndGroupsSurviveRestart() throws {
+    @Test @MainActor func allLegacyGroupsLoadAndClosedPinsRestoreFromNewestToOldest() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("PinTests-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
-        let context = try CaptureImage.context(width: 100, height: 80)
-        context.setFillColor(NSColor.blue.cgColor); context.fill(CGRect(x: 0, y: 0, width: 100, height: 80))
+        let image = try #require(CaptureImage.context(width: 100, height: 80).makeImage())
         let manager = CapturePinManager(directory: folder, displaysWindows: false)
-        let first = try manager.create(#require(context.makeImage()), text: "hello")
-        let second = try manager.create(#require(context.makeImage()))
+        let newest = try manager.create(image, text: "legacy")
+        let older = try manager.create(image)
+        let open = try manager.create(image)
         manager.toggleAll()
-        #expect(manager.records.allSatisfy { $0.isOpen }) // Hidden is not closed.
-        manager.close(first); manager.close(second)
-        try manager.restoreLastClosed()
-        #expect(manager.record(second)?.isOpen == true && manager.record(first)?.isOpen == false)
-        let group = manager.createGroup(name: "工作")
-        manager.move(second, to: group)
-        manager.toggle(second, \.locked); manager.toggle(second, \.clickThrough)
+        #expect(manager.records.allSatisfy { $0.isOpen })
+        manager.close(older)
+        manager.close(newest)
+        manager.toggle(newest, \.locked)
+        manager.toggle(newest, \.clickThrough)
+        let file = folder.appendingPathComponent("pins.json")
+        var oldArchive = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        var rows = try #require(oldArchive["records"] as? [[String: Any]])
+        let work = UUID().uuidString
+        rows[0]["groupID"] = work
+        rows[2]["groupID"] = work
+        let firstClosedAt = try #require(rows[0]["closedAt"] as? Double)
+        rows[1]["closedAt"] = firstClosedAt - 60
+        oldArchive["records"] = rows
+        var groups = try #require(oldArchive["groups"] as? [[String: Any]])
+        groups.append(["id": work, "name": "工作"])
+        oldArchive["groups"] = groups
+        try JSONSerialization.data(withJSONObject: oldArchive).write(to: file, options: .atomic)
+
         let restored = CapturePinManager(directory: folder, displaysWindows: false)
-        #expect(restored.activeGroupID == group)
-        #expect(restored.record(second)?.locked == true)
-        #expect(restored.record(second)?.clickThrough == true)
-        #expect(restored.record(first)?.text == "hello")
-        restored.mergeGroupIntoDefault(group)
-        #expect(restored.records.count == 2 && restored.groups.count == 1)
-        #expect(restored.records.allSatisfy { $0.groupID == CapturePinGroup.defaultID })
+        #expect(restored.records.map(\.id) == [newest, older, open])
+        #expect(restored.record(open)?.isOpen == true)
+        #expect(restored.record(newest)?.locked == true && restored.record(newest)?.clickThrough == true)
+        #expect(restored.record(newest)?.text == "legacy")
+        let oldClosedAt = restored.record(older)?.closedAt
+        restored.close(older)
+        #expect(restored.record(older)?.closedAt == oldClosedAt)
+        restored.restoreLastClosed()
+        #expect(restored.record(newest)?.isOpen == true && restored.record(older)?.isOpen == false)
+        restored.restoreLastClosed()
+        #expect(restored.record(older)?.isOpen == true)
+        restored.restoreLastClosed()
         restored.deactivate()
-        #expect(restored.record(second)?.isOpen == true)
+
+        let reopened = CapturePinManager(directory: folder, displaysWindows: false)
+        #expect(reopened.records.count == 3 && reopened.records.allSatisfy { $0.isOpen })
+        let png = try CaptureImage.png(image)
+        for pin in reopened.records { #expect(try Data(contentsOf: reopened.url(pin)) == png) }
     }
     @Test @MainActor func markMovementClearAndSpotlightAreUndoableAndExported() throws {
         let context = try CaptureImage.context(width: 200, height: 120)

@@ -20,7 +20,6 @@ import SwiftUI
     private var panel: NSPanel?
     private var surface: RecordingAnnotationSurface?
     private weak var previousKeyWindow: NSWindow?
-    var windowID: CGWindowID? { panel.map { CGWindowID($0.windowNumber) } }
     private(set) var draft: CaptureMark?
     private var nextNumber = 1
 
@@ -104,24 +103,65 @@ private final class RecordingAnnotationPanel: NSPanel {
     }
 }
 
-struct RecordingAnnotationMenu: View {
+/// All actions stay in the recorder's pre-excluded popover surface.
+struct RecordingAnnotationTools: View {
     @ObservedObject var annotations: CaptureRecordingAnnotations
+    let close: () -> Void
+
     var body: some View {
-        Menu {
-            Button("操作屏幕") { annotations.tool = nil }
-            ForEach([CaptureTool.arrow, .rectangle, .ellipse, .number, .pen, .highlight], id: \.self) { tool in
-                Button(tool.title) { annotations.tool = tool }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("录屏标注").fontWeight(.semibold)
+                Spacer()
+                Button(action: close) { Image(systemName: "xmark").frame(width: 24, height: 24) }
+                    .buttonStyle(.plain).accessibilityLabel("关闭标注工具")
             }
-            Divider()
-            Menu("颜色") {
-                Button("红色") { annotations.color = .red }; Button("蓝色") { annotations.color = .blue }
-                Button("黄色") { annotations.color = .yellow }; Button("白色") { annotations.color = .white }
+            HStack(spacing: 6) {
+                toolButton(nil, symbol: "cursorarrow", label: "操作屏幕")
+                ForEach([CaptureTool.arrow, .rectangle, .ellipse, .number, .pen, .highlight], id: \.self) { tool in
+                    toolButton(tool, symbol: tool.symbol, label: tool.title)
+                }
             }
-            Menu("线宽") { ForEach([2.0, 3.0, 5.0, 8.0], id: \.self) { value in Button("\(Int(value))") { annotations.width = value } } }
-            Button("撤销标注") { annotations.undo() }.disabled(annotations.marks.isEmpty)
-            Button("清除标注") { annotations.clear() }.disabled(annotations.marks.isEmpty)
-        } label: { Label(annotations.tool?.title ?? "标注", systemImage: "pencil.tip") }
-            .fixedSize()
-            .help("录屏中绘制标注；Esc、右键或选择「操作屏幕」恢复操作其他应用")
+            HStack(spacing: 6) {
+                swatch(.red, title: "红色"); swatch(.blue, title: "蓝色")
+                swatch(.yellow, title: "黄色"); swatch(.white, title: "白色")
+                Divider().frame(height: 16)
+                ForEach([2.0, 3.0, 5.0, 8.0], id: \.self) { value in
+                    Button("\(Int(value))") { annotations.width = value }
+                        .buttonStyle(.bordered).tint(annotations.width == value ? .accentColor : .secondary)
+                        .accessibilityLabel("线宽 \(Int(value))")
+                }
+            }
+            HStack {
+                Button("撤销标注") { annotations.undo() }
+                Button("清除标注") { annotations.clear() }
+            }
+            .buttonStyle(.bordered).disabled(annotations.marks.isEmpty)
+        }
+        .font(.system(size: 12)).controlSize(.small).padding(12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .modifier(CaptureToolbarSurface())
+    }
+
+    private func toolButton(_ tool: CaptureTool?, symbol: String, label: String) -> some View {
+        Button {
+            close()
+            annotations.tool = tool
+        } label: {
+            Image(systemName: symbol).frame(width: 30, height: 26)
+        }
+        .buttonStyle(.plain)
+        .background(annotations.tool == tool ? Color.accentColor.opacity(0.2) : .clear, in: RoundedRectangle(cornerRadius: 6))
+        .accessibilityLabel(label).accessibilityAddTraits(annotations.tool == tool ? .isSelected : [])
+    }
+
+    private func swatch(_ color: Color, title: String) -> some View {
+        Button { annotations.color = color } label: {
+            Circle().fill(color).frame(width: 14, height: 14)
+                .overlay { Circle().strokeBorder(.primary.opacity(0.25), lineWidth: 1) }
+                .padding(4)
+        }
+        .buttonStyle(.plain).accessibilityLabel(title)
+        .accessibilityAddTraits(annotations.color == color ? .isSelected : [])
     }
 }

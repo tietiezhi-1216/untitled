@@ -4,9 +4,13 @@ import SwiftUI
 @MainActor protocol PluginUIProvider {
     func register(in registry: PluginUIRegistry)
     func legacyInterface(for manifest: PluginManifest) -> PluginInterface?
+    func validateBinding(_ command: PluginCommand, in plugin: InstalledPlugin) throws
+    func migrateBindings(in plugin: inout InstalledPlugin, to manifest: PluginManifest, occupiedHotKeys: Set<String>)
 }
 
 extension PluginUIProvider {
+    func validateBinding(_ command: PluginCommand, in plugin: InstalledPlugin) throws {}
+    func migrateBindings(in plugin: inout InstalledPlugin, to manifest: PluginManifest, occupiedHotKeys: Set<String>) {}
     func legacyInterface(for manifest: PluginManifest) -> PluginInterface? { nil }
 }
 
@@ -28,6 +32,7 @@ struct PluginCommandPresentation {
 @MainActor final class PluginUIRegistry {
     struct Component {
         let requiredActions: Set<ActionKind>
+        let usesTrailingScrollGutter: Bool
         let makeView: (PluginUIContext) -> AnyView
     }
     struct Command {
@@ -45,10 +50,12 @@ struct PluginCommandPresentation {
         provider.register(in: self)
     }
     func component(
-        _ name: String, requiredActions: Set<ActionKind> = [], makeView: @escaping (PluginUIContext) -> AnyView
+        _ name: String, requiredActions: Set<ActionKind> = [], usesTrailingScrollGutter: Bool = false,
+        makeView: @escaping (PluginUIContext) -> AnyView
     ) {
         precondition(components[name] == nil, "Duplicate plugin component: \(name)")
-        components[name] = Component(requiredActions: requiredActions, makeView: makeView)
+        components[name] = Component(requiredActions: requiredActions, usesTrailingScrollGutter: usesTrailingScrollGutter,
+                                     makeView: makeView)
     }
     func command(
         _ name: String, requiredActions: Set<ActionKind> = [],
@@ -59,6 +66,13 @@ struct PluginCommandPresentation {
         precondition(commands[name] == nil, "Duplicate plugin command: \(name)")
         commands[name] = Command(
             requiredActions: requiredActions, presentation: presentation, updates: updates, perform: perform)
+    }
+    func validateBinding(_ command: PluginCommand, in plugin: InstalledPlugin) throws {
+        if command.isEnabled { try command.hotKey?.validate(allowedInputs: plugin.manifest.allowedShortcutInputs) }
+        for provider in providers { try provider.validateBinding(command, in: plugin) }
+    }
+    func migrateBindings(in plugin: inout InstalledPlugin, to manifest: PluginManifest, occupiedHotKeys: Set<String>) {
+        for provider in providers { provider.migrateBindings(in: &plugin, to: manifest, occupiedHotKeys: occupiedHotKeys) }
     }
     func interface(for manifest: PluginManifest) -> PluginInterface {
         if let ui = manifest.ui { return ui }

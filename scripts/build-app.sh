@@ -34,9 +34,24 @@ if [[ "$signing_identity" != "-" ]]; then
 fi
 
 cd "$project_root"
+# Float with the active developer toolchain, not a stale SDKROOT from the caller.
+SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+export SDKROOT
+sdk_version="$(xcrun --sdk macosx --show-sdk-version)"
+minimum_version="$(/usr/bin/plutil -extract LSMinimumSystemVersion raw Resources/Info.plist)"
+if [[ ! -d "$SDKROOT" || ! "$sdk_version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ || ${sdk_version%%.*} -lt 26 ]]; then
+    echo '需要 macOS 26 或更新的 SDK；请更新或切换 Xcode / Command Line Tools。' >&2
+    exit 1
+fi
+printf '使用 macOS SDK %s，最低运行版本 %s\n' "$sdk_version" "$minimum_version"
+
 python3 scripts/prepare-plugin-resources.py --check
-swift build --configuration "$configuration" --product Untitled
-binary_directory="$(swift build --configuration "$configuration" --show-bin-path)"
+# SwiftPM's Swift Build backend can use the SDK headers but record the deployment
+# version as the linked SDK. Pass the actual SDK version to ld as well.
+build_arguments=(--configuration "$configuration" --sdk "$SDKROOT"
+    -Xlinker -platform_version -Xlinker macos -Xlinker "$minimum_version" -Xlinker "$sdk_version")
+swift build "${build_arguments[@]}" --product Untitled
+binary_directory="$(swift build "${build_arguments[@]}" --show-bin-path)"
 output_directory="$project_root/dist/$configuration"
 app_bundle="$output_directory/Untitled.app"
 mkdir -p "$output_directory"
@@ -66,6 +81,7 @@ else
     /usr/bin/codesign --force --sign "$signing_identity" --options runtime --timestamp "$staged_bundle/Contents/Helpers/img2webp"
 fi
 /usr/bin/codesign --verify --strict "$staged_bundle/Contents/Helpers/img2webp"
+/bin/bash scripts/check-app-sdk.sh "$staged_bundle" "$sdk_version"
 /usr/bin/codesign --force "${signing_arguments[@]}" "$staged_bundle"
 /usr/bin/codesign --verify --strict "$staged_bundle"
 

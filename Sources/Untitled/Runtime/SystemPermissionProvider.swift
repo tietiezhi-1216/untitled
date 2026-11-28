@@ -10,7 +10,7 @@ import AppKit
                 status: { CGPreflightScreenCaptureAccess() ? .authorized : .notGranted },
                 request: { _ = CGRequestScreenCaptureAccess() }),
             make(
-                .accessibility, "辅助功能", "用于自动滚动及经你允许的跨 Mac 键鼠控制。", "accessibility", "Accessibility",
+                .accessibility, "辅助功能", "用于自动滚动、经你允许的跨 Mac 键鼠控制，以及你主动开启的宿主快捷键优先拦截。", "accessibility", "Accessibility",
                 status: { AXIsProcessTrusted() ? .authorized : .notGranted },
                 request: {
                     _ = AXIsProcessTrustedWithOptions(

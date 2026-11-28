@@ -6,6 +6,9 @@ import UniformTypeIdentifiers
 enum CaptureTool: String, Codable, CaseIterable, Identifiable {
     case move, select, arrow, rectangle, ellipse, line, pen, highlight, text, number, mosaic, cover, erase, spotlight, magnify, crop, deleteMarks, watermark, inpaint
     var id: String { rawValue }
+    /// Legacy IDs and shortcuts remain decodable; neither is a visible tool.
+    var isDefaultInteraction: Bool { self == .move || self == .select }
+    var hasAnnotationStyle: Bool { ![.move,.select,.crop,.deleteMarks,.erase,.inpaint].contains(self) }
     var title: String {
         switch self {
         case .deleteMarks: "擦除标注"
@@ -292,105 +295,63 @@ struct ImageStitcher {
         guard next.width == previous.width, next.height == previous.height else {
             throw PluginError.invalid("截图区域的分辨率已变化，请重新开始。")
         }
-        guard let shift = Self.displacement(previous, next, axis: axis), shift != 0 else { return false }
+        guard let alignment = CaptureScrollMatcher.align(previous, next, axis: axis), alignment.shift != 0 else {
+            return false
+        }
+        return try append(next, alignment: alignment, trimOnReverse: trimOnReverse)
+    }
+
+    /// Apply an already verified match. Splitting a segment must keep the same
+    /// shift and seam used for the index, not search for another match.
+    mutating func append(_ next: CGImage, alignment: ScrollStitchAlignment, trimOnReverse: Bool = false) throws -> Bool {
+        let shift = alignment.shift
         let newPosition = position + shift
-        if forwardDirection == 0 { forwardDirection = shift > 0 ? 1 : -1 }
+        let nextDirection = forwardDirection == 0 ? (shift > 0 ? 1 : -1) : forwardDirection
+        let vertical = axis == .vertical
+        let length = vertical ? next.height : next.width
+        let oldHigh = minimum + (vertical ? image.height : image.width)
+        let nextHigh = newPosition + length
         var low = min(minimum, newPosition)
-        let length = axis == .vertical ? next.height : next.width
-        var high = max(minimum + (axis == .vertical ? image.height : image.width), newPosition + length)
-        if trimOnReverse, shift * forwardDirection < 0 {
-            if forwardDirection > 0 { high = newPosition + length }
+        var high = max(oldHigh, nextHigh)
+        if trimOnReverse, shift * nextDirection < 0 {
+            if nextDirection > 0 { high = nextHigh }
             else { low = newPosition }
         }
-        let width = axis == .vertical ? image.width : high - low
-        let height = axis == .vertical ? high - low : image.height
-        guard width>0,height>0,width<=pixelLimit/height else { throw ImageStitcherCapacity.exceeded }
-        let context = try CaptureImage.context(width: width, height: height, colorSpace: image.colorSpace)
-        // CGImage 的裁剪坐标自左上角起；绘制坐标自左下角起。
-        let oldRect = axis == .vertical
-            ? CGRect(x: 0, y: height - (minimum - low) - image.height, width: image.width, height: image.height)
-            : CGRect(x: minimum - low, y: 0, width: image.width, height: image.height)
-        let newRect = axis == .vertical
-            ? CGRect(x: 0, y: height - (newPosition - low) - next.height, width: next.width, height: next.height)
-            : CGRect(x: newPosition - low, y: 0, width: next.width, height: next.height)
-        context.draw(image, in: oldRect)
-        context.draw(next, in: newRect)
-        image = context.makeImage()!
-        position = newPosition; minimum = low; previous = next
+        let width = vertical ? image.width : high - low
+        let height = vertical ? high - low : image.height
+        guard width > 0, height > 0, width <= pixelLimit / height else { throw ImageStitcherCapacity.exceeded }
+
+        if low != minimum || high != oldHigh {
+            let context = try CaptureImage.context(width: width, height: height, colorSpace: image.colorSpace)
+            context.interpolationQuality = .none
+            func rect(start: Int, length: Int) -> CGRect {
+                vertical
+                    ? CGRect(x: 0, y: high - start - length, width: width, height: length)
+                    : CGRect(x: start - low, y: 0, width: length, height: height)
+            }
+            context.draw(image, in: rect(start: minimum, length: oldHigh - minimum))
+            let seam = position + alignment.seam
+            // Use one cut in the matched interior. Do not paint a new fixed
+            // header/footer (or other transient overlap) over the old pixels.
+            let replacement: Range<Int>?
+            if nextHigh > oldHigh { replacement = max(newPosition, seam)..<nextHigh }
+            else if newPosition < minimum { replacement = newPosition..<min(nextHigh, seam) }
+            else { replacement = nil }
+            if let replacement {
+                let from = max(low, replacement.lowerBound), to = min(high, replacement.upperBound)
+                if from < to {
+                    context.clip(to: rect(start: from, length: to - from))
+                    context.draw(next, in: rect(start: newPosition, length: length))
+                }
+            }
+            guard let rendered = context.makeImage() else { throw PluginError.invalid("无法生成拼接图像。") }
+            image = rendered
+        }
+        position = newPosition; minimum = low; previous = next; forwardDirection = nextDirection
         return true
     }
 
     static func displacement(_ first: CGImage, _ second: CGImage, axis: StitchAxis) -> Int? {
-        let factor = max(1, max(first.width, first.height) / 240)
-        let width = max(1, first.width / factor), height = max(1, first.height / factor)
-        func gray(_ image: CGImage) -> [UInt8] {
-            var bytes = [UInt8](repeating: 0, count: width * height)
-            bytes.withUnsafeMutableBytes { memory in
-                let context = CGContext(data: memory.baseAddress, width: width, height: height, bitsPerComponent: 8,
-                                        bytesPerRow: width, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0)!
-                context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-            }
-            return bytes
-        }
-        let a = gray(first), b = gray(second)
-        let length = axis == .vertical ? height : width
-        let cross = axis == .vertical ? width : height
-        guard length >= 12, cross >= 8 else { return nil }
-        func score(_ shift: Int) -> Double {
-            let start = max(0, shift) + length / 12
-            let end = min(length, length + shift) - length / 12
-            guard end - start >= length / 6 else { return .infinity }
-            var total = 0.0, count = 0
-            for along in stride(from: start, to: end, by: 2) {
-                for across in stride(from: cross / 12, to: cross - cross / 12, by: 3) {
-                    let i = axis == .vertical ? along * width + across : across * width + along
-                    let j = axis == .vertical ? (along - shift) * width + across : across * width + along - shift
-                    total += abs(Double(a[i]) - Double(b[j])); count += 1
-                }
-            }
-            return total / Double(max(1, count))
-        }
-        let unchanged = score(0)
-        if unchanged < 1.2 { return 0 }
-        let limit = length * 3 / 4
-        var best = 0, error = Double.infinity
-        for shift in -limit...limit where abs(shift) >= 2 {
-            let value = score(shift)
-            if value < error { best = shift; error = value }
-        }
-        guard error < 18, error < unchanged * 0.55 else { return nil }
-        guard factor > 1 else { return best }
-        // 仅压缩垂直于滚动方向的维度，沿滚动轴保留原始像素，避免 Retina 接缝累计漂移。
-        let exactWidth = axis == .vertical ? min(64, first.width) : first.width
-        let exactHeight = axis == .vertical ? first.height : min(64, first.height)
-        func strip(_ image: CGImage) -> [UInt8] {
-            var data = [UInt8](repeating: 0, count: exactWidth * exactHeight)
-            data.withUnsafeMutableBytes {
-                let context = CGContext(data: $0.baseAddress, width: exactWidth, height: exactHeight, bitsPerComponent: 8,
-                                        bytesPerRow: exactWidth, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0)!
-                context.draw(image, in: CGRect(x: 0, y: 0, width: exactWidth, height: exactHeight))
-            }
-            return data
-        }
-        let originalA = strip(first), originalB = strip(second)
-        let originalLength = axis == .vertical ? exactHeight : exactWidth
-        let originalCross = axis == .vertical ? exactWidth : exactHeight
-        var exact = best * factor, exactError = Double.infinity
-        for candidate in (best * factor - factor * 2)...(best * factor + factor * 2) {
-            let low = max(0, candidate) + originalLength / 12
-            let high = min(originalLength, originalLength + candidate) - originalLength / 12
-            guard high > low else { continue }
-            var sum = 0.0, samples = 0
-            for along in stride(from: low, to: high, by: 3) {
-                for across in stride(from: originalCross / 12, to: originalCross - originalCross / 12, by: 3) {
-                    let i = axis == .vertical ? along * exactWidth + across : across * exactWidth + along
-                    let j = axis == .vertical ? (along - candidate) * exactWidth + across : across * exactWidth + along - candidate
-                    sum += abs(Double(originalA[i]) - Double(originalB[j])); samples += 1
-                }
-            }
-            let value = sum / Double(max(1, samples))
-            if value < exactError { exact = candidate; exactError = value }
-        }
-        return exact
+        CaptureScrollMatcher.align(first, second, axis: axis)?.shift
     }
 }

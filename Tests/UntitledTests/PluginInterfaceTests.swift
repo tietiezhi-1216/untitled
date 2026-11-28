@@ -285,6 +285,42 @@ import Testing
         }
     }
 
+    @Test @MainActor func rootHeaderUsesTheSameIconSlotsForCommandsMenusAndLegacyManagement() throws {
+        let directory = temporary()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let registry = PluginUIRegistry()
+        registry.register(HostPluginUIProvider())
+        registry.register(DemoProvider())
+        let store = PluginStore(directory: directory, uiRegistry: registry)
+        var ui = demoLayout
+        ui.slots["header.trailing", default: []].append(contentsOf: [
+            .command("headerRun", "demo.run", title: "执行此插件的主要操作", style: .prominent),
+            .init(id: "headerMenu", kind: .menu, title: "插件的附加功能",
+                  items: [.command("headerMenuRun", "demo.run")]),
+            .component("legacyEnabled", "host.enabled"),
+        ])
+        let manifest = fixture(ui: ui)
+        try store.installManifest(manifest)
+        store.setEnabled(false, pluginID: manifest.id)
+        let view = ContentView(initialSelection: manifest.id).environmentObject(store)
+        try render(view, size: CGSize(width: 880, height: 580)) { frames, _ in
+            let actions = try #require(frames["plugin.header.actions"])
+            let buttons = try ["plugin.ui.preferences", "plugin.ui.headerRun", "plugin.ui.headerMenu", "plugin.header.enabledMenu"]
+                .map { try #require(frames[$0]) }
+            for frame in buttons {
+                #expect(actions.contains(frame))
+                #expect(abs(frame.width - PanelLayout.headerActionSize) < 1)
+                #expect(abs(frame.height - PanelLayout.headerActionSize) < 1)
+                #expect(abs(frame.midY - actions.midY) < 1)
+            }
+            for (previous, current) in zip(buttons, buttons.dropFirst()) {
+                #expect(abs(current.minX - previous.maxX - PanelLayout.headerActionSpacing) < 1)
+            }
+            #expect(frames["plugin.header.enabled"] == nil)
+            #expect(try #require(frames["plugin.ui.run"]).minY > actions.maxY)
+        }
+    }
+
     @Test @MainActor func hostCommandListDoesNotAddASecondPageMargin() throws {
         let directory = temporary(); defer { try? FileManager.default.removeItem(at: directory) }
         let registry = PluginUIRegistry(); registry.register(HostPluginUIProvider())

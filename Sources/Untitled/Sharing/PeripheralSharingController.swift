@@ -6,6 +6,18 @@ import Foundation
 import Network
 @preconcurrency import ApplicationServices
 
+/// Independent retry budgets for the tap and transport, driven by the existing
+/// session timer. One outstanding attempt; outages never exhaust user intent.
+private struct SharingRetry {
+    private static let delays: [TimeInterval] = [0.5, 1, 2, 4, 5]
+    private var step = 0
+    private(set) var next = -Double.infinity
+    mutating func deferAfterAttempt(at now: TimeInterval) {
+        next = now + Self.delays[step]
+        step = min(step + 1, Self.delays.count - 1)
+    }
+}
+
 @MainActor final class PeripheralSharingController: ObservableObject {
     static let pluginID = "com.untitled.peripheral-sharing"
     enum ControlState: String { case local = "本机", requesting = "等待对端", preparing = "准备接收", returning = "正在归还", controlling = "控制远端", receiving = "由远端控制" }
@@ -25,7 +37,11 @@ import Network
     private var legacyLayoutOffset: SharingLayoutPoint?
     @Published private(set) var control: ControlState = .local
     @Published private(set) var keyboardMouseEnabled = false
+    @Published private(set) var inputRecovering = false
     @Published private(set) var peerKeyboardMouseEnabled: Bool?
+    @Published private(set) var clipboardStatus: SharingClipboard.Status = .disconnected
+    @Published private(set) var peerSupportsClipboardImages = false
+    @Published private(set) var clipboardImageStatus: SharingClipboardImageStatus = .inactive
     @Published private(set) var inputStatus: String?
     @Published private(set) var isCursorDiagnostic = false
     private var diagnosticTimer: Timer?
@@ -42,7 +58,7 @@ import Network
     @Published var microphoneStatus = "麦克风共享已关闭"
     @Published var edge: SharingEdge { didSet { defaults.set(edge.rawValue, forKey: "sharing.edge"); input.edge = edge } }
     @Published var microphoneUID: String { didSet { defaults.set(microphoneUID, forKey: "sharing.microphoneUID"); stopCapture(); captureAttempted = false } }
-    var requirePermissions: (Set<HostPermissionID>) throws -> Void = { _ in throw PluginError.invalid("请先启用外设共享插件。") }
+    var requirePermissions: (Set<HostPermissionID>) throws -> Void = { _ in throw PluginError.invalid("请先启用键鼠共享插件。") }
     var isAllowed: () -> Bool = { false }
     var reportError: (Error) -> Void = { _ in }
     let transport = SharingTransport()
@@ -58,24 +74,36 @@ import Network
     private(set) var receivedAudioFrames = 0
     private(set) var sentInputPackets = 0
     private(set) var receivedInputPackets = 0
-    private var userSessionPeer: (host: String, port: String)?
-    private var startupDeadline: UInt64?
-    private var lastConnectAttempt: UInt64 = 0
+    private struct ReconnectTarget {
+        var endpoint: NWEndpoint
+        var expectedPeer: UUID?
+        var startupDeadline: TimeInterval?
+        var explicitlySelected = false
+    }
+    private var userSessionStarted = false // Diagnostics can listen without starting user sharing.
+    private var reconnectTarget: ReconnectTarget?
+    private var reconnectRetry = SharingRetry()
+    private var dialIsAutomatic: Bool? // nil = inbound, false = explicit selection, true = background retry
+    private var disconnectHold = false
+    private var deferredIncomingHello = false
+    @Published private(set) var reconnecting = false
     private var runtimeReporting = false
-    private var manualDisconnectInProgress = false
-    private var reconnects = 0
-    private let connectionClock: @MainActor () -> UInt64
-    private let automaticallyPoll: Bool
-    private var lastReceivedInstant: UInt64?
-    private var lastTickInstant: UInt64?
-    private var previousTickInstant: UInt64?
-    private var maximumTickGap: UInt64 = 0
     private let loadPairingKey: @MainActor () -> String?
     private let inputAccessAvailable: @MainActor () -> Bool
+    private let monotonicNow: @MainActor () -> TimeInterval
+    private var inputRetry = SharingRetry()
+    private var repairRequiresTap = false
+    private var keyboardReady: Bool { keyboardMouseEnabled && !inputRecovering }
     private var peerDeviceID: String?
     private var peerSupportsCursorParking = false
+    private var peerSupportsContinuousReturn = false
+    private var peerSupportsDirectHandoff = false
     private var activeHandoffID: String?
+    private var pendingDirectEntry: SharingMessage?
+    private var sentHandoffMotion = SharingReturnMotion()
+    private var receivedHandoffInputs: UInt64 = 0
     private let input: SharingInput
+    private let clipboard: SharingClipboard
     private var captureTask: Task<Void, Never>?
     private var captureGeneration = 0
     private let capture = SharingMicrophoneCapture()
@@ -84,6 +112,8 @@ import Network
     private let deviceID: String
     private var timer: Timer?
     private var observers: [AnyCancellable] = []
+    private var lastReceived: TimeInterval = 0
+    private var lastTick: TimeInterval = -.infinity
     private var pendingSince: Date?
     private var controlGranted = false
     private var demandSent = false
@@ -94,11 +124,12 @@ import Network
     init(defaults: UserDefaults = .standard, input: SharingInput = SharingInput(), loadPairingKey: @escaping @MainActor () -> String? = SharingPairingKey.load,
          screenPixels: SharingScreenPixels? = SharingScreenPixels.current,
          inputAccessAvailable: @escaping @MainActor () -> Bool = { AXIsProcessTrusted() && CGPreflightListenEventAccess() && !IsSecureEventInputEnabled() },
-         connectionClock: @escaping @MainActor () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
-         automaticallyPoll: Bool = true) {
+         clipboard: SharingClipboard = SharingClipboard(),
+         monotonicNow: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.defaults = defaults; self.input = input; self.loadPairingKey = loadPairingKey; self.inputAccessAvailable = inputAccessAvailable
-        self.connectionClock = connectionClock; self.automaticallyPoll = automaticallyPoll
+        self.clipboard = clipboard; self.monotonicNow = monotonicNow
         rememberedPeerName = defaults.string(forKey: "sharing.lastPeerName")
+        disconnectHold = defaults.bool(forKey: "sharing.disconnectHold")
         let savedEdge = SharingEdge(rawValue: defaults.string(forKey: "sharing.edge") ?? "right") ?? .right
         edge = savedEdge
         microphoneUID = defaults.string(forKey: "sharing.microphoneUID") ?? ""
@@ -125,9 +156,10 @@ import Network
         input.send = { [weak self] packet in
             guard let self else { return }
             if self.isCursorDiagnostic { self.diagnosticForwardAttempts += 1; return } // Never emit .input during diagnosis.
-            guard self.isRunning, self.keyboardMouseEnabled, self.control == .controlling, self.input.isCapturing else { return }
+            guard self.isRunning, self.keyboardReady, self.control == .controlling, self.input.isCapturing else { return }
             if self.transport.send(.init(kind: .input, input: packet, handoffID: self.activeHandoffID), ifAllowed: { self.input.isCapturing && self.control == .controlling && !self.isCursorDiagnostic }) {
                 self.sentInputPackets += 1
+                if self.peerSupportsContinuousReturn { self.sentHandoffMotion.record(packet) }
             }
         }
         input.requestControl = { [weak self] direction, fraction in self?.requestControl(fraction: fraction, direction: direction) }
@@ -135,44 +167,48 @@ import Network
         input.returnAcrossEdge = { [weak self] position in self?.returnAcrossEdge(at: position) }
         input.localResumed = { [weak self] in
             guard let self else { return }
-            if self.control == .returning { self.returnToLocal() }
             self.input.canSwitch = self.canStartControl
         }
         input.failure = { [weak self] message in self?.handleInputFailure(message) }
-        input.interruptForTapRecovery = { [weak self] in self?.prepareForTapRecovery() ?? false }
-        input.tapRecovered = { [weak self] in self?.finishTapRecovery() }
+        input.captureInterrupted = { [weak self] interruption in self?.recoverInterruptedInput(interruption) }
         input.physicalStateChanged = { [weak self] in
             // Finish delivery of the local key/button-up before changing the tap's routing.
             DispatchQueue.main.async { [weak self] in self?.activateControlWhenNeutral() }
+        }
+        clipboard.changed = { [weak self] in self?.clipboardStatus = $0 }
+        clipboard.isAuthorized = { [weak self] in
+            guard let self else { return false }
+            return self.userSessionStarted && self.isRunning && self.keyboardMouseEnabled && self.isAllowed()
+                && self.peerName != nil && self.transport.isConnected
+        }
+        clipboard.canSendText = { [weak self] in self?.transport.canSendClipboardText == true }
+        clipboard.send = { [weak self] in self?.transport.send($0) == true }
+        clipboard.configureImages = { [weak self] in self?.transport.setClipboardImageGrants($0) }
+        clipboard.sendImage = { [weak self] data, revision in self?.transport.offerClipboardImage(data, revision: revision) }
+        clipboard.discardPendingImage = { [weak self] in self?.transport.discardPendingClipboardImage() }
+        transport.beginClipboardImage = { [weak self] revision in self?.clipboard.beginImage(revision: revision) }
+        transport.clipboardImageStatusChanged = { [weak self] status in
+            if self?.clipboardImageStatus != status { self?.clipboardImageStatus = status }
         }
         transport.peersChanged = { [weak self] in self?.peers = $0 }
         transport.listening = { [weak self] port in
             guard let self else { return }
             self.status = "正在监听 TCP \(port)；可自动发现同网段设备，或按 IP / VPN 地址连接。"
-            self.tryStartupConnection()
+            self.tryReconnect(at: self.monotonicNow())
         }
         transport.failed = { [weak self] in self?.stop(reason: $0) }
         transport.connected = { [weak self] in
             guard let self else { return }
-            self.lastReceivedInstant = self.connectionClock(); self.status = "已加密连接，正在确认对端…"
-            self.transport.send(.init(kind: .hello, version: 1, deviceID: self.deviceID, name: String((Host.current().localizedName ?? "Mac").prefix(80)), layoutSync: true,
-                layoutVersion: self.localPixels == nil ? nil : 3, screenAspect: self.localAspect, layoutStamp: self.layoutStamp, screenPixels: self.localPixels, cursorParking: true, keyboardEnabled: self.keyboardMouseEnabled))
+            self.lastReceived = self.monotonicNow(); self.status = "已加密连接，正在确认对端…"
+            // The dialer speaks first; a rejected background dial must not
+            // see a successful hello, even when its TLS-PSK is valid.
+            self.deferredIncomingHello = self.dialIsAutomatic == nil
+            if !self.deferredIncomingHello { self.sendHello() }
         }
         transport.received = { [weak self] in self?.receive($0) }
         transport.disconnected = { [weak self] reason in
             guard let self else { return }
-            let wasPaired = self.peerName != nil
-            self.clearSession()
-            if !self.manualDisconnectInProgress, self.isRunning, self.defaults.bool(forKey: "sharing.sessionEnabled"), self.userSessionPeer != nil {
-                if wasPaired {
-                    self.startupDeadline = self.connectionClock() + 120_000_000_000; self.lastConnectAttempt = 0
-                    self.reconnects = min(self.reconnects + 1, 1_000_000_000)
-                }
-                self.status = reason ?? "连接中断，正在尝试恢复连接；不会自动夺取控制或恢复音频。"
-            } else {
-                self.userSessionPeer = nil; self.startupDeadline = nil
-                self.status = reason ?? (self.isRunning ? "已断开，等待手动连接" : "已停止")
-            }
+            self.connectionLost(reason: reason)
         }
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
             observers.append(NSWorkspace.shared.notificationCenter.publisher(for: name).sink { [weak self] _ in
@@ -199,58 +235,115 @@ import Network
     var hasDriver: Bool { SharingAudioDevices.device(SharingAudioDevices.inputUID) != nil && SharingAudioDevices.device(SharingAudioDevices.feedUID) != nil }
     var serviceName: String { "\(Host.current().localizedName ?? "Mac") · \(deviceID.prefix(6))" }
     func refreshDevices() { audioDevices = SharingAudioDevices.hardwareInputs(); objectWillChange.send() }
-    func start(key: String? = nil, localOnly: Bool = false) throws {
+    func start(key: String? = nil, localOnly: Bool = false, listenPort: UInt16? = nil) throws {
         guard !isCursorDiagnostic else { throw PluginError.invalid("请先结束本机接管测试。") }
-        guard isAllowed() else { throw PluginError.invalid("请先安装并启用外设共享插件。") }
+        guard isAllowed() else { throw PluginError.invalid("请先安装并启用键鼠共享插件。") }
         guard !isRunning else { return }
         guard let key = key ?? loadPairingKey() else { throw PluginError.invalid("请先生成配对密钥，并在另一台 Mac 中粘贴同一密钥。") }
-        try transport.start(key: SharingPairingKey.decode(key), name: serviceName, localOnly: localOnly)
-        isRunning = true; lastTickInstant = nil; previousTickInstant = nil
-        status = "正在发现局域网设备；仅接受持有同一密钥的对端。"
-        if automaticallyPoll {
-            let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.tick() }
-            }
-            self.timer = timer; RunLoop.main.add(timer, forMode: .common)
+        try transport.start(key: SharingPairingKey.decode(key), name: serviceName, localOnly: localOnly, listenPort: listenPort)
+        isRunning = true; lastTick = -.infinity; status = "正在发现局域网设备；仅接受持有同一密钥的对端。"
+        let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
         }
+        self.timer = timer; RunLoop.main.add(timer, forMode: .common)
     }
     /// A prior explicit Start can be resumed on ordinary app relaunch. Installation,
     /// plugin enablement and lock/sleep never create that intent.
     func startUserSession(localOnly: Bool = false) throws {
-        if let host = defaults.string(forKey: "sharing.lastPeerHost"), !host.isEmpty {
-            userSessionPeer = (host, defaults.string(forKey: "sharing.lastPeerPort") ?? String(SharingTransport.defaultPort))
-            startupDeadline = connectionClock() + 120_000_000_000; lastConnectAttempt = 0
-        } else { userSessionPeer = nil; startupDeadline = nil }
-        do { try start(localOnly: localOnly) } catch { userSessionPeer = nil; startupDeadline = nil; throw error }
-        defaults.set(true, forKey: "sharing.sessionEnabled")
+        try beginUserSession(localOnly: localOnly, explicit: true)
+    }
+    private func beginUserSession(localOnly: Bool, explicit: Bool) throws {
+        try start(localOnly: localOnly)
         runtimeReporting = !localOnly
         do { try setKeyboardMouse(true) }
         catch { stop(reason: "共享未开启：" + error.localizedDescription); throw error }
+        if explicit { setDisconnectHold(false) }
+        if !userSessionStarted, !disconnectHold, peerName == nil { loadReconnectTarget() }
+        userSessionStarted = true
+        defaults.set(true, forKey: "sharing.sessionEnabled")
+        clipboard.refreshAuthorization()
     }
     func restoreUserSessionIfRequested(localOnly: Bool = false) throws {
         guard defaults.bool(forKey: "sharing.sessionEnabled"), isAllowed() else { return }
-        try startUserSession(localOnly: localOnly)
+        try beginUserSession(localOnly: localOnly, explicit: false)
     }
     func stopUserSession(reason: String = "共享已关闭。") {
         defaults.set(false, forKey: "sharing.sessionEnabled"); stop(reason: reason)
     }
-    private func tryStartupConnection() {
-        guard isRunning, peerName == nil, transport.port != nil, let peer = userSessionPeer,
-              let deadline = startupDeadline else { return }
-        let instant = connectionClock()
-        guard instant < deadline else {
-            startupDeadline = nil
-            status = "自动连接等待已结束；共享监听仍开启，请在连接设备中重试。"
-            return
+    private func loadReconnectTarget() {
+        guard reconnectTarget == nil, !defaults.bool(forKey: "sharing.reconnectPassive") else { return }
+        let endpoint: NWEndpoint?
+        if let service = defaults.string(forKey: "sharing.reconnectService"), !service.isEmpty {
+            endpoint = .service(name: service, type: SharingTransport.serviceType,
+                                domain: defaults.string(forKey: "sharing.reconnectDomain") ?? "local.", interface: nil)
+        } else if let host = defaults.string(forKey: "sharing.lastPeerHost"), !host.isEmpty {
+            endpoint = try? SharingManualEndpoint.parse(host: host, port: defaults.string(forKey: "sharing.lastPeerPort") ?? String(SharingTransport.defaultPort))
+        } else { endpoint = nil }
+        guard let endpoint else { return }
+        let id = defaults.string(forKey: "sharing.reconnectPeerID").flatMap(UUID.init(uuidString:))
+        reconnectTarget = .init(endpoint: endpoint, expectedPeer: id, startupDeadline: id == nil ? monotonicNow() + 120 : nil)
+    }
+    private func saveReconnectTarget(_ target: ReconnectTarget) {
+        switch target.endpoint {
+        case .hostPort(let host, let port):
+            defaults.set("\(host)", forKey: "sharing.lastPeerHost")
+            defaults.set(String(port.rawValue), forKey: "sharing.lastPeerPort")
+            defaults.removeObject(forKey: "sharing.reconnectService")
+            defaults.removeObject(forKey: "sharing.reconnectDomain")
+        case .service(let name, _, let domain, _):
+            defaults.set(name, forKey: "sharing.reconnectService")
+            defaults.set(domain, forKey: "sharing.reconnectDomain")
+        default: return
         }
-        guard lastConnectAttempt == 0 || instant - lastConnectAttempt >= 3_000_000_000 else { return }
-        lastConnectAttempt = instant
-        do { try connect(host: peer.host, port: peer.port) } catch { /* A pending dial is not another failure. */ }
+        defaults.set(false, forKey: "sharing.reconnectPassive")
+    }
+    private func tryReconnect(at now: TimeInterval) {
+        guard userSessionStarted, isRunning, isAllowed(), !disconnectHold, peerName == nil,
+              transport.canDial, let target = reconnectTarget, now >= reconnectRetry.next else { return }
+        if let deadline = target.startupDeadline, now >= deadline { clearReconnectTarget(); return }
+        reconnectRetry.deferAfterAttempt(at: now)
+        do {
+            try dial(target.endpoint, automatic: !target.explicitlySelected)
+            reconnectTarget?.explicitlySelected = false
+            status = target.expectedPeer == nil ? "正在连接配对设备…" : "正在重新连接原配对设备…"
+        } catch { /* A busy or unavailable transport consumes at most this retry slot. */ }
+    }
+    private func dial(_ endpoint: NWEndpoint, automatic: Bool) throws {
+        try transport.connect(endpoint)
+        dialIsAutomatic = automatic
+    }
+    private func setDisconnectHold(_ value: Bool) {
+        disconnectHold = value
+        if userSessionStarted || !value { defaults.set(value, forKey: "sharing.disconnectHold") }
+    }
+    private func clearReconnectTarget() {
+        reconnectTarget = nil; reconnectRetry = SharingRetry()
+        if reconnecting { reconnecting = false }
+    }
+    private func connectionLost(reason: String?) {
+        let wasReady = peerName != nil
+        dialIsAutomatic = nil; deferredIncomingHello = false
+        clearSession()
+        if userSessionStarted, !disconnectHold, let target = reconnectTarget, target.expectedPeer != nil {
+            if wasReady { reconnectRetry = SharingRetry() }
+            reconnecting = true
+            status = "连接中断，正在后台重连。"
+        } else {
+            if wasReady, userSessionStarted, !disconnectHold { reconnecting = true }
+            status = reason ?? (reconnecting ? "连接中断，等待原配对设备重连。" : (isRunning ? "等待对端连接" : "已停止"))
+        }
+    }
+    private func sendHello() {
+        transport.send(.init(kind: .hello, version: 1, deviceID: deviceID, name: String((Host.current().localizedName ?? "Mac").prefix(80)), layoutSync: true,
+            layoutVersion: localPixels == nil ? nil : 3, screenAspect: localAspect, layoutStamp: layoutStamp, screenPixels: localPixels,
+            cursorParking: true, continuousReturn: true, directHandoff: true, keyboardEnabled: keyboardReady,
+            automaticReconnect: dialIsAutomatic ?? false, clipboardSync: true, clipboardImages: true))
     }
     func stop(reason: String = "已停止，共享设备与网络监听均已释放。") {
         if isCursorDiagnostic { finishCursorDiagnostic(reason: "已手动结束测试。") }
-        userSessionPeer = nil; startupDeadline = nil
+        userSessionStarted = false; clearReconnectTarget(); dialIsAutomatic = nil; deferredIncomingHello = false
         timer?.invalidate(); timer = nil
+        cancelInputRecovery()
         returnToLocal(); transport.stop(); clearSession(); input.stop()
         isRunning = false; keyboardMouseEnabled = false; microphoneOffered = false; wantsRemoteMicrophone = false
         status = reason; writeRuntimeState()
@@ -258,39 +351,50 @@ import Network
     func connect(_ peer: SharingTransport.Peer) throws {
         guard isRunning, isAllowed() else { throw PluginError.invalid("请先启动共享。") }
         if !keyboardMouseEnabled { try startUserSession() }
-        userSessionPeer = nil; startupDeadline = nil // A Bonjour selection must not redial an older manual address.
-        try transport.connect(peer.endpoint); status = "正在认证 \(peer.name)…"
+        let endpoint: NWEndpoint
+        if case .service(let name, let type, let domain, _) = peer.endpoint {
+            endpoint = .service(name: name, type: type, domain: domain, interface: nil)
+        } else { endpoint = peer.endpoint }
+        try connectExplicitly(to: endpoint)
+        status = "正在认证 \(peer.name)…"
     }
     func connect(host: String, port: String) throws {
         guard isRunning, isAllowed() else { throw PluginError.invalid("请先启动共享。") }
-        let endpoint = try SharingManualEndpoint.parse(host: host, port: port)
-        defaults.set(host.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "sharing.lastPeerHost")
-        defaults.set(port.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "sharing.lastPeerPort")
-        try transport.connect(endpoint); status = "正在认证 \(host)…"
+        try connectExplicitly(to: SharingManualEndpoint.parse(host: host, port: port))
+        status = "正在认证 \(host)…"
+    }
+    private func connectExplicitly(to endpoint: NWEndpoint) throws {
+        if peerName == nil, dialIsAutomatic == true {
+            clearReconnectTarget()
+            transport.disconnect() // Manual selection supersedes a pending background attempt.
+        }
+        try dial(endpoint, automatic: false)
+        setDisconnectHold(false)
+        clearReconnectTarget()
+        // Only a successful explicit selection may replace a previously trusted route.
+        if userSessionStarted { reconnectTarget = .init(endpoint: endpoint, startupDeadline: monotonicNow() + 120) }
     }
     func connectUserSelected(host: String, port: String) throws {
-        _ = try SharingManualEndpoint.parse(host: host, port: port)
-        defaults.set(host.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "sharing.lastPeerHost")
-        defaults.set(port.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "sharing.lastPeerPort")
+        let endpoint = try SharingManualEndpoint.parse(host: host, port: port)
         try startUserSession()
-        if transport.port != nil { try connect(host: host, port: port) }
+        if transport.port != nil { try connectExplicitly(to: endpoint) }
+        else {
+            clearReconnectTarget()
+            reconnectTarget = .init(endpoint: endpoint, startupDeadline: monotonicNow() + 120, explicitlySelected: true)
+        }
     }
     func disconnect() {
-        userSessionPeer = nil; startupDeadline = nil; manualDisconnectInProgress = true
-        defer { manualDisconnectInProgress = false }
+        clearReconnectTarget(); setDisconnectHold(true)
         returnToLocal(); transport.disconnect()
+        if isRunning { status = "已主动断开，等待手动连接。" }
     }
-    /// Used by the existing one-second service tick and fake-clock tests. A
-    /// transport repair never calls startUserSession/setKeyboardMouse or capture.
-    func pollConnection() {
-        guard isRunning else { return }
-        tryStartupConnection()
-        guard transport.isConnected, let lastReceivedInstant else { return }
-        let now = connectionClock()
-        if now >= lastReceivedInstant, now - lastReceivedInstant > 5_000_000_000 {
-            returnToLocal(); transport.disconnect()
-            status = startupDeadline == nil ? "连接超时，已释放键鼠和麦克风。" : "连接超时，已归还控制，正在尝试恢复连接。"
-        } else { transport.send(.init(kind: .ping, keyboardEnabled: keyboardMouseEnabled)) }
+    /// A new key is a new pairing. Never carry the previous peer's identity,
+    /// route or explicit-disconnect state over to the replacement.
+    func forgetReconnectRoute() {
+        clearReconnectTarget(); setDisconnectHold(false)
+        for key in ["reconnectPeerID", "reconnectService", "reconnectDomain", "reconnectPassive", "lastPeerHost", "lastPeerPort"] {
+            defaults.removeObject(forKey: "sharing." + key)
+        }
     }
     static var activeDisplayAspect: Double { let bounds = SharingInput.bounds; return bounds.height > 0 ? min(10, max(0.1, Double(bounds.width / bounds.height))) : 1.6 }
     var workspace: SharingDisplayLayout { SharingDisplayLayout(peerOffset: layoutOffset, localAspect: localAspect, peerAspect: peerAspect, localPixels: localPixels, peerPixels: peerPixels) }
@@ -340,14 +444,22 @@ import Network
             guard !input.needsRecovery else { throw PluginError.invalid("鼠标恢复尚未完成，暂不能重新启用键鼠共享。") }
             try requirePermissions([.accessibility, .inputMonitoring])
             guard !IsSecureEventInputEnabled() else { throw PluginError.invalid("系统正在安全输入模式中，请退出密码输入后重试。") }
-            try input.start(); inputStatus = nil
+            if inputRecovering || !input.tapReady && keyboardMouseEnabled {
+                guard input.repairTap() else { throw SharingCursorInterruption.tapLost }
+            } else { try input.start() }
+            inputStatus = nil
         } else { returnToLocal(); input.stop() }
+        cancelInputRecovery()
         keyboardMouseEnabled = value; input.canSwitch = canStartControl
         defaults.set(value, forKey: "sharing.inputDesired")
         if peerName != nil {
             refreshInputStatus()
             transport.send(.init(kind: .ping, keyboardEnabled: value))
+            clipboard.refreshAuthorization()
         }
+    }
+    func shareCopiedScreenshot(_ data: Data, changeCount: Int) {
+        clipboard.offerCopiedPNG(data, changeCount: changeCount)
     }
     func setMicrophoneOffered(_ value: Bool) {
         microphoneOffered = value; captureAttempted = false
@@ -365,17 +477,25 @@ import Network
         else { requestControl(fraction: 0.5) }
     }
     private var canStartControl: Bool {
-        isRunning && keyboardMouseEnabled && !input.needsRecovery && peerKeyboardMouseEnabled != false && peerName != nil && control == .local && (!peerSupportsFreeLayout || layoutReady)
+        isRunning && keyboardReady && peerKeyboardMouseEnabled != false && peerName != nil && control == .local && (!peerSupportsFreeLayout || layoutReady)
     }
     private func requestControl(fraction: Double, direction: SharingEdge? = nil) {
         guard peerKeyboardMouseEnabled != false else { refreshInputStatus(); return }
-        guard isRunning, isAllowed(), keyboardMouseEnabled, !input.needsRecovery, peerName != nil, (!peerSupportsFreeLayout || layoutReady), control == .local, captureTask == nil else { return }
+        guard canStartControl, isAllowed(), input.tapReady, captureTask == nil, !input.needsRecovery, !input.transitionPending else { return }
         do { try requirePermissions([.accessibility, .inputMonitoring]) }
         catch { reportError(error); return }
         control = .requesting; pendingSince = Date(); controlGranted = false; input.canSwitch = false
         activeHandoffID = peerSupportsCursorParking ? UUID().uuidString : nil
-        transport.send(.init(kind: .begin, edge: direction ?? edge, position: fraction, handoffID: activeHandoffID))
-        activateControlWhenNeutral() // Source focus/capture and peer preparation run concurrently.
+        sentHandoffMotion = SharingReturnMotion()
+        let entry = SharingMessage(kind: .begin, edge: direction ?? edge, position: fraction, handoffID: activeHandoffID)
+        if peerSupportsDirectHandoff, peerKeyboardMouseEnabled == true, activeHandoffID != nil {
+            var direct = entry
+            direct.directEntry = true; direct.layoutStamp = layoutStamp
+            pendingDirectEntry = direct
+        } else {
+            guard transport.send(entry) else { finishLocalInput(); return }
+        }
+        activateControlWhenNeutral()
     }
     func returnToLocal(at position: SharingCursorPosition? = nil) {
         if isCursorDiagnostic { finishCursorDiagnostic(reason: "已手动结束测试。"); return }
@@ -385,6 +505,7 @@ import Network
     private func returnAcrossEdge(at position: SharingCursorPosition?) {
         guard peerSupportsCursorParking, control == .receiving, captureTask == nil, let handoff = activeHandoffID else { returnToLocal(at: position); return }
         control = .returning; input.canSwitch = false; pendingSince = Date()
+        let afterInput = peerSupportsContinuousReturn && position != nil && receivedHandoffInputs > 0 ? receivedHandoffInputs : nil
         let generation = captureGeneration
         captureTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -393,10 +514,15 @@ import Network
                 try await self.input.parkAfterReturn()
                 guard generation == self.captureGeneration, !Task.isCancelled, self.control == .returning,
                       self.isRunning, self.keyboardMouseEnabled, self.activeHandoffID == handoff, self.input.isParked else { self.input.reset(); return }
-                self.transport.send(.init(kind: .end, returnPosition: position, handoffID: handoff, returned: true))
+                guard self.transport.send(.init(kind: .end, returnPosition: position, handoffID: handoff, returned: true,
+                                                returnAfterInput: afterInput), ifAllowed: { self.input.isParked }) else {
+                    self.returnToLocal(); return
+                }
                 self.control = .local; self.pendingSince = nil; self.controlGranted = false
                 self.status = "已连接：\(self.peerName ?? "Mac")"
-            } catch { if generation == self.captureGeneration { self.handleInputFailure(error.localizedDescription) } }
+            } catch {
+                if generation == self.captureGeneration { self.handleHandoffFailure(error, returnPosition: position) }
+            }
         }
     }
     private func rejectControlRequest() {
@@ -405,51 +531,108 @@ import Network
         if wasLocal { transport.send(.init(kind: .end, handoffID: activeHandoffID)) }
     }
     private func cancelCaptureAttempt() { captureGeneration &+= 1; captureTask?.cancel() }
-    private func finishLocalInput(restoring position: SharingCursorPosition? = nil, handoffDelay: TimeInterval = 0.65) {
+    private func finishLocalInput(restoring position: SharingCursorPosition? = nil, returnMotion: CGPoint? = nil,
+                                  handoffDelay: TimeInterval = 0.65) {
         cancelCaptureAttempt()
-        let errors = input.reset(restoring: position, handoffDelay: handoffDelay)
-        control = .local; pendingSince = nil; controlGranted = false; activeHandoffID = nil
+        let errors = input.reset(restoring: position, returnMotion: returnMotion, handoffDelay: handoffDelay)
+        sentHandoffMotion = SharingReturnMotion(); receivedHandoffInputs = 0
+        control = .local; pendingSince = nil; controlGranted = false; activeHandoffID = nil; pendingDirectEntry = nil
         if !errors.isEmpty {
-            input.stop(); keyboardMouseEnabled = false; inputStatus = errors.joined(separator: "；")
+            cancelInputRecovery(); input.stop(); keyboardMouseEnabled = false; inputStatus = errors.joined(separator: "；")
             transport.send(.init(kind: .ping, keyboardEnabled: false))
+            clipboard.refreshAuthorization()
         }
         refreshInputStatus()
         input.canSwitch = canStartControl
     }
     private func refreshInputStatus() {
-        if !keyboardMouseEnabled, let inputStatus { status = "键鼠共享已暂停：" + inputStatus }
-        else if peerKeyboardMouseEnabled == false { status = "对端键鼠共享已暂停，请在对端重新开启共享。" }
+        if inputRecovering { status = "键鼠正在恢复，连接保持。" }
+        else if !keyboardMouseEnabled, let inputStatus { status = "键鼠共享已暂停：" + inputStatus }
+        else if peerKeyboardMouseEnabled == false { status = "对端已连接，键鼠暂不可用。" }
         else if let peerName { status = "已连接：\(peerName)" }
+    }
+    private func handleHandoffFailure(_ error: Error, returnPosition: SharingCursorPosition? = nil) {
+        let retryable = (error as? SharingCursorInterruption)?.mayRetry == true
+        if error is CancellationError || retryable {
+            // The scheduled tap withdrawal owns cancellation + local replay.
+            // A second reset here would discard that physical input batch.
+            guard !input.transitionPending else { return }
+            returnToLocal(at: retryable ? returnPosition : nil) // Keep TLS, layout and the tap if cleanup succeeds.
+            if keyboardMouseEnabled, retryable {
+                inputStatus = error.localizedDescription
+                status = error.localizedDescription
+            }
+            return
+        }
+        if let interruption = error as? SharingCursorInterruption, interruption.canRepairCapture {
+            recoverInterruptedInput(interruption)
+        } else { handleInputFailure(error.localizedDescription) }
+    }
+    private func recoverInterruptedInput(_ interruption: SharingCursorInterruption) {
+        if isCursorDiagnostic { finishCursorDiagnostic(reason: interruption.localizedDescription); return }
+        guard !inputRecovering else { return }
+        guard isRunning, isAllowed(), keyboardMouseEnabled else { input.reset(); return }
+        guard inputAccessAvailable() else {
+            handleInputFailure("输入权限被撤销或进入安全输入模式，共享已暂停。")
+            return
+        }
+        inputRecovering = true
+        repairRequiresTap = interruption == .tapLost || !input.tapReady
+        inputRetry = SharingRetry()
+        inputStatus = interruption.localizedDescription
+        // End only the stale handoff. Existing grants and the TLS/layout stay
+        // in place; the far end releases held input when processing this .end.
+        returnToLocal()
+        guard inputRecovering else { return } // A cleanup error is a real safety stop.
+        if repairRequiresTap { input.discardUnobservedReplay() }
+        tryRepairInput(at: monotonicNow())
+        if inputRecovering { transport.send(.init(kind: .ping, keyboardEnabled: false)) }
+    }
+    private func tryRepairInput(at now: TimeInterval) {
+        guard inputRecovering, now >= inputRetry.next else { return }
+        inputRetry.deferAfterAttempt(at: now)
+        guard inputAccessAvailable() else {
+            handleInputFailure("输入权限被撤销或进入安全输入模式，共享已暂停。")
+            return
+        }
+        guard !input.needsRecovery, !input.transitionPending else { return }
+        if repairRequiresTap || !input.tapReady {
+            guard input.repairTap() else { return }
+        }
+        cancelInputRecovery(); inputStatus = nil
+        input.canSwitch = canStartControl
+        refreshInputStatus()
+        transport.send(.init(kind: .ping, keyboardEnabled: true))
+    }
+    private func cancelInputRecovery() {
+        if inputRecovering { inputRecovering = false }
+        inputRetry = SharingRetry(); repairRequiresTap = false
     }
     private func handleInputFailure(_ message: String) {
         if isCursorDiagnostic { finishCursorDiagnostic(reason: message); return }
-        returnToLocal(); input.stop(); keyboardMouseEnabled = false; input.canSwitch = false
+        cancelInputRecovery(); returnToLocal(); input.stop(); keyboardMouseEnabled = false; input.canSwitch = false
         let recovery = input.safetyDiagnostics["cleanupErrors"] as? [String] ?? []
         inputStatus = recovery.isEmpty ? message : message + "（" + recovery.joined(separator: "；") + "）"
         status = "键鼠共享已暂停：" + (inputStatus ?? message)
         transport.send(.init(kind: .ping, keyboardEnabled: false))
+        clipboard.refreshAuthorization()
     }
-    private func prepareForTapRecovery() -> Bool {
-        guard isRunning, keyboardMouseEnabled, !isCursorDiagnostic, isAllowed(), inputAccessAvailable(), defaults.bool(forKey: "sharing.inputDesired") else { return false }
-        returnToLocal() // Revoke handoff/generation and notify the peer before re-enabling a listener.
-        input.canSwitch = false
-        guard keyboardMouseEnabled, !input.needsRecovery else { return false }
-        let message = "监听超时，已归还控制，正在恢复监听。"
-        inputStatus = message; status = message
-        return true
+    var allowsLocalPriorityShortcuts: Bool {
+        !input.needsRecovery && (!keyboardMouseEnabled || (control == .local && captureTask == nil && input.allowsLocalPriorityShortcuts))
     }
-    private func finishTapRecovery() {
-        guard isRunning, keyboardMouseEnabled else { return }
-        guard isAllowed(), inputAccessAvailable() else { handleInputFailure("输入权限已失效，监听恢复已取消。"); return }
-        inputStatus = nil; refreshInputStatus(); input.canSwitch = canStartControl
-        if peerName != nil { transport.send(.init(kind: .ping, keyboardEnabled: true)) }
+    func reservesPriorityShortcut(_ key: HotKey?) -> Bool {
+        guard keyboardMouseEnabled, let key else { return false }
+        return key.keyCode == 53 || key.keyCode == 40 // Preserve the full emergency Esc/K strokes.
     }
-    var connectionDiagnostics: [String: Any] {
-        let now = connectionClock()
-        return ["reconnects": reconnects, "retryArmed": startupDeadline.map { now < $0 } ?? false,
-                "maximumMainLoopGapMilliseconds": Double(maximumTickGap) / 1_000_000,
-                "messageAgeMilliseconds": lastReceivedInstant.map { Double(now >= $0 ? now - $0 : 0) / 1_000_000 } ?? 0]
+    func configurePriorityShortcutRouting(route: @escaping (CGEventType, CGEvent) -> Bool,
+                                          ownsKey: @escaping (UInt32) -> Bool, ownsButton: @escaping (UInt32) -> Bool = { _ in false },
+                                          hasKeys: @escaping () -> Bool) {
+        input.routeHostShortcut = route; input.priorityOwnsKey = ownsKey; input.priorityOwnsButton = ownsButton
+        input.priorityHasOutstandingKeys = hasKeys
     }
+    func notePriorityShortcutOwnership(_ code: UInt32, mouse: Bool = false) { input.notePriorityShortcutOwnership(code, mouse: mouse) }
+    func priorityShortcutOwnershipChanged() { input.priorityShortcutOwnershipChanged() }
+
     var inputDiagnostics: [String: Any] {
         var value = input.safetyDiagnostics
         value["control"] = control.rawValue; value["keyboardEnabled"] = keyboardMouseEnabled
@@ -510,10 +693,11 @@ import Network
         input.stop(); isCursorDiagnostic = false
         let after = input.safetyDiagnostics
         let movement = (before["physicalMouseMovements"] as? Int ?? 0) > 0
-        let recoveryOK = after["ownsHiddenCursor"] as? Bool == false && after["ownsDisassociation"] as? Bool == false
+        let recoveryOK = ["ownsHiddenCursor", "ownsDisassociation", "ownsCursorPanel", "ownsCursorRegion", "cursorPanelVisible", "recoveryPending"]
+            .allSatisfy { after[$0] as? Bool == false }
             && (after["cleanupErrors"] as? [String] ?? []).isEmpty && (after["failure"] as? String ?? "").isEmpty
         let noInput = sentInputPackets == 0 && transport.port == nil && !transport.isConnected
-        let result = endingIssue != nil || !recoveryOK || !noInput || after["watchdogExpired"] as? Bool == true ? "failed-or-cancelled" : (movement ? "position-lock-verified-needs-visual-confirmation" : "incomplete-no-physical-motion")
+        let result = endingIssue != nil || !recoveryOK || !noInput || after["watchdogExpired"] as? Bool == true ? "failed-or-cancelled" : (movement ? "native-freeze-verified-needs-visual-confirmation" : "incomplete-no-physical-motion")
         inputStatus = endingIssue ?? (result == "failed-or-cancelled" ? "安全监护触发或恢复未完成，本轮未通过，请复制诊断信息。" : (movement ? "接管测试已结束，请确认测试时光标隐藏、结束后已恢复。" : "未检测到实体鼠标移动，本轮未完成，请重试。"))
         var report = after
         report["result"] = result; report["reason"] = endingIssue ?? ""; report["zeroNetworkInput"] = noInput
@@ -534,7 +718,7 @@ import Network
         } catch { inputStatus = (inputStatus ?? "") + "（无法保存汇总报告）" }
     }
     private func activateControlWhenNeutral() {
-        guard control == .requesting, input.isNeutral, peerName != nil, keyboardMouseEnabled else { return }
+        guard control == .requesting, input.isNeutral, peerName != nil, keyboardReady else { return }
         if input.mode == .staged { commitPreparedControl(); return }
         guard captureTask == nil else { return }
         let generation = captureGeneration
@@ -550,45 +734,87 @@ import Network
                       self.control == .requesting, self.peerName != nil, self.keyboardMouseEnabled else { self.input.reset(); return }
                 self.commitPreparedControl()
             } catch {
-                if generation == self.captureGeneration { self.handleInputFailure(error.localizedDescription) }
+                if generation == self.captureGeneration { self.handleHandoffFailure(error) }
             }
         }
     }
     private func commitPreparedControl() {
-        guard control == .requesting, controlGranted, input.mode == .staged, input.isNeutral else { return }
+        guard control == .requesting, controlGranted || pendingDirectEntry != nil,
+              input.mode == .staged, input.isNeutral, !input.transitionPending else { return }
         do {
-            guard isRunning, isAllowed(), peerName != nil, keyboardMouseEnabled, input.isStaged, !IsSecureEventInputEnabled() else { throw PluginError.invalid("交接准备状态已改变，已归还本机。") }
+            guard isRunning, isAllowed(), peerName != nil, keyboardReady else { throw CancellationError() }
+            guard inputAccessAvailable(), !IsSecureEventInputEnabled() else { throw PluginError.invalid("输入权限或安全输入状态已改变，已归还本机。") }
             try requirePermissions([.accessibility, .inputMonitoring])
-            if peerSupportsCursorParking {
-                guard transport.send(.init(kind: .commit, handoffID: activeHandoffID)) else { throw PluginError.invalid("接管提交未送出，已归还本机。") }
+            try input.validateStaged()
+            if let entry = pendingDirectEntry {
+                pendingDirectEntry = nil
+                guard peerSupportsDirectHandoff, layoutReady, entry.layoutStamp == layoutStamp else { throw CancellationError() }
+                guard transport.send(entry, ifAllowed: { self.input.isStaged }) else {
+                    if transport.isConnected { try input.validateStaged() }
+                    throw CancellationError()
+                }
+            } else if peerSupportsCursorParking {
+                guard transport.send(.init(kind: .commit, handoffID: activeHandoffID), ifAllowed: { self.input.isStaged }) else {
+                    if transport.isConnected { try input.validateStaged() }
+                    throw CancellationError()
+                }
             }
             control = .controlling; pendingSince = nil; controlGranted = false; inputStatus = nil
             try input.beginForwarding()
             status = "已连接：\(peerName ?? "Mac")"
-        } catch { handleInputFailure(error.localizedDescription) }
+        } catch { handleHandoffFailure(error) }
     }
     private func clearSession() {
+        clipboard.disconnect(); peerSupportsClipboardImages = false
         finishLocalInput(); input.canSwitch = false
         peerName = nil; peerKeyboardMouseEnabled = nil; peerDeviceID = nil; peerSupportsCursorParking = false; activeHandoffID = nil; peerSupportsLayoutSync = false; peerSupportsFreeLayout = false; layoutReady = false; input.workspace = nil; remoteMicrophoneAvailable = false; peerDemand = false; demandSent = false
+        peerSupportsContinuousReturn = false; peerSupportsDirectHandoff = false
         sentAudioFrames = 0; receivedAudioFrames = 0; sentInputPackets = 0; receivedInputPackets = 0
         stopCapture(); sink.stop(); isReceivingMicrophone = false; captureAttempted = false
-        // Reconnection may restore transport only, never prior audio intentions.
-        microphoneOffered = false; wantsRemoteMicrophone = false; lastReceivedInstant = nil
     }
     private func receive(_ message: SharingMessage) {
         guard isRunning, isAllowed() else { stop(); return }
-        lastReceivedInstant = connectionClock()
+        lastReceived = monotonicNow()
         if message.kind == .hello {
-            guard peerName == nil, message.deviceID != deviceID else { disconnect(); status = "拒绝重复连接或连接到本机。"; return }
+            guard peerName == nil, let id = message.deviceID.flatMap(UUID.init(uuidString:)), id.uuidString != deviceID.uppercased() else {
+                transport.disconnect(); status = "拒绝重复连接或连接到本机。"; return
+            }
+            if deferredIncomingHello && disconnectHold && message.automaticReconnect != false {
+                transport.disconnect(); status = "已主动断开，未接受后台连接。"; return
+            }
+            let expectedPeer = dialIsAutomatic == true ? reconnectTarget?.expectedPeer
+                : (deferredIncomingHello && message.automaticReconnect == true
+                    ? defaults.string(forKey: "sharing.reconnectPeerID").flatMap(UUID.init(uuidString:)) : nil)
+            if let expectedPeer, id != expectedPeer {
+                transport.disconnect(); status = "原配对设备身份不符，未恢复共享。"; return
+            }
+            if deferredIncomingHello { deferredIncomingHello = false; sendHello() }
+            guard transport.isConnected else { return }
+            if disconnectHold { setDisconnectHold(false) }
+            if userSessionStarted {
+                defaults.set(id.uuidString, forKey: "sharing.reconnectPeerID")
+                if dialIsAutomatic != nil, var target = reconnectTarget {
+                    target.expectedPeer = id; target.startupDeadline = nil; target.explicitlySelected = false
+                    reconnectTarget = target; saveReconnectTarget(target)
+                    reconnectRetry = SharingRetry()
+                    if reconnecting { reconnecting = false }
+                } else {
+                    // The current dialer owns retry, so a healthy pair does not
+                    // start a cross-dial loop on the first dropped packet.
+                    clearReconnectTarget()
+                    defaults.set(true, forKey: "sharing.reconnectPassive")
+                }
+            }
             peerName = message.name; rememberedPeerName = message.name
             defaults.set(message.name, forKey: "sharing.lastPeerName")
             peerDeviceID = message.deviceID; peerKeyboardMouseEnabled = message.keyboardEnabled
-            startupDeadline = nil // Keep the explicit one-sided dial target for bounded transport recovery.
             peerSupportsLayoutSync = message.layoutSync == true
             peerSupportsCursorParking = message.cursorParking == true
             // Older equal-width layouts cannot interpret pixel-space coordinates:
             // both sides deliberately fall back to the original edge protocol.
             peerSupportsFreeLayout = message.layoutVersion == 3 && localPixels != nil
+            peerSupportsContinuousReturn = peerSupportsCursorParking && peerSupportsFreeLayout && message.continuousReturn == true
+            peerSupportsDirectHandoff = peerSupportsCursorParking && peerSupportsFreeLayout && message.directHandoff == true
             updatePeerScreen(message)
             layoutReady = !peerSupportsFreeLayout
             if peerSupportsFreeLayout {
@@ -596,10 +822,14 @@ import Network
                 layoutOffset = workspace.adjusted(layoutOffset, magnet: 0)
                 persistLayout(); sendLayout()
             }
+            guard transport.isConnected else { return }
+            peerSupportsClipboardImages = message.clipboardImages == true
+            clipboard.connect(supported: message.clipboardSync == true, images: peerSupportsClipboardImages)
+            guard transport.isConnected else { return }
             refreshInputStatus()
             input.canSwitch = canStartControl; updateMicrophone(); writeRuntimeState(); return
         }
-        guard peerName != nil else { disconnect(); status = "对端尚未完成设备握手。"; return }
+        guard peerName != nil else { transport.disconnect(); status = "对端尚未完成设备握手。"; return }
         if peerSupportsCursorParking, [.accepted, .commit, .input, .end].contains(message.kind) {
             // An unscoped .end is an explicit emergency return, not a delayed
             // normal return from an older handoff. Never replay stale input.
@@ -629,10 +859,18 @@ import Network
         case .layoutAck:
             if peerSupportsFreeLayout, message.layoutStamp == layoutStamp { layoutReady = true; input.canSwitch = canStartControl }
         case .begin:
-            guard keyboardMouseEnabled, (!peerSupportsFreeLayout || layoutReady), control == .local, captureTask == nil, !input.needsRecovery, input.isNeutral, let edge = message.edge, let position = message.position else {
+            guard input.reconcileParkedCapture() else {
+                // A still-recovering idle cursor cannot accept this handoff.
+                // Reject just the request; don't restart its recovery or the session.
+                transport.send(.init(kind: .end, handoffID: message.handoffID)); return
+            }
+            if message.directEntry == true { acceptDirectEntry(message); return }
+            guard keyboardReady, (!peerSupportsFreeLayout || layoutReady), control == .local, captureTask == nil,
+                  input.canAcceptHandoff, let edge = message.edge, let position = message.position else {
                 rejectControlRequest(); return
             }
             guard !peerSupportsCursorParking || message.handoffID != nil else { rejectControlRequest(); return }
+            receivedHandoffInputs = 0
             activeHandoffID = message.handoffID; control = .preparing; input.canSwitch = false; pendingSince = Date()
             let generation = captureGeneration, handoff = activeHandoffID
             captureTask = Task { @MainActor [weak self] in
@@ -645,7 +883,12 @@ import Network
                           self.control == .preparing, self.activeHandoffID == handoff else { self.input.reset(); return }
                     if !self.peerSupportsCursorParking { self.control = .receiving; self.pendingSince = nil }
                     self.transport.send(.init(kind: .accepted, handoffID: handoff))
-                } catch { if generation == self.captureGeneration { self.rejectControlRequest(); self.reportError(error) } }
+                } catch {
+                    if generation == self.captureGeneration {
+                        self.rejectControlRequest()
+                        if !(error is CancellationError) { self.reportError(error) }
+                    }
+                }
             }
         case .commit:
             guard peerSupportsCursorParking, control == .preparing, captureTask == nil else { rejectControlRequest(); return }
@@ -653,20 +896,32 @@ import Network
                 try requirePermissions([.accessibility, .inputMonitoring])
                 guard !IsSecureEventInputEnabled() else { rejectControlRequest(); return }
                 try input.commitReceiving(); control = .receiving; pendingSince = nil
-            } catch { rejectControlRequest(); reportError(error) }
+            } catch {
+                rejectControlRequest()
+                if !(error is CancellationError) { reportError(error) }
+            }
         case .accepted:
             guard control == .requesting else { rejectControlRequest(); return }
             controlGranted = true; activateControlWhenNeutral()
         case .end:
             let normalReturn = message.returned == true && control == .controlling
-            finishLocalInput(restoring: peerSupportsFreeLayout && control == .controlling ? message.returnPosition : nil, handoffDelay: normalReturn ? 0 : 0.65)
+            let motion = normalReturn && peerSupportsContinuousReturn ? message.returnAfterInput.flatMap { sentHandoffMotion.after($0) } : nil
+            finishLocalInput(restoring: peerSupportsFreeLayout && control == .controlling ? message.returnPosition : nil,
+                             returnMotion: motion, handoffDelay: normalReturn ? 0 : 0.65)
         case .input:
             #if DEBUG
             if control == .receiving, let gate = acceptanceAllowsInput, !gate() { returnToLocal(); return }
             #endif
-            if control == .receiving, keyboardMouseEnabled, let packet = message.input {
-                receivedInputPackets += 1; input.apply(packet)
+            if control == .receiving, keyboardReady, let packet = message.input {
+                receivedInputPackets += 1; receivedHandoffInputs += 1
+                input.apply(packet)
             }
+        case .clipboardConsent:
+            clipboard.acceptConsent(message)
+        case .clipboardText:
+            if let text = message.clipboardText { clipboard.acceptText(text) }
+        case .clipboardImageReady:
+            if let grants = message.imageGrants { transport.acceptClipboardImageReady(grants) }
         case .micDemand:
             let demand = message.enabled == true
             if demand != peerDemand { peerDemand = demand; captureAttempted = false; updateMicrophone() }
@@ -681,6 +936,27 @@ import Network
             sink.append(data); receivedAudioFrames += data.count / 4
             if isReceivingMicrophone != sink.isRunning { isReceivingMicrophone = sink.isRunning }
         default: break
+        }
+    }
+    private func acceptDirectEntry(_ message: SharingMessage) {
+        guard let handoff = message.handoffID, let edge = message.edge, let position = message.position else { return }
+        // Negotiated direct entry does not wait for the sender's cursor paint.
+        // Admit it locally before processing the next ordered frame.
+        // A rejection is scoped and must not reset a concurrent valid handoff.
+        guard peerSupportsDirectHandoff, peerKeyboardMouseEnabled == true, message.layoutStamp == layoutStamp, layoutReady,
+              keyboardReady, control == .local, captureTask == nil, input.canAcceptDirectEntry,
+              inputAccessAvailable(), !IsSecureEventInputEnabled() else {
+            transport.send(.init(kind: .end, handoffID: handoff)); return
+        }
+        do {
+            try requirePermissions([.accessibility, .inputMonitoring])
+            try input.receiveDirectly(edge: edge, fraction: position)
+            receivedHandoffInputs = 0; activeHandoffID = handoff; control = .receiving
+            input.canSwitch = false; inputStatus = nil
+            status = "已连接：\(peerName ?? "Mac")"
+        } catch {
+            transport.send(.init(kind: .end, handoffID: handoff))
+            if !(error is CancellationError) { reportError(error) }
         }
     }
     private func stopCapture() {
@@ -719,10 +995,10 @@ import Network
     private func tick() {
         guard isRunning else { return }
         guard isAllowed() else { stop(reason: "插件已停用，共享已释放。"); return }
-        let now = connectionClock()
-        if let previousTickInstant, now >= previousTickInstant { maximumTickGap = max(maximumTickGap, now - previousTickInstant) }
-        previousTickInstant = now
         input.maintainCapture()
+        let now = monotonicNow()
+        if inputRecovering { tryRepairInput(at: now) }
+        tryReconnect(at: now)
         if isSendingMicrophone {
             let packets = capture.mailbox.drain()
             if !packets.isEmpty { lastMicrophonePacket = Date() }
@@ -735,10 +1011,18 @@ import Network
             }
         }
         if let pendingSince, Date().timeIntervalSince(pendingSince) > 2 { returnToLocal(); status = "对端未启用键鼠或切换超时，已返回本机。" }
-        guard lastTickInstant.map({ now >= $0 && now - $0 >= 1_000_000_000 }) ?? true else { return }
-        lastTickInstant = now
-        pollConnection()
+        guard now - lastTick >= 1 else { return }
+        lastTick = now
+        if transport.isConnected {
+            // This deadline belongs to the connection, never to a cursor lease.
+            if now - lastReceived > 5 { transport.disconnect(); return }
+            // The hello handshake (including explicit-disconnect admission)
+            // must finish before any capability, clipboard or input messages.
+            if peerName != nil { transport.send(.init(kind: .ping, keyboardEnabled: keyboardReady)) }
+        }
         if keyboardMouseEnabled && !inputAccessAvailable() { handleInputFailure("输入权限被撤销或进入安全输入模式，共享已暂停。") }
+        else if keyboardReady && !input.tapReady { recoverInterruptedInput(.tapLost) }
+        clipboard.refreshAuthorization() // Reuse the existing heartbeat to see macOS permission changes.
         if isSendingMicrophone && (AVCaptureDevice.authorizationStatus(for: .audio) != .authorized || !capture.isRunning || SharingAudioDevices.device(capture.deviceUID ?? "") == nil) {
             stopCapture(); captureAttempted = true; microphoneStatus = "麦克风不可用；请检查权限或设备后点击重试。"
         }
@@ -755,13 +1039,13 @@ import Network
                   (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
                   ((attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o777) & 0o077 == 0 else { return }
             let report: [String: Any] = ["version": HostInfo.version, "pid": ProcessInfo.processInfo.processIdentifier,
-                "updatedAt": Date().timeIntervalSince1970, "running": isRunning, "peer": peerName ?? "",
-                "keyboardEnabled": keyboardMouseEnabled, "control": control.rawValue, "status": status,
-                "layoutReady": layoutReady, "freeLayout": peerSupportsFreeLayout,
+                "updatedAt": Date().timeIntervalSince1970, "running": isRunning, "peer": peerName ?? "", "reconnecting": reconnecting,
+                "keyboardEnabled": keyboardMouseEnabled, "inputRecovering": inputRecovering, "control": control.rawValue, "status": status,
+                "layoutReady": layoutReady, "freeLayout": peerSupportsFreeLayout, "clipboardStatus": clipboardStatus.rawValue,
+                "clipboardImages": clipboardImageStatus.rawValue,
                 "localPixels": localPixels.map { ["width": $0.width, "height": $0.height] } ?? [:],
                 "peerPixels": peerPixels.map { ["width": $0.width, "height": $0.height] } ?? [:],
                 "layoutOffset": ["x": layoutOffset.x, "y": layoutOffset.y], "input": inputDiagnostics,
-                "connection": connectionDiagnostics,
                 "sendingMicrophone": isSendingMicrophone, "receivingMicrophone": isReceivingMicrophone]
             let url = directory.appendingPathComponent("status.json")
             try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]).write(to: url, options: .atomic)

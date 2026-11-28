@@ -14,18 +14,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
-        run: xcodebuild -version
+        run: |
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
       - name: Validate agent delivery automation without credentials
         run: |
           node --test .github/scripts/agent-pr.test.cjs
           python3 -m unittest discover -s Tests/Automation
       - name: Build and test
-        run: swift test --no-parallel
+        run: swift test --sdk "$(xcrun --sdk macosx --show-sdk-path)" --no-parallel
       - name: Validate plugin packages
         run: |
           python3 scripts/prepare-plugin-resources.py --check
-          python3 scripts/package-plugins.py --tag v0.13.0
+          python3 scripts/package-plugins.py --tag v0.13.52
       - name: Build app
+        env:
+          UNTITLED_SIGNING_IDENTITY: '-'
         run: ./scripts/build-app.sh release
       - name: Build Xcode target
         run: xcodebuild -project Untitled.xcodeproj -scheme Untitled -configuration Debug CODE_SIGNING_ALLOWED=NO build

@@ -143,18 +143,41 @@ struct DoubaoTranscript: Sendable {
     private(set) var confirmed = ""
     private(set) var pending = ""
     private(set) var finalCount = 0
+    private var usesSessionSnapshots = false
+    var hasWholeSessionFinal: Bool { usesSessionSnapshots && finalCount > 0 }
     var text: String { confirmed + pending }
 
+    private struct Result: Decodable {
+        let text: String, is_interim: Bool
+        let index: Int?, start_time: Double?, end_time: Double?
+        var isSegmentDetail: Bool { index != nil || start_time != nil || end_time != nil }
+    }
+    private struct Payload: Decodable { let results: [Result] }
+
     mutating func consume(_ payload: String) throws {
-        struct Result: Decodable { let text: String; let is_interim: Bool }
-        struct Payload: Decodable { let results: [Result] }
-        let value = try JSONDecoder().decode(Payload.self, from: Data(payload.utf8))
-        guard value.results.count <= 128 else { throw PluginError.invalid("豆包返回了过多语音分段。") }
-        for result in value.results {
-            guard result.text.utf16.count <= DoubaoASRLimits.textLength else { throw PluginError.invalid("听写文字超过长度预算，请分段输入。") }
+        let results = try JSONDecoder().decode(Payload.self, from: Data(payload.utf8)).results
+        guard results.count <= 128 else { throw PluginError.invalid("豆包返回了过多语音分段。") }
+        guard let first = results.first else { return }
+        let limit = DoubaoASRLimits.textLength
+        let tooLong = PluginError.invalid("听写文字超过长度预算，请分段输入。")
+        guard results.allSatisfy({ $0.text.utf16.count <= limit }) else { throw tooLong }
+
+        // In two-pass responses the unpositioned head is the WHOLE transcript. The
+        // timed/indexed rows describe the same audio, and can be final before the head.
+        if !first.isSegmentDetail, results.dropFirst().contains(where: \.isSegmentDetail) { usesSessionSnapshots = true }
+        if usesSessionSnapshots {
+            guard !first.isSegmentDetail else { return } // Detail-only updates cannot finalize the session.
+            confirmed = first.is_interim ? "" : first.text
+            pending = first.is_interim ? first.text : ""
+            finalCount = first.is_interim ? 0 : 1
+            return
+        }
+
+        // Legacy flat segment stream: two identical utterances can be two real segments.
+        for result in results {
+            guard confirmed.utf16.count <= limit - result.text.utf16.count else { throw tooLong }
             if result.is_interim { pending = result.text }
             else { confirmed += result.text; pending = ""; finalCount += 1 }
-            guard text.utf16.count <= DoubaoASRLimits.textLength else { throw PluginError.invalid("听写文字超过长度预算，请分段输入。") }
         }
     }
 }

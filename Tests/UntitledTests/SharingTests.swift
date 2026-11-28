@@ -5,6 +5,11 @@ import Network
 import Testing
 @testable import Untitled
 
+@MainActor final class SharingTestClock {
+    var now: TimeInterval
+    init(_ now: TimeInterval) { self.now = now }
+}
+
 @Suite(.serialized) struct SharingTests {
     @Test func manualConnectionAcceptsLANVPNDNSAndIPv6ButNotURLsOrInvalidPorts() throws {
         for host in ["192.168.1.10", "100.64.0.10", "peer.tailnet.example", "::1", "[fd7a:115c:a1e0::1234]"] {
@@ -265,18 +270,24 @@ import Testing
     @Test @MainActor func explicitLayoutChangesMirrorOverTLSWithoutEnablingInput() async throws {
         let one = "layout-a-\(UUID().uuidString)", two = "layout-b-\(UUID().uuidString)"
         let da = UserDefaults(suiteName: one)!, db = UserDefaults(suiteName: two)!
-        let a = PeripheralSharingController(defaults: da), b = PeripheralSharingController(defaults: db)
-        a.isAllowed = { true }; b.isAllowed = { true }; b.edge = .bottom
+        let pixels = SharingScreenPixels(width: 1920, height: 1080)
+        let a = PeripheralSharingController(defaults: da, screenPixels: pixels)
+        let b = PeripheralSharingController(defaults: db, screenPixels: pixels)
+        a.isAllowed = { true }; b.isAllowed = { true }
         defer { a.stop(); b.stop(); da.removePersistentDomain(forName: one); db.removePersistentDomain(forName: two) }
         let key = try SharingPairingKey.generate()
         try a.start(key: key, localOnly: true); try b.start(key: key, localOnly: true)
-        #expect(await wait { a.transport.port != nil && b.transport.port != nil })
+        try #require(await wait { a.transport.port != nil && b.transport.port != nil })
         try a.connect(host: "127.0.0.1", port: String(try #require(b.transport.port).rawValue))
-        #expect(await wait { a.peerSupportsLayoutSync && b.peerSupportsLayoutSync })
+        try #require(await wait { a.layoutReady && b.layoutReady && a.layoutStamp == b.layoutStamp })
         a.setLayoutEdge(.left)
-        #expect(await wait { b.edge == .right })
+        // B may already be on the right. Wait for the revision, not only the edge,
+        // before B creates its next layout, so the test isn't a simultaneous edit.
+        let leftStamp = a.layoutStamp
+        try #require(await wait { a.layoutReady && b.layoutStamp == leftStamp && b.edge == .right })
         b.setLayoutEdge(.top)
-        #expect(await wait { a.edge == .bottom })
+        let topStamp = b.layoutStamp
+        try #require(await wait { b.layoutReady && a.layoutStamp == topStamp && a.edge == .bottom })
         #expect(da.string(forKey: "sharing.edge") == "bottom" && db.string(forKey: "sharing.edge") == "top")
         #expect(!a.keyboardMouseEnabled && !b.keyboardMouseEnabled && !a.microphoneOffered && !b.microphoneOffered)
         #expect(a.sentInputPackets == 0 && b.receivedInputPackets == 0)
@@ -329,6 +340,87 @@ import Testing
         #expect(await wait { controller.peerName == "Late Mac" })
         #expect(controller.isRunning && controller.keyboardMouseEnabled && controller.sentInputPackets == 0)
     }
+    @Test @MainActor func reconnectChecksRememberedIdentityAndCancelsOnUserDisconnect() async throws {
+        let suite = "reconnect-identity-\(UUID())", defaults = try #require(UserDefaults(suiteName: suite))
+        let key = try SharingPairingKey.generate(), peer = SharingTransport()
+        let pinned = UUID(), wrong = UUID()
+        let clock = SharingTestClock(10)
+        var senderID = pinned, readyCount = 0
+        let input = SharingInput(tapReadyOverride: { true }, receiverWarp: { _ in .success }, eventPoster: { _ in })
+        let a = PeripheralSharingController(defaults: defaults, input: input, loadPairingKey: { key },
+                                            inputAccessAvailable: { true }, monotonicNow: { clock.now })
+        a.isAllowed = { true }; a.requirePermissions = { _ in }
+        defer { a.stop(); peer.stop(); defaults.removePersistentDomain(forName: suite) }
+        peer.connected = {
+            readyCount += 1
+            peer.send(.init(kind: .hello, version: 1, deviceID: senderID.uuidString,
+                            name: senderID == pinned ? "Pinned Mac" : "Different Mac"))
+        }
+        try a.startUserSession(localOnly: true)
+        try peer.start(key: SharingPairingKey.decode(key), name: "identity-fixture", localOnly: true)
+        try #require(await wait { peer.port != nil && a.transport.port != nil })
+        let port = try #require(peer.port).rawValue
+        try a.connect(host: "127.0.0.1", port: String(port))
+        try #require(await wait { a.peerName == "Pinned Mac" && readyCount == 1 })
+        #expect(defaults.string(forKey: "sharing.reconnectPeerID") == pinned.uuidString)
+
+        senderID = wrong
+        peer.disconnect()
+        try #require(await wait { readyCount == 2 && a.reconnecting && !a.transport.isConnected })
+        #expect(a.peerName == nil && a.clipboardStatus == .disconnected)
+        #expect(defaults.string(forKey: "sharing.lastPeerName") == "Pinned Mac")
+        #expect(defaults.string(forKey: "sharing.reconnectPeerID") == pinned.uuidString)
+        // Waiting never spins a second attempt at the same monotonic instant.
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(readyCount == 2)
+        senderID = pinned; clock.now += 0.5
+        try #require(await wait { readyCount == 3 && a.peerName == "Pinned Mac" && !a.reconnecting })
+        a.disconnect(); clock.now += 60
+        try #require(await wait { !peer.isConnected })
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(readyCount == 3 && !a.reconnecting && a.isRunning && a.peerName == nil)
+        #expect(defaults.bool(forKey: "sharing.disconnectHold"))
+        a.stop()
+        try a.restoreUserSessionIfRequested(localOnly: true)
+        try #require(await wait { a.transport.port != nil })
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(readyCount == 3 && a.peerName == nil && a.sentInputPackets == 0)
+    }
+
+    @Test @MainActor func passiveManualDisconnectRejectsTheOtherMacsRelinkUntilExplicitSelection() async throws {
+        let first = "reconnect-hold-a-\(UUID())", second = "reconnect-hold-b-\(UUID())"
+        let da = try #require(UserDefaults(suiteName: first)), db = try #require(UserDefaults(suiteName: second))
+        let key = try SharingPairingKey.generate()
+        let clock = SharingTestClock(1)
+        var readyCount = 0
+        let ia = SharingInput(tapReadyOverride: { true }, eventPoster: { _ in })
+        let ib = SharingInput(tapReadyOverride: { true }, eventPoster: { _ in })
+        let a = PeripheralSharingController(defaults: da, input: ia, loadPairingKey: { key }, inputAccessAvailable: { true }, monotonicNow: { clock.now })
+        let b = PeripheralSharingController(defaults: db, input: ib, loadPairingKey: { key }, inputAccessAvailable: { true })
+        for c in [a, b] { c.isAllowed = { true }; c.requirePermissions = { _ in } }
+        defer { a.stop(); b.stop(); da.removePersistentDomain(forName: first); db.removePersistentDomain(forName: second) }
+        let connected = a.transport.connected
+        a.transport.connected = { readyCount += 1; connected() }
+        try a.startUserSession(localOnly: true); try b.startUserSession(localOnly: true)
+        try #require(await wait { a.transport.port != nil && b.transport.port != nil })
+        let port = String(try #require(b.transport.port).rawValue)
+        try a.connect(host: "127.0.0.1", port: port)
+        try #require(await wait { b.peerName != nil && a.peerName != nil })
+        b.disconnect()
+        try #require(await wait { readyCount == 2 && a.reconnecting && !a.transport.isConnected })
+        #expect(b.peerName == nil && !b.reconnecting && b.clipboardStatus == .disconnected)
+        #expect(b.isRunning && db.bool(forKey: "sharing.disconnectHold"))
+        try a.connect(host: "127.0.0.1", port: port)
+        try #require(await wait { a.peerName != nil && b.peerName != nil })
+        #expect(!db.bool(forKey: "sharing.disconnectHold"))
+        // Sleep/lock uses the same stopUserSession path and must never re-dial.
+        a.stopUserSession(); clock.now += 60
+        try #require(await wait { !b.transport.isConnected })
+        try a.restoreUserSessionIfRequested(localOnly: true)
+        #expect(!a.isRunning && a.transport.port == nil && !a.reconnecting)
+        #expect(b.peerName == nil && !b.transport.isConnected)
+    }
+
     @Test @MainActor func freeOffsetIsMirroredAndAcknowledgedBeforeEdgeSwitching() async throws {
         let one = "free-a-\(UUID().uuidString)", two = "free-b-\(UUID().uuidString)"
         let da = UserDefaults(suiteName: one)!, db = UserDefaults(suiteName: two)!

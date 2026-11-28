@@ -3,6 +3,12 @@ import CoreAudio
 import Foundation
 import os
 
+/// Display-only peak RMS from a pair of audio buffers; no samples or pitch history.
+struct DictationMeterReading: Equatable, Sendable {
+    let rms: Float
+    static let quiet = Self(rms: 0)
+}
+
 struct DictationAudioDiagnostics: Equatable, Sendable {
     var inputName = ""
     var callbacks = 0
@@ -14,7 +20,7 @@ struct DictationAudioDiagnostics: Equatable, Sendable {
     var emptyResultReason: String {
         if capturedBytes == 0 { return "没有收到麦克风音频帧。请重新选择已连接的输入设备，并检查麦克风权限。" }
         if peakRMS == 0 { return "麦克风返回了静音音频。请检查所选设备、输入音量或硬件静音；采集来自运行 Untitled 的这台 Mac，不会自动使用手机或另一台 Mac 的麦克风。" }
-        return "本次没有识别到语音。麦克风已有信号，请靠近所选设备并说完整一句；也可先仅试音排除输入框问题。"
+        return "麦克风已有信号，但未识别到文字。请靠近所选麦克风，再说一次。"
     }
 }
 
@@ -72,6 +78,8 @@ enum DictationInputDevices {
 
 @MainActor protocol DictationAudioSource: AnyObject {
     var diagnostics: DictationAudioDiagnostics? { get }
+    /// Independent of PCM drains, startup and network backpressure.
+    var meterReadings: AsyncStream<DictationMeterReading>? { get }
     func configureInputDevice(_ uid: String?) throws
     func start() throws
     func read() throws -> (pcm: Data, level: Float)
@@ -81,6 +89,7 @@ enum DictationInputDevices {
 }
 extension DictationAudioSource {
     var diagnostics: DictationAudioDiagnostics? { nil }
+    var meterReadings: AsyncStream<DictationMeterReading>? { nil }
     func configureInputDevice(_ uid: String?) throws {}
 }
 
@@ -91,6 +100,7 @@ final class DictationAudioMailbox: Sendable {
         var pcm = Data()
         var level: Float = 0
         var peakRMS: Float = 0
+        var meterPeak: Float = 0
         var callbacks = 0
         var capturedBytes = 0
         var queueError: OSStatus?
@@ -99,6 +109,10 @@ final class DictationAudioMailbox: Sendable {
         var limit = DoubaoASRLimits.preconnectAudioBytes
     }
     private let state = OSAllocatedUnfairLock(initialState: State())
+    // One latest volume reading. Never enqueue PCM or spawn work for the HUD here.
+    private let meter = AsyncStream<DictationMeterReading>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    var meterReadings: AsyncStream<DictationMeterReading> { meter.stream }
+    deinit { meter.continuation.finish() }
 
     func append(_ data: Data) {
         var sum: Float = 0
@@ -110,23 +124,29 @@ final class DictationAudioMailbox: Sendable {
             }
         }
         let rms = sqrt(sum / Float(max(1, data.count / 2)))
-        state.withLock {
+        let reading: DictationMeterReading? = state.withLock {
             $0.callbacks += 1; $0.capturedBytes += data.count
             $0.peakRMS = max($0.peakRMS, rms)
             // Preserve the peak between 50 ms drains instead of only the last 20 ms frame.
             $0.level = max($0.level, min(1, rms * 8))
-            guard !$0.overflow, !data.isEmpty else { return }
+            guard !$0.overflow, !data.isEmpty else { return nil }
             guard data.count <= $0.limit - $0.pcm.count else {
-                $0.overflow = true; $0.pcm.removeAll(); return
+                $0.overflow = true; $0.pcm.removeAll(); return nil
             }
             $0.pcm.append(data)
+            $0.meterPeak = max($0.meterPeak, rms)
+            guard !$0.stopping, $0.callbacks.isMultiple(of: 2) else { return nil }
+            let reading = DictationMeterReading(rms: $0.meterPeak)
+            $0.meterPeak = 0
+            return reading
         }
+        if let reading { meter.continuation.yield(reading) }
     }
     func recordQueueError(_ status: OSStatus) {
         guard status != noErr else { return }
         state.withLock { if !$0.stopping { $0.queueError = status } }
     }
-    func beginStopping() { state.withLock { $0.stopping = true } }
+    func beginStopping() { state.withLock { $0.stopping = true }; meter.continuation.finish() }
     func diagnostics(inputName: String = "", sampleRate: Double = 16000) -> DictationAudioDiagnostics {
         state.withLock { .init(inputName: inputName, callbacks: $0.callbacks, capturedBytes: $0.capturedBytes, peakRMS: $0.peakRMS, currentLevel: $0.level, sampleRate: sampleRate) }
     }
@@ -161,6 +181,7 @@ final class DictationAudioMailbox: Sendable {
     private var inputName = ""
     private var sampleRate: Double = 16000
     var diagnostics: DictationAudioDiagnostics? { mailbox.diagnostics(inputName: inputName, sampleRate: sampleRate) }
+    var meterReadings: AsyncStream<DictationMeterReading>? { mailbox.meterReadings }
     isolated deinit { stop() }
 
     func configureInputDevice(_ uid: String?) throws {

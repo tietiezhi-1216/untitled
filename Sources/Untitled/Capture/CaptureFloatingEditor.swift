@@ -4,12 +4,17 @@ import SwiftUI
 
 /// All rectangles here use AppKit's global, bottom-left-origin screen coordinates.
 enum CaptureFloatingLayout {
-    static let toolbarSize = CGSize(width: 906, height: 52)
+    static let toolbarSize = CGSize(width: 828, height: 40)
     static func screenRect(_ rect: CGRect, on screen: CGRect) -> CGRect {
         CGRect(x: screen.minX + rect.minX, y: screen.maxY - rect.maxY, width: rect.width, height: rect.height)
     }
-    static func imageFrame(size: CGSize, preferred: CGRect?, screen: CGRect, pixelsPerPoint: CGFloat) -> CGRect {
-        if let preferred, screen.contains(preferred), preferred.width >= 2, preferred.height >= 2 { return preferred }
+    static func imageFrame(size: CGSize, preferred: CGRect?, screen: CGRect, pixelsPerPoint: CGFloat,
+                           preservePreferredFrame: Bool = false) -> CGRect {
+        let preferred = preferred.flatMap { frame in
+            frame.minX.isFinite && frame.minY.isFinite && frame.width.isFinite && frame.height.isFinite
+                && frame.width >= 2 && frame.height >= 2 ? frame : nil
+        }
+        if let preferred, preservePreferredFrame || screen.contains(preferred) { return preferred }
         let available = screen.insetBy(dx: 16, dy: 16)
         let factor = min(1 / max(1, pixelsPerPoint), min(available.width / size.width, available.height / size.height))
         let fitted = CGSize(width: max(2, size.width * factor), height: max(2, size.height * factor))
@@ -30,15 +35,18 @@ enum CaptureFloatingLayout {
     }
 }
 
-@MainActor final class CaptureFloatingEditor: NSObject, ObservableObject, NSWindowDelegate {
+@MainActor final class CaptureFloatingEditor: NSObject, ObservableObject, NSWindowDelegate, CaptureAnnotationEditing {
     let id = UUID()
     let document: CaptureDocument
     private(set) weak var controller: ScreenshotController?
     let canvasPanel: NSPanel
     let toolsPanel: NSPanel
+    let stylesPanel:NSPanel
+    @Published var stylesPresented=false
     @Published var tool: CaptureTool = .move {
         didSet {
             guard tool != oldValue else { return }
+            stylesPresented=false
             if !synchronizing {
                 document.finishMarkEdit()
                 if tool != .select { document.selectedMarkID=nil }
@@ -75,7 +83,8 @@ enum CaptureFloatingLayout {
     private var toolStyles: [String:CaptureMarkStyle] = [:]
     private let annotationDefaults: UserDefaults
     var inspectorTool: CaptureTool { document.selectedMark?.tool ?? tool }
-    var showsInspector: Bool { ![.move,.select,.crop,.deleteMarks,.erase,.inpaint].contains(inspectorTool) }
+    var allowsStyleEditing:Bool { !isClosed }
+    var showsInspector: Bool { inspectorTool.hasAnnotationStyle }
     var nextNumber: Int {
         if let nextNumberOverride { return nextNumberOverride }
         let local = document.nextNumber(format: style.numberFormat)
@@ -118,9 +127,10 @@ enum CaptureFloatingLayout {
         }
         positionToolbar()
     }
+    func focusCanvas() { canvasPanel.makeKeyAndOrderFront(nil) }
     func editCaption(_ id:UUID) {
         document.selectedMarkID=id
-        toolbarHidden=false;positionToolbar();toolsPanel.makeKeyAndOrderFront(nil);captionFocusRequest=UUID()
+        toolbarHidden=false;positionToolbar();stylesPanel.makeKeyAndOrderFront(nil);captionFocusRequest=UUID()
     }
     @Published var zoom: Double = 0
     @Published var pixel = ""
@@ -132,6 +142,7 @@ enum CaptureFloatingLayout {
     var onClose: (() -> Void)?
     var pinImage: ((CGImage, CGRect) throws -> Void)?
     private let pixelsPerPoint: CGFloat
+    private let preservesPresentationFrame: Bool
     private var imageSize: CGSize
     private var imageOffset = CGPoint.zero
     private var positioning = false
@@ -140,20 +151,24 @@ enum CaptureFloatingLayout {
     private var recognitionTask: Task<Void, Never>?
     var imageFrame: CGRect { canvasPanel.frame }
 
-    init(document: CaptureDocument, controller: ScreenshotController, preferredFrame: CGRect? = nil, annotationDefaults: UserDefaults = .standard) {
+    init(document: CaptureDocument, controller: ScreenshotController, preferredFrame: CGRect? = nil,
+         preservesPresentationFrame: Bool = false, annotationDefaults: UserDefaults = .standard) {
         self.document = document; self.controller = controller;self.annotationDefaults=annotationDefaults
+        self.preservesPresentationFrame = preservesPresentationFrame
         toolStyles=annotationDefaults.data(forKey:"capture.annotation.styles").flatMap { try? JSONDecoder().decode([String:CaptureMarkStyle].self,from:$0) } ?? [:]
         imageSize = CGSize(width: document.image.width, height: document.image.height)
         let screen = Self.screen(for: preferredFrame) ?? NSScreen.main
         let screenFrame = screen?.frame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
         pixelsPerPoint = preferredFrame.map { CGFloat(document.image.width) / max(1, $0.width) } ?? screen?.backingScaleFactor ?? 1
-        let frame = CaptureFloatingLayout.imageFrame(size: imageSize, preferred: preferredFrame, screen: screenFrame, pixelsPerPoint: pixelsPerPoint)
+        let frame = CaptureFloatingLayout.imageFrame(size: imageSize, preferred: preferredFrame, screen: screenFrame,
+                                                     pixelsPerPoint: pixelsPerPoint, preservePreferredFrame: preservesPresentationFrame)
         canvasPanel = CaptureEditorPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         toolsPanel = CaptureEditorPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        stylesPanel = CaptureEditorPanel(contentRect:.zero,styleMask:[.borderless,.nonactivatingPanel],backing:.buffered,defer:false)
         super.init()
-        for panel in [canvasPanel, toolsPanel] {
+        for panel in [canvasPanel, toolsPanel,stylesPanel] {
             panel.isReleasedWhenClosed = false; panel.isOpaque = false; panel.backgroundColor = .clear
-            panel.level = .floating; panel.hidesOnDeactivate = false
+            panel.level = .floating; panel.hidesOnDeactivate = false; panel.animationBehavior = .none
             panel.collectionBehavior = CaptureWindowPolicy.floatingBehavior
             panel.delegate = self
             (panel as? CaptureEditorPanel)?.onDismiss = { [weak self] in self?.close() }
@@ -163,10 +178,16 @@ enum CaptureFloatingLayout {
         toolsPanel.acceptsMouseMovedEvents = true
         toolsPanel.becomesKeyOnlyIfNeeded = false
         CaptureWindowPolicy.markControl(toolsPanel, name: "editorToolbar")
-        canvasPanel.contentView = CaptureFirstMouseHostingView(rootView: CaptureFloatingCanvasView(editor: self, document: document))
+        CaptureWindowPolicy.markControl(stylesPanel,name:"editorStyles")
+        stylesPanel.title="标注样式";stylesPanel.acceptsMouseMovedEvents=true;stylesPanel.becomesKeyOnlyIfNeeded=false
+        let canvas = CaptureFirstMouseHostingView(rootView: CaptureFloatingCanvasView(editor: self, document: document))
+        canvas.sizingOptions = []
+        canvasPanel.contentView = canvas
         let toolbar = CaptureFirstMouseHostingView(rootView: CaptureFloatingToolbar(editor: self, document: document))
         toolbar.sizingOptions = []
         toolsPanel.contentView = toolbar
+        let styles=CaptureFirstMouseHostingView(rootView:CaptureFloatingStyleStrip(editor:self,document:document))
+        styles.sizingOptions=[];stylesPanel.contentView=styles
         positionToolbar()
         document.$image.dropFirst().sink { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -182,6 +203,7 @@ enum CaptureFloatingLayout {
         document.$selectedMarkID.dropFirst().sink { [weak self] id in
             Task { @MainActor [weak self] in self?.synchronizeSelection(id) }
         }.store(in:&subscriptions)
+        $style.dropFirst().receive(on:RunLoop.main).sink { [weak self] _ in self?.positionToolbar() }.store(in:&subscriptions)
         Publishers.CombineLatest($tool, $toolbarHidden).dropFirst().sink { [weak self] _ in
             Task { @MainActor [weak self] in self?.positionToolbar() }
         }.store(in: &subscriptions)
@@ -197,7 +219,12 @@ enum CaptureFloatingLayout {
     }
     func show(recognition: RecognitionTab? = nil) {
         guard !isClosed else { return }
+        // Prepare the final scale while still covered by the frozen selection.
+        // The first visible frame must not grow from an initial hosting-view size.
+        canvasPanel.contentView?.layoutSubtreeIfNeeded()
+        toolsPanel.contentView?.layoutSubtreeIfNeeded()
         canvasPanel.makeKeyAndOrderFront(nil); positionToolbar()
+        canvasPanel.displayIfNeeded(); toolsPanel.displayIfNeeded()
         if let recognition { openRecognition(recognition) }
     }
     func close() {
@@ -205,7 +232,8 @@ enum CaptureFloatingLayout {
         document.finishMarkEdit()
         do { try document.persist() } catch { document.error=error.localizedDescription;return }
         isClosed = true; recognitionTask?.cancel(); subscriptions.removeAll()
-        for panel in [toolsPanel, canvasPanel] {
+        stylesPresented=false
+        for panel in [toolsPanel, stylesPanel,canvasPanel] {
             panel.orderOut(nil); panel.close(); panel.contentView = nil
         }
         let callback = onClose; onClose = nil; callback?()
@@ -220,6 +248,7 @@ enum CaptureFloatingLayout {
             positioning = true
             canvasPanel.setFrameOrigin(CGPoint(x: canvasPanel.frame.minX + delta.width, y: canvasPanel.frame.minY + delta.height))
             positioning = false; toolbarOrigin = origin
+            positionToolbar()
         }
     }
     private func resizeImage(to size: CGSize, offset: CGPoint) {
@@ -230,7 +259,8 @@ enum CaptureFloatingLayout {
         let sizeAtScale = CGSize(width: size.width / pixelsPerPoint, height: size.height / pixelsPerPoint)
         let desired = CGRect(x: imageFrame.minX + delta.x, y: imageFrame.maxY - delta.y - sizeAtScale.height, width: sizeAtScale.width, height: sizeAtScale.height)
         positioning = true
-        canvasPanel.setFrame(CaptureFloatingLayout.imageFrame(size: size, preferred: desired, screen: screen, pixelsPerPoint: pixelsPerPoint), display: true)
+        canvasPanel.setFrame(CaptureFloatingLayout.imageFrame(size: size, preferred: desired, screen: screen,
+                                                            pixelsPerPoint: pixelsPerPoint, preservePreferredFrame: preservesPresentationFrame), display: true)
         positioning = false; positionToolbar()
     }
     private func positionToolbar() {
@@ -240,21 +270,35 @@ enum CaptureFloatingLayout {
         positioning = true
         toolsPanel.setFrame(frame, display: true); toolbarOrigin = frame.origin
         positioning = false
-        if toolbarHidden || !canvasPanel.isVisible { toolsPanel.orderOut(nil) }
-        else { toolsPanel.orderFrontRegardless() }
+        let styleWidth=CaptureStyleBarMetrics.width(tool:inspectorTool,style:style)
+        stylesPanel.setFrame(CaptureStyleBarMetrics.frame(toolbar:frame,visible:visible,width:styleWidth,flipped:false),display:true)
+        if toolbarHidden || !canvasPanel.isVisible {
+            for panel in [toolsPanel,stylesPanel] { if let content=panel.contentView { CaptureToolbarHelpView.dismiss(in:content) };panel.orderOut(nil) }
+        } else {
+            toolsPanel.orderFrontRegardless()
+            if showsInspector { stylesPanel.orderFrontRegardless() }
+            else { if let content=stylesPanel.contentView { CaptureToolbarHelpView.dismiss(in:content) };stylesPanel.orderOut(nil) }
+        }
     }
     func openRecognition(_ tab: RecognitionTab) {
         guard controller?.canUseFeatures() == true else { return }
         toolbarHidden = false; recognitionTab = tab
         positionToolbar(); toolsPanel.makeKeyAndOrderFront(nil); showRecognition = true
     }
+    func selectTool(_ next:CaptureTool,toggleIfSelected:Bool=true) {
+        if next == .inpaint,!CaptureInpaintingModel.installed { showInpaintingSettings=true;return }
+        if next.isDefaultInteraction { tool = .move }
+        else { tool = toggleIfSelected && tool == next ? .move:next }
+        toolbarHidden=false
+    }
     func perform(_ action: CaptureShortcutAction) {
         guard !isClosed else { return }
-        if let next = action.tool { tool = next; toolbarHidden = false; return }
+        if let next = action.tool { selectTool(next); return }
         switch action {
         case .close:
             if let canvas=canvasPanel.firstResponder as? CaptureDrawingView,canvas.cancelActiveInteraction() { return }
-            if document.selectedMarkID != nil { document.selectedMarkID=nil } else { close() }
+            if !tool.isDefaultInteraction { tool = .move }
+            else if document.selectedMarkID != nil { document.selectedMarkID=nil } else { close() }
         case .copy, .copyAndClose: if document.copy() { close() }
         case .save: document.save { [weak self] in self?.close() }
         case .quickSave: if document.quickSave() { close() }
@@ -323,30 +367,33 @@ struct CaptureFloatingCanvasView: View {
     }
 }
 
+private struct CaptureFloatingStyleStrip:View {
+    @ObservedObject var editor:CaptureFloatingEditor
+    @ObservedObject var document:CaptureDocument
+    var body:some View {
+        CaptureAnnotationStyleBar(editor:editor,document:document,advanced:{ editor.stylesPresented=true })
+            .popover(isPresented:$editor.stylesPresented) {
+                CaptureAnnotationInspector(editor:editor,document:document)
+                    .onExitCommand { editor.stylesPresented=false;editor.focusCanvas() }
+            }
+    }
+}
+
 struct CaptureFloatingToolbar: View {
     @ObservedObject var editor: CaptureFloatingEditor
     @ObservedObject var document: CaptureDocument
     @ObservedObject private var shortcuts = CaptureShortcutSettings.shared
     @AppStorage("capture.toolbarOrder") private var toolbarOrder = ""
     @ViewState private var toolbarSettings = false
-    @ViewState private var stylesPresented = false
-    @ViewState private var focusCaption = false
-    private var tools: [CaptureTool] { CaptureToolbarPreferences.ordered(toolbarOrder) }
+    private var groups:[CaptureToolGroup] { CaptureToolbarPreferences.groups(toolbarOrder) }
 
     var body: some View {
         HStack(spacing: 2) {
             Image(systemName: "line.3.horizontal").font(.system(size: 11)).foregroundStyle(.tertiary)
                 .frame(width: 16, height: 28).contentShape(Rectangle()).panelWindowDragArea()
                 .background(CaptureToolbarHelp("拖动工具条；按住 ⌥ 可临时拖动图片"))
-            ForEach(tools) { tool in
-                Button { select(tool) } label: { Image(systemName: tool.symbol).frame(width: 28, height: 28) }
-                    .foregroundStyle(editor.tool == tool ? Color.accentColor : Color.primary)
-                    .background(editor.tool == tool ? Color.accentColor.opacity(0.17) : .clear, in: RoundedRectangle(cornerRadius: 6))
-                    .background(CaptureToolbarHelp(hint(tool))).accessibilityLabel(tool.title)
-                    .accessibilityIdentifier("capture.tool.\(tool.rawValue)")
-            }
+            CaptureExpandedToolStrip(groups:groups,active:editor.tool,order:toolbarOrder,prefix:"capture.floating",select:{ editor.selectTool($0,toggleIfSelected:$1) })
             action(.autoMosaic, symbol: "checkmark.shield").disabled(document.analyzing)
-            stylesButton
             action(.undo, symbol: "arrow.uturn.backward").disabled(document.undoCount == 0)
             action(.redo, symbol: "arrow.uturn.forward").disabled(document.redoCount == 0)
             recognitionMenu
@@ -356,7 +403,7 @@ struct CaptureFloatingToolbar: View {
             action(.copyAndClose, symbol: "doc.on.doc").accessibilityIdentifier("capture.floating.copy")
             action(.close, symbol: "xmark")
         }
-        .font(.system(size: 13)).buttonStyle(.plain).padding(.horizontal, 10).padding(.vertical, 12).modifier(CaptureToolbarSurface())
+        .font(.system(size: 13)).buttonStyle(.plain).padding(.horizontal, 10).padding(.vertical, 6).modifier(CaptureToolbarSurface())
         .background(CaptureShortcutMonitor(scope: .editor, handle: editor.perform).frame(width: 0, height: 0))
         .popover(isPresented: $editor.showRecognition) {
             if let controller = editor.controller {
@@ -380,36 +427,7 @@ struct CaptureFloatingToolbar: View {
         .alert("操作未完成", isPresented: Binding(get: { document.error != nil }, set: { if !$0 { document.error = nil } })) {
             Button("好") { document.error = nil }
         } message: { Text(document.error ?? "") }
-        .onChange(of: editor.inspectorTool) { _, _ in stylesPresented = false }
-        .onChange(of: editor.tool) { _, tool in
-            if [.text, .watermark].contains(tool) { presentStyles(focus: true) }
-        }
-        .onChange(of: editor.captionFocusRequest) { _, _ in presentStyles(focus: true) }
         .accessibilityIdentifier("capture.floating.toolbar")
-    }
-    private var stylesButton: some View {
-        Button {
-            if stylesPresented { stylesPresented = false }
-            else { presentStyles() }
-        } label: { Image(systemName: "slider.horizontal.3").frame(width: 28, height: 28) }
-        .disabled(!editor.showsInspector)
-        .background(CaptureToolbarHelp("颜色与样式；再次点击当前工具也可打开"))
-        .accessibilityLabel("颜色与样式").accessibilityIdentifier("capture.floating.styles")
-        .popover(isPresented: $stylesPresented) {
-            CaptureAnnotationInspector(editor: editor, document: document, focusCaptionOnAppear: focusCaption)
-                .buttonStyle(.bordered)
-                .onExitCommand { stylesPresented = false; editor.canvasPanel.makeKeyAndOrderFront(nil) }
-        }
-    }
-    private func presentStyles(focus: Bool = false) {
-        guard editor.showsInspector else { return }
-        editor.toolsPanel.makeKeyAndOrderFront(nil)
-        focusCaption = focus; stylesPresented = true
-    }
-    private func select(_ tool: CaptureTool) {
-        if tool == .inpaint && !CaptureInpaintingModel.installed { editor.showInpaintingSettings = true }
-        else if tool == editor.tool && editor.showsInspector { presentStyles(focus: [.text, .watermark].contains(tool)) }
-        else { editor.tool = tool }
     }
     private var recognitionMenu: some View {
         Menu {
@@ -421,14 +439,16 @@ struct CaptureFloatingToolbar: View {
             Button("公式") { editor.openRecognition(.formula) }
             Button("文档") { editor.openRecognition(.document) }
         } label: { Image(systemName: "text.viewfinder").frame(width: 28, height: 28) }
-        .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 28, height: 28)
-        .background(CaptureToolbarHelp("识别与翻译")).accessibilityLabel("识别与翻译")
+        .menuStyle(.button).menuIndicator(.hidden).frame(width: 28, height: 28)
+        .modifier(CaptureToolbarControl(hint: "识别与翻译", selected: editor.showRecognition)).accessibilityLabel("识别与翻译")
     }
     private var moreActions: some View {
         Menu {
             Button("快速保存") { editor.perform(.quickSave) }
             Button("打印…") { editor.perform(.printImage) }
             Divider()
+            Button("裁剪图片") { editor.selectTool(.crop,toggleIfSelected:false) }
+            Button("更多样式…") { editor.stylesPresented=true }.disabled(!editor.showsInspector)
             Button("旋转 90°") { document.rotate() }
             Menu("缩放") {
                 Button("适应贴图") { editor.zoom = 0 }
@@ -440,13 +460,13 @@ struct CaptureFloatingToolbar: View {
             Button("工具顺序") { toolbarSettings = true }
             Button("隐藏工具条") { editor.toolbarHidden = true }
             Text("\(document.image.width) × \(document.image.height) 像素")
-        } label: { Image(systemName: "ellipsis").frame(width: 28, height: 28) }
-        .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 28, height: 28)
-        .background(CaptureToolbarHelp("更多操作")).accessibilityLabel("更多操作").accessibilityIdentifier("capture.floating.more")
+        } label: { CaptureToolbarMoreIcon() }
+        .menuStyle(.button).menuIndicator(.hidden).frame(width: 28, height: 28)
+        .modifier(CaptureToolbarControl(hint: "更多操作")).accessibilityLabel("更多操作").accessibilityIdentifier("capture.floating.more")
     }
     private func action(_ action: CaptureShortcutAction, symbol: String) -> some View {
         Button { if action == .close { editor.close() } else { editor.perform(action) } } label: { Image(systemName: symbol).frame(width: 28, height: 28) }
-            .background(CaptureToolbarHelp(action.title + (shortcuts.binding(action).map { "（\($0.display)）" } ?? "")))
+            .modifier(CaptureToolbarControl(hint: action.title + (shortcuts.binding(action).map { "（\($0.display)）" } ?? ""), prominent: action == .copyAndClose))
             .accessibilityLabel(action.title).accessibilityIdentifier("capture.floating.\(action.rawValue)")
     }
     private func hint(_ tool: CaptureTool) -> String {
@@ -455,18 +475,90 @@ struct CaptureFloatingToolbar: View {
     }
 }
 
+/// Center the three dots geometrically, independent of symbol text baselines
+/// and native popup-cell image insets. The menu still supplies normal semantics.
+struct CaptureToolbarMoreIcon:View {
+    var body:some View {
+        CaptureToolbarMoreDots()
+            .frame(width:28,height:28,alignment:.center)
+            .contentShape(Rectangle()).accessibilityHidden(true)
+    }
+}
+
+private struct CaptureToolbarMoreDots:Shape {
+    func path(in rect:CGRect) -> Path {
+        var path=Path()
+        // Draw inside one common box instead of rounding three odd-sized child
+        // frames independently on 1× displays.
+        for offset in [CGFloat(-4.5),0,4.5] {
+            path.addEllipse(in:CGRect(x:rect.midX+offset-1.5,y:rect.midY-1.5,width:3,height:3))
+        }
+        return path
+    }
+}
+
 /// SwiftUI's help tracking is limited to active windows. Screenshot controls must
 /// also explain themselves while another app remains active.
+/// Explicit hover/pressed/selected feedback also works on nonactivating panels.
+struct CaptureToolbarControl: ViewModifier {
+    let hint: String
+    var selected = false
+    var prominent = false
+    var inlineHint: ((String?) -> Void)? = nil
+    @Environment(\.isEnabled) private var enabled
+    @ViewState private var hovered = false
+
+    func body(content: Content) -> some View {
+        let accented = selected || prominent
+        content
+            .buttonStyle(CaptureToolbarPressStyle(accented: accented))
+            .foregroundStyle(enabled ? (accented ? Color.accentColor : Color.primary) : Color.secondary.opacity(0.45))
+            .background {
+                RoundedRectangle(cornerRadius: 6).fill(
+                    accented ? Color.accentColor.opacity(enabled ? (hovered ? 0.23 : 0.14) : 0.06)
+                    : Color.primary.opacity(enabled && hovered ? 0.08 : 0))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(selected ? Color.accentColor.opacity(enabled ? 0.35 : 0.12) : .clear, lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+            .background(CaptureToolbarHelp(inlineHint == nil ? hint : "", hoverChanged: {
+                hovered = $0
+                inlineHint?($0 ? hint : nil)
+            }))
+            .accessibilityAddTraits(selected ? [.isSelected] : [])
+            .accessibilityHint(hint)
+    }
+}
+
+private struct CaptureToolbarPressStyle: ButtonStyle {
+    let accented: Bool
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.contentShape(Rectangle())
+            .background {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill((accented ? Color.accentColor : Color.primary).opacity(enabled && configuration.isPressed ? 0.18 : 0))
+            }
+    }
+}
+
 struct CaptureToolbarHelp: NSViewRepresentable {
     let text: String
-    init(_ text: String) { self.text = text }
+    var hoverChanged: ((Bool) -> Void)?
+    init(_ text: String, hoverChanged: ((Bool) -> Void)? = nil) { self.text = text; self.hoverChanged = hoverChanged }
     func makeNSView(context: Context) -> CaptureToolbarHelpView { CaptureToolbarHelpView() }
-    func updateNSView(_ view: CaptureToolbarHelpView, context: Context) { view.hint = text }
-    static func dismantleNSView(_ view: CaptureToolbarHelpView, coordinator: ()) { view.dismissHint() }
+    func updateNSView(_ view: CaptureToolbarHelpView, context: Context) { view.hint = text; view.hoverChanged = hoverChanged }
+    static func dismantleNSView(_ view: CaptureToolbarHelpView, coordinator: ()) { view.hoverChanged = nil; view.endHover() }
 }
 
 final class CaptureToolbarHelpView: NSView {
-    var hint = ""
+    // One hover lease across all screenshot controls; no per-button idle timer.
+    private static weak var active: CaptureToolbarHelpView?
+    var hint = "" { didSet { if hint != oldValue { dismissHint() } } }
+    var hoverChanged: ((Bool) -> Void)?
+    private(set) var isHovering = false
     private var hoverArea: NSTrackingArea?
     private var pending: Task<Void, Never>?
     private var interactionMonitor: Any?
@@ -476,36 +568,49 @@ final class CaptureToolbarHelpView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let hoverArea { removeTrackingArea(hoverArea) }
-        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .cursorUpdate, .activeAlways, .inVisibleRect], owner: self)
         addTrackingArea(area); hoverArea = area
     }
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if window == nil { dismissHint() }
-    }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); if window == nil { endHover() } }
+    override func viewDidHide() { super.viewDidHide(); endHover() }
+    override func cursorUpdate(with event: NSEvent) { NSCursor.arrow.set() }
     override func mouseEntered(with event: NSEvent) {
-        dismissHint()
+        Self.active?.endHover(); Self.active = self
+        isHovering = true; hoverChanged?(true); NSCursor.arrow.set()
         interactionMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]) { [weak self] event in
-            self?.dismissHint()
+            if event.type == .scrollWheel || event.type == .keyDown { self?.endHover() }
+            else { self?.dismissHint() }
             return event
         }
+        guard !hint.isEmpty else { return }
         pending = Task { @MainActor [weak self] in
             do { try await Task.sleep(for: .milliseconds(350)) } catch { return }
-            self?.showHint()
+            guard let self, isHovering else { return }
+            pending = nil; showHint()
         }
     }
-    override func mouseExited(with event: NSEvent) { dismissHint() }
+    override func mouseExited(with event: NSEvent) { endHover() }
+    func endHover() {
+        if isHovering { isHovering = false; hoverChanged?(false) }
+        dismissHint()
+        if Self.active === self { Self.active = nil }
+    }
+    static func dismiss(in view: NSView) {
+        if let active, active === view || active.isDescendant(of: view) { active.endHover() }
+    }
     func dismissHint() {
         pending?.cancel(); pending = nil
         if let interactionMonitor { NSEvent.removeMonitor(interactionMonitor); self.interactionMonitor = nil }
         hintPanel?.orderOut(nil); hintPanel?.close(); hintPanel = nil
     }
     func showHint() {
-        guard let window, window.isVisible, !hint.isEmpty, hintPanel == nil else { return }
+        guard let window, window.isVisible, !isHiddenOrHasHiddenAncestor,
+              !visibleRect.isEmpty, !hint.isEmpty, hintPanel == nil else { return }
+        if Self.active !== self { Self.active?.endHover(); Self.active = self }
         let font = NSFont.systemFont(ofSize: 12)
         let textBounds = (hint as NSString).boundingRect(with: NSSize(width: 320, height: 1000), options: .usesLineFragmentOrigin, attributes: [.font: font])
         let size = NSSize(width: ceil(textBounds.width) + 20, height: max(16, ceil(textBounds.height)) + 14)
-        let anchor = window.convertToScreen(convert(bounds, to: nil))
+        let anchor = window.convertToScreen(convert(bounds.intersection(visibleRect), to: nil))
         let visible = window.screen?.visibleFrame ?? anchor.insetBy(dx: -500, dy: -500)
         let x = min(max(anchor.midX - size.width / 2, visible.minX + 8), visible.maxX - size.width - 8)
         let below = anchor.minY - size.height - 6
@@ -533,20 +638,21 @@ private final class CaptureHintPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-private struct CaptureToolbarSurface: ViewModifier {
+struct CaptureToolbarSurface: ViewModifier {
+    var cornerRadius: CGFloat = 12
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     func body(content: Content) -> some View {
         if reduceTransparency {
-            content.background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            content.background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: cornerRadius))
         } else {
             #if compiler(>=6.2)
             if #available(macOS 26, *) {
-                content.glassEffect(.regular, in: .rect(cornerRadius: 12))
+                content.glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
             } else {
-                content.background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                content.background(.regularMaterial, in: RoundedRectangle(cornerRadius: cornerRadius))
             }
             #else
-            content.background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            content.background(.regularMaterial, in: RoundedRectangle(cornerRadius: cornerRadius))
             #endif
         }
     }

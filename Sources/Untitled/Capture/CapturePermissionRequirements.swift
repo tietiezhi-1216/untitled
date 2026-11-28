@@ -11,7 +11,7 @@ enum CapturePermissionRequirements {
             declarations.append(.init(id: .screenRecording, reason: "截图、滚动长截图和录屏"))
         }
         if manifest.actions.contains(.captureScrolling) {
-            declarations.append(.init(id: .accessibility, reason: "长截图的自动滚动", optional: true))
+            declarations.append(.init(id: .accessibility, reason: "界面元素识别和长截图自动滚动", optional: true))
         }
         if manifest.actions.contains(.captureRecording) {
             declarations += [
