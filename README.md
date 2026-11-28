@@ -69,7 +69,7 @@ cd untitled
 | [截图](https://github.com/tietiezhi-1216/untitled/blob/v0.13.49/Plugins/screenshot/README.md) | 截图、编辑、贴图、录屏与本地识别等工作流 |
 | [键鼠共享](https://github.com/tietiezhi-1216/untitled/blob/v0.13.49/Plugins/peripheral-sharing/README.md) | 双 Mac 键鼠与按需麦克风共享；完整双机验收范围见插件说明 |
 | [语音输入](https://github.com/tietiezhi-1216/untitled/blob/v0.13.50/Plugins/doubao-speech-input/README.md) | 实时听写浮条与本地历史；定稿插入或复制 |
-| [无线麦](Plugins/wireless-microphone/README.md) | 局域网双 Mac 麦克风共享，从源码构建宿主后通过 ZIP 安装 |
+| [无线麦](Plugins/wireless-microphone/README.md) | 小米蓝牙遥控器 2 / 2 Pro，按住语音键收音 |
 
 ## 让 agent 开发插件
 
