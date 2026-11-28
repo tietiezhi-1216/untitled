@@ -67,6 +67,17 @@ def require_host_baseline(releases, source, version, adopted):
                      "Integrate that release's features into main and record the reviewed baseline.")
 
 
+def require_host_release_baseline(releases, source, version, adopted, channel, approval):
+    if channel == "preview" and approval.get("allow_older_preview") is True:
+        tag = approval["baseline"]
+        baseline_releases = [release for release in releases if release["tag_name"] == tag]
+        if not published_hosts(baseline_releases):
+            raise ValueError(f"The approved historical baseline {tag} has no public host ZIP")
+        require_host_baseline(baseline_releases, source, version, "")
+        return
+    require_host_baseline(releases, source, version, adopted)
+
+
 def is_ancestor(ancestor, source):
     return subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, source],
                           stderr=subprocess.DEVNULL).returncode == 0
@@ -138,13 +149,13 @@ def upload(repository, tag, path):
 
 def require_publish_source(source, tag, source_policy):
     if source_policy == "approved":
-        require_approved_source(source, tag)
-    else:
-        require_main(source)
+        return require_approved_source(source, tag)
+    require_main(source)
+    return {}
 
 
 def publish(repository, source, tag, releases, release, directory, channel, minimum, adopted, source_policy="main"):
-    require_publish_source(source, tag, source_policy)
+    approval = require_publish_source(source, tag, source_policy)
     slug, version = TAG.fullmatch(tag).groups()
     preview = not slug and channel == "preview"
     if release and release["prerelease"] != preview:
@@ -157,7 +168,7 @@ def publish(repository, source, tag, releases, release, directory, channel, mini
             raise ValueError(f"{tag} requires a publicly released Untitled {minimum} or later")
         require_plugin_version(releases, slug, version)
     else:
-        require_host_baseline(releases, source, version, adopted)
+        require_host_release_baseline(releases, source, version, adopted, channel, approval)
 
     archives = [path for path in directory.glob("*.zip") if archive_pattern(slug, version).fullmatch(path.name)]
     if len(archives) != 1:
@@ -200,6 +211,8 @@ def publish(repository, source, tag, releases, release, directory, channel, mini
                 description = f"声明式插件 ZIP。最低宿主版本为 Untitled {minimum}。"
             elif preview:
                 description = "Developer ID 签名公开预览。未提交 Apple 公证。"
+                if approval.get("allow_older_preview") is True:
+                    description += " 此预览用于补发指定版本。"
             else:
                 description = "Developer ID 签名正式版，已完成 Apple 公证。"
             notes = f"{description}\n\n源码提交：{source}\n\n{marker}"
@@ -246,12 +259,12 @@ def main():
         if args.mode == "check-host":
             if slug:
                 raise ValueError("Use a host tag for this check")
-            require_publish_source(args.source, args.tag, args.source_policy)
+            approval = require_publish_source(args.source, args.tag, args.source_policy)
             if release and not release["draft"]:
                 if tag_source(args.tag) != args.source or release["prerelease"] != (args.channel == "preview"):
                     raise ValueError("Published host tag has a different source or channel")
             else:
-                require_host_baseline(releases, args.source, version, adopted)
+                require_host_release_baseline(releases, args.source, version, adopted, args.channel, approval)
             return
         if args.mode == "publish":
             if args.directory is None or (slug and not args.minimum):
