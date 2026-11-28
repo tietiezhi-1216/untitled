@@ -166,7 +166,7 @@ private struct WirelessMicrophoneView: View {
         case .discovering: "正在查找遥控器"
         case .choosing: controller.devices.isEmpty ? "未找到附近的小米遥控器" : "请选择遥控器"
         case .pairing(let name): "正在配对 \(name)"
-        case .connecting(let name): "正在连接 \(name)"
+        case .connecting(let name): "\(controller.connectionProgress.title) · \(name)"
         case .connected(let name): "已连接 \(name)"
         }
     }

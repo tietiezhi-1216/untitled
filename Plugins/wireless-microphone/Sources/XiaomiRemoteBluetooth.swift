@@ -25,10 +25,45 @@ struct XiaomiVoiceRemote: Identifiable, Equatable {
             return nil
         }
     }
+
+    func hasSameName(as other: XiaomiVoiceRemote) -> Bool {
+        name.caseInsensitiveCompare(other.name) == .orderedSame
+    }
+
+    func pairingCandidate(among nearby: [XiaomiVoiceRemote], direct: [XiaomiVoiceRemote]) -> XiaomiVoiceRemote? {
+        guard Self.supportedName(name) != nil,
+              direct.count(where: { hasSameName(as: $0) }) == 1 else { return nil }
+        let matches = nearby.filter { $0.needsPairing && hasSameName(as: $0) }
+        return matches.count == 1 ? matches.first : nil
+    }
+}
+
+enum XiaomiRemoteConnectionProgress: Equatable {
+    case lookingForPairing, bluetooth, voiceServices, capabilities
+
+    var title: String {
+        switch self {
+        case .lookingForPairing: "正在查找配对信息"
+        case .bluetooth: "正在建立蓝牙连接"
+        case .voiceServices: "正在初始化语音服务"
+        case .capabilities: "正在等待遥控器语音响应"
+        }
+    }
+
+    var timeout: String {
+        switch self {
+        case .lookingForPairing: "查找配对信息超时。请同时长按遥控器的主页键和菜单键后重试。"
+        case .bluetooth: "蓝牙握手未完成。请把遥控器靠近 Mac，并重新进入配对模式。"
+        case .voiceServices: "蓝牙已连上，但语音服务初始化超时。请唤醒遥控器后重试。"
+        case .capabilities: "蓝牙语音通道已打开，但遥控器未回应语音协商。请重新连接。"
+        }
+    }
 }
 
 enum XiaomiRemoteLinkEvent {
     case devices([XiaomiVoiceRemote])
+    case progress(XiaomiRemoteConnectionProgress)
+    case startingPairing
     case pairingCode(XiaomiRemotePairingCode)
     case connectingVoice
     case choosePairedRemote([XiaomiVoiceRemote], String)
@@ -55,6 +90,7 @@ enum XiaomiRemoteLinkEvent {
     private static let control = CBUUID(string: XiaomiRemoteVoice.controlUUID)
     private static let connectedServices = ["180A", "180F", "1812"].map { CBUUID(string: $0) }
     private static let genericVoiceName = "蓝牙语音遥控器（ATVV）"
+    private static let encryptionFailure = "遥控器的蓝牙加密未完成。请同时长按主页键和菜单键，再次选择连接。"
 
     private struct Candidate {
         let remote: XiaomiVoiceRemote
@@ -62,14 +98,24 @@ enum XiaomiRemoteLinkEvent {
     }
 
     private struct PairingTarget {
-        let name: String
+        let remote: XiaomiVoiceRemote
+        let preferredID: UUID?
         let previouslyConnected: Set<UUID>
+    }
+
+    private struct PairingLookup {
+        let candidate: Candidate
+        let previousFailure: String?
     }
 
     private let pairing = XiaomiRemotePairing()
     private var central: CBCentralManager?
     private var candidates: [Candidate] = []
     private var nearby: [XiaomiVoiceRemote] = []
+    private var pairingLookup: PairingLookup?
+    private var pairingLookupDeadline: Task<Void, Never>?
+    private var handshakeDeadline: Task<Void, Never>?
+    private var recoveryCandidate: Candidate?
     private var pairTarget: PairingTarget?
     private var pairedLookup: Task<Void, Never>?
     private var peripheral: CBPeripheral?
@@ -107,16 +153,19 @@ enum XiaomiRemoteLinkEvent {
     }
 
     func connect(_ id: UUID) throws {
-        guard let central, central.state == .poweredOn, peripheral == nil, pairTarget == nil else {
+        guard let central, central.state == .poweredOn, peripheral == nil,
+              pairTarget == nil, pairingLookup == nil else {
             throw PluginError.invalid("遥控器已不在列表中。请重新查找。")
         }
         if let candidate = candidates.first(where: { $0.remote.id == id }) {
-            connectVoice(candidate, using: central)
+            let hasSystemLink = connectedCandidates(using: central).contains { $0.remote.id == id }
+            if hasSystemLink || XiaomiVoiceRemote.supportedName(candidate.remote.name) == nil {
+                connectVoice(candidate, using: central)
+            } else {
+                lookForPairing(candidate, using: central)
+            }
         } else if let remote = nearby.first(where: { $0.id == id }) {
-            let connected = connectedCandidates(using: central)
-            pairTarget = .init(name: remote.name, previouslyConnected: Set(connected.map(\.remote.id)))
-            stopDiscovery()
-            try pairing.pair(id)
+            try startPairing(remote, preferredID: nil, using: central)
         } else {
             throw PluginError.invalid("遥控器已不在列表中。请重新查找。")
         }
@@ -124,11 +173,87 @@ enum XiaomiRemoteLinkEvent {
 
     func confirmPairingCode(_ confirmed: Bool) { pairing.confirmCode(confirmed) }
 
-    private func connectVoice(_ candidate: Candidate, using central: CBCentralManager) {
+    private func lookForPairing(_ candidate: Candidate, using central: CBCentralManager, afterFailure failure: String? = nil) {
+        pairingLookup = .init(candidate: candidate, previousFailure: failure)
+        onEvent?(.progress(.lookingForPairing))
+        guard central === self.central, pairingLookup != nil else { return }
+        if pairMatchingRemote(using: central) { return }
+        pairing.discover()
+        pairingLookupDeadline = Task { @MainActor [weak self, weak central] in
+            do { try await Task.sleep(for: .seconds(failure == nil ? 5 : 8)) }
+            catch { return }
+            guard let self, let central, central === self.central, let lookup = self.pairingLookup else { return }
+            self.pairingLookup = nil
+            self.pairingLookupDeadline = nil
+            if let failure = lookup.previousFailure {
+                self.onEvent?(.failed(failure))
+            } else {
+                self.connectVoice(lookup.candidate, using: central, canRecoverPairing: true)
+            }
+        }
+    }
+
+    private func startPairing(_ remote: XiaomiVoiceRemote, preferredID: UUID?, using central: CBCentralManager) throws {
+        pairingLookupDeadline?.cancel()
+        pairingLookupDeadline = nil
+        pairingLookup = nil
+        cancelVoiceConnection(using: central)
+        let connected = connectedCandidates(using: central)
+        pairTarget = .init(remote: remote, preferredID: preferredID, previouslyConnected: Set(connected.map(\.remote.id)))
         stopDiscovery()
+        // Retain the selected IOBluetooth device until pair() transfers it to the system pairing operation.
+        try pairing.pair(remote.id)
+        onEvent?(.startingPairing)
+    }
+
+    private func pairMatchingRemote(using central: CBCentralManager) -> Bool {
+        guard let candidate = pairingLookup?.candidate ?? recoveryCandidate,
+              let match = candidate.remote.pairingCandidate(among: nearby, direct: candidates.map(\.remote)) else { return false }
+        do { try startPairing(match, preferredID: candidate.remote.id, using: central) }
+        catch { onEvent?(.failed(error.localizedDescription)) }
+        return true
+    }
+
+    private func connectVoice(_ candidate: Candidate, using central: CBCentralManager, canRecoverPairing: Bool = false) {
+        wantsDiscovery = false
+        central.stopScan()
+        if !canRecoverPairing { pairing.stopDiscovery() }
+        recoveryCandidate = canRecoverPairing ? candidate : nil
         peripheral = candidate.peripheral
         candidate.peripheral.delegate = self
+        onEvent?(.progress(.bluetooth))
+        guard central === self.central, peripheral === candidate.peripheral else { return }
         central.connect(candidate.peripheral)
+        handshakeDeadline = Task { @MainActor [weak self, weak central] in
+            do { try await Task.sleep(for: .seconds(6)) }
+            catch { return }
+            guard let self, let central, central === self.central else { return }
+            self.voiceConnectionFailed(XiaomiRemoteConnectionProgress.bluetooth.timeout, using: central, canRecoverPairing: true)
+        }
+    }
+
+    private func cancelVoiceConnection(using central: CBCentralManager?) {
+        handshakeDeadline?.cancel()
+        handshakeDeadline = nil
+        recoveryCandidate = nil
+        if let peripheral {
+            self.peripheral = nil
+            peripheral.delegate = nil
+            central?.cancelPeripheralConnection(peripheral)
+        }
+        command = nil
+        audio = nil
+        control = nil
+        notified = false
+    }
+
+    private func voiceConnectionFailed(_ message: String, using central: CBCentralManager, canRecoverPairing: Bool) {
+        if canRecoverPairing, let candidate = recoveryCandidate, central.state == .poweredOn {
+            cancelVoiceConnection(using: central)
+            lookForPairing(candidate, using: central, afterFailure: message)
+        } else {
+            onEvent?(.failed(message))
+        }
     }
 
     func send(_ data: Data) throws {
@@ -147,20 +272,15 @@ enum XiaomiRemoteLinkEvent {
     func stop() {
         stopDiscovery()
         pairing.stop()
+        pairingLookupDeadline?.cancel()
+        pairingLookupDeadline = nil
+        pairingLookup = nil
         pairedLookup?.cancel()
         pairedLookup = nil
         pairTarget = nil
-        if let peripheral {
-            peripheral.delegate = nil
-            central?.cancelPeripheralConnection(peripheral)
-        }
+        cancelVoiceConnection(using: central)
         central?.delegate = nil
         central = nil
-        peripheral = nil
-        command = nil
-        audio = nil
-        control = nil
-        notified = false
         candidates.removeAll()
         nearby.removeAll()
     }
@@ -181,7 +301,9 @@ enum XiaomiRemoteLinkEvent {
             }
             pairing.discover()
         case .resetting:
-            if peripheral != nil || pairTarget != nil { onEvent?(.failed("蓝牙正在重启。请重新连接遥控器。")) }
+            if peripheral != nil || pairTarget != nil || pairingLookup != nil {
+                onEvent?(.failed("蓝牙正在重启。请重新连接遥控器。"))
+            }
         case .unknown:
             break
         case .poweredOff:
@@ -238,24 +360,17 @@ enum XiaomiRemoteLinkEvent {
 
     private func publishCandidates() {
         let direct = candidates.map(\.remote)
-        // A remote the system reports as unpaired should go through pairing before opening ATVV.
-        let otherDirect = direct.filter { device in
-            direct.filter { Self.sameName($0.name, device.name) }.count != 1 ||
-                nearby.filter { Self.sameName($0.name, device.name) }.count != 1
-        }
+        let otherDirect = direct.filter { $0.pairingCandidate(among: nearby, direct: direct) == nil }
         onEvent?(.devices(Array((nearby + otherDirect).prefix(12))))
-    }
-
-    private static func sameName(_ first: String, _ second: String) -> Bool {
-        first.caseInsensitiveCompare(second) == .orderedSame
     }
 
     private func receivePairing(_ event: XiaomiRemotePairing.Event) {
         switch event {
         case .devices(let devices):
-            guard wantsDiscovery else { return }
+            guard wantsDiscovery || pairingLookup != nil || recoveryCandidate != nil else { return }
             nearby = devices
-            publishCandidates()
+            if let central, pairMatchingRemote(using: central) { return }
+            if wantsDiscovery { publishCandidates() }
         case .code(let code):
             if pairTarget != nil { onEvent?(.pairingCode(code)) }
         case .paired:
@@ -274,8 +389,9 @@ enum XiaomiRemoteLinkEvent {
                 guard !Task.isCancelled, let self, let central, central === self.central else { return }
                 let connected = self.connectedCandidates(using: central)
                 let newRemotes = connected.filter { !target.previouslyConnected.contains($0.remote.id) }
-                let matchingNames = newRemotes.filter { Self.sameName($0.remote.name, target.name) }
-                if matchingNames.count == 1, let match = matchingNames.first {
+                let matchingNames = newRemotes.filter { $0.remote.hasSameName(as: target.remote) }
+                let preferred = target.preferredID.flatMap { id in connected.first { $0.remote.id == id } }
+                if let match = preferred ?? (matchingNames.count == 1 ? matchingNames.first : nil) {
                     self.completePairing()
                     self.onEvent?(.connectingVoice)
                     self.connectVoice(match, using: central)
@@ -303,17 +419,29 @@ enum XiaomiRemoteLinkEvent {
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         guard central === self.central, peripheral === self.peripheral else { return }
+        handshakeDeadline?.cancel()
+        handshakeDeadline = nil
+        onEvent?(.progress(.voiceServices))
+        guard central === self.central, peripheral === self.peripheral else { return }
         peripheral.discoverServices([Self.service])
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         guard central === self.central, peripheral === self.peripheral else { return }
-        onEvent?(.failed("连接遥控器失败。请同时按住主页键和菜单键，再查找并连接。"))
+        voiceConnectionFailed(Self.connectionMessage(for: error), using: central, canRecoverPairing: true)
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         guard central === self.central, peripheral === self.peripheral else { return }
-        onEvent?(.failed("遥控器已断开。唤醒它后可以重新连接。"))
+        let message = notified ? "遥控器已断开。唤醒它后可以重新连接。" : Self.connectionMessage(for: error)
+        voiceConnectionFailed(message, using: central, canRecoverPairing: !notified)
+    }
+
+    static func connectionMessage(for error: Error?) -> String {
+        if let error = error as? CBError, [.encryptionTimedOut, .peerRemovedPairingInformation].contains(error.code) {
+            return encryptionFailure
+        }
+        return XiaomiRemoteConnectionProgress.bluetooth.timeout
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
@@ -348,11 +476,21 @@ enum XiaomiRemoteLinkEvent {
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         guard peripheral === self.peripheral, characteristic === audio || characteristic === control else { return }
         guard error == nil, characteristic.isNotifying else {
-            onEvent?(.failed("遥控器语音订阅失败。请确认配对提示后重新连接。"))
+            let needsEncryption: Bool
+            if let attError = error as? CBATTError {
+                needsEncryption = [.insufficientAuthentication, .insufficientEncryption, .insufficientEncryptionKeySize].contains(attError.code)
+            } else { needsEncryption = false }
+            if let central, needsEncryption {
+                voiceConnectionFailed(Self.encryptionFailure, using: central, canRecoverPairing: true)
+            } else {
+                onEvent?(.failed("遥控器语音订阅失败。请确认配对提示后重新连接。"))
+            }
             return
         }
         if !notified, audio?.isNotifying == true, control?.isNotifying == true {
             notified = true
+            recoveryCandidate = nil
+            pairing.stopDiscovery()
             onEvent?(.subscribed)
         }
     }

@@ -11,6 +11,7 @@ import UntitledPluginSDK
     }
 
     @Published private(set) var connection: Connection = .idle
+    @Published private(set) var connectionProgress: XiaomiRemoteConnectionProgress = .bluetooth
     @Published private(set) var devices: [XiaomiVoiceRemote] = []
     @Published private(set) var pairingCode: XiaomiRemotePairingCode?
     @Published private(set) var issue: String?
@@ -64,10 +65,7 @@ import UntitledPluginSDK
         try requireBluetooth()
         issue = nil
         if device.needsPairing {
-            connection = .pairing(device.name)
-            scheduleConnectionDeadline(after: .seconds(35)) { controller in
-                controller.stop(reason: "配对超时。请让遥控器重新进入配对模式再重试。")
-            }
+            beginPairing(named: device.name)
         } else {
             connectVoice(named: device.name)
         }
@@ -83,11 +81,31 @@ import UntitledPluginSDK
         if !confirmed { stop() }
     }
 
+    private func beginPairing(named name: String) {
+        pairingCode = nil
+        connection = .pairing(name)
+        scheduleConnectionDeadline(after: .seconds(35)) { controller in
+            controller.stop(reason: "配对超时。请让遥控器重新进入配对模式再重试。")
+        }
+    }
+
     private func connectVoice(named name: String) {
         pairingCode = nil
         connection = .connecting(name)
-        scheduleConnectionDeadline(after: .seconds(20)) { controller in
-            controller.stop(reason: "连接或语音协商超时。请唤醒遥控器后重新查找。")
+        showProgress(.bluetooth)
+    }
+
+    private func showProgress(_ progress: XiaomiRemoteConnectionProgress) {
+        connectionProgress = progress
+        let timeout: Duration
+        switch progress {
+        case .lookingForPairing: timeout = .seconds(10)
+        case .bluetooth: timeout = .seconds(8)
+        case .voiceServices: timeout = .seconds(12)
+        case .capabilities: timeout = .seconds(7)
+        }
+        scheduleConnectionDeadline(after: timeout) { controller in
+            controller.stop(reason: progress.timeout)
         }
     }
 
@@ -118,6 +136,13 @@ import UntitledPluginSDK
         switch event {
         case .devices(let devices):
             if connection == .discovering { self.devices = devices }
+        case .progress(let progress):
+            if case .connecting = connection { showProgress(progress) }
+        case .startingPairing:
+            switch connection {
+            case .connecting(let name), .pairing(let name): beginPairing(named: name)
+            default: break
+            }
         case .pairingCode(let code):
             if case .pairing = connection { pairingCode = code }
         case .connectingVoice:
@@ -132,6 +157,7 @@ import UntitledPluginSDK
             connection = .choosing
         case .subscribed:
             guard case .connecting = connection else { return }
+            showProgress(.capabilities)
             do { try link.send(XiaomiRemoteVoice.getCapabilities) }
             catch { stop(reason: error.localizedDescription) }
         case .control(let data):
@@ -147,7 +173,7 @@ import UntitledPluginSDK
     private func handleControl(_ event: XiaomiRemoteVoice.Event) {
         switch event {
         case .capabilities(let size):
-            guard case .connecting(let name) = connection else { return }
+            guard case .connecting(let name) = connection, connectionProgress == .capabilities else { return }
             connectionDeadline?.cancel()
             connectionDeadline = nil
             frameBytes = size
