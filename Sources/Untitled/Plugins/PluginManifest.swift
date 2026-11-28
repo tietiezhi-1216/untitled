@@ -2,7 +2,7 @@ import Foundation
 
 enum HostInfo {
     static let name = "Untitled"
-    static let version = "0.13.53"
+    static let version = "0.13.55"
     static let nativeCapabilityVersion = "0.13.53"
     static let bundleIdentifier = "com.untitled.app"
     static let repository = URL(string: "https://github.com/tietiezhi-1216/untitled")!
@@ -189,7 +189,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
         case .sharePeripherals: "启动或停止外设共享"
         case .switchPeripheralControl: "切换键鼠控制目标"
         case .stopPeripheralSharing: "停止全部外设共享"
-        case .shareWirelessMicrophone: "启动或停止无线麦"
+        case .shareWirelessMicrophone: "查找或断开小米遥控器"
         case .toggleDoubaoDictation: "开始或结束豆包听写"
         case .holdDoubaoDictation: "按住说话（豆包）"
         case .cancelDoubaoDictation: "取消豆包听写"

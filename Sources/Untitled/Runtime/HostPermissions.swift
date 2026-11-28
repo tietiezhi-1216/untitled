@@ -14,6 +14,7 @@ struct HostPermissionID: RawRepresentable, Hashable, Codable, Sendable {
     static let inputMonitoring = Self(rawValue: "system.inputMonitoring")
     static let camera = Self(rawValue: "system.camera")
     static let microphone = Self(rawValue: "system.microphone")
+    static let bluetooth = Self(rawValue: "system.bluetooth")
     static let notifications = Self(rawValue: "system.notifications")
 }
 

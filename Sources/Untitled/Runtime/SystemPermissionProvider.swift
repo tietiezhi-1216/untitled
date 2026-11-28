@@ -1,5 +1,6 @@
 import AVFoundation
 import AppKit
+@preconcurrency import CoreBluetooth
 @preconcurrency import ApplicationServices
 
 @MainActor enum SystemPermissionProvider {
@@ -36,6 +37,9 @@ import AppKit
                         _ = await AVCaptureDevice.requestAccess(for: .audio)
                     }
                 }),
+            make(
+                .bluetooth, "蓝牙", "用于连接小米语音遥控器及读取按住语音键时的音频。", "antenna.radiowaves.left.and.right", "Bluetooth",
+                status: bluetoothStatus, request: requestBluetooth),
             HostNativeCapabilities.notificationDriver,
         ]
     }
@@ -52,6 +56,31 @@ import AppKit
                 }
             })
     }
+    private static func bluetoothStatus() -> HostPermissionStatus {
+        switch CBManager.authorization {
+        case .allowedAlways: .authorized
+        case .notDetermined: .notDetermined
+        case .denied: .denied
+        case .restricted: .restricted
+        @unknown default: .unknown
+        }
+    }
+
+    private static func requestBluetooth() async {
+        guard bluetoothStatus() == .notDetermined else { return }
+        let observer = BluetoothPermissionObserver()
+        let manager = CBCentralManager(delegate: observer, queue: .main,
+                                       options: [CBCentralManagerOptionShowPowerAlertKey: false])
+        // CoreBluetooth reports the system prompt result through authorization.
+        // This bounded wait is used only after the system permission button is pressed.
+        defer { withExtendedLifetime((observer, manager)) {} }
+        let deadline = ContinuousClock.now + .seconds(45)
+        while bluetoothStatus() == .notDetermined, ContinuousClock.now < deadline {
+            do { try await Task.sleep(for: .milliseconds(250)) }
+            catch { return }
+        }
+    }
+
     private static func mediaStatus(_ type: AVMediaType) -> HostPermissionStatus {
         switch AVCaptureDevice.authorizationStatus(for: type) {
         case .authorized: .authorized
@@ -61,4 +90,9 @@ import AppKit
         @unknown default: .notGranted
         }
     }
+}
+
+/// Retains the CoreBluetooth client while macOS asks for authorization, without starting discovery.
+@MainActor private final class BluetoothPermissionObserver: NSObject, @preconcurrency CBCentralManagerDelegate {
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {}
 }
