@@ -19,15 +19,22 @@ function setup(options = {}) {
   const github = { rest: {
     repos: {
       get: async () => ({ data: { ...REPO, ...options.repository } }),
+      getContent: async args => {
+        record('release-definition', args);
+        if ((options.beforeRelease || []).includes(args.ref)) throw Object.assign(new Error('missing'), { status: 404 });
+        return { data: {} };
+      },
       getBranch: async () => ({ data: { commit: { sha: state.sha } } }),
       getCollaboratorPermissionLevel: async () => ({ data: { permission: options.permission || 'write' } }),
       compareCommitsWithBasehead: async () => ({ data: state.comparison }),
     },
     actions: {
       getWorkflow: async () => ({ data: { id: 7 } }),
-      listWorkflowRuns: async () => ({ data: { workflow_runs: state.runs } }),
+      listWorkflowRuns: async args => ({ data: {
+        workflow_runs: args.workflow_id === 'release.yml' ? options.releaseRuns || [] : state.runs,
+      } }),
       approveWorkflowRun: async args => { record('approve-ci', args); },
-      createWorkflowDispatch: async args => { record('dispatch-ci', args); },
+      createWorkflowDispatch: async args => { record(args.workflow_id === 'release.yml' ? 'dispatch-release' : 'dispatch-ci', args); },
     },
     issues: {
       createLabel: async args => { record('create-label', args); },
@@ -45,7 +52,7 @@ function setup(options = {}) {
         state.prs.push(pr); return { data: pr };
       },
       updateBranch: async args => { record('update-branch', args); state.sha = NEXT; },
-      merge: async args => { record('protected-merge', args); return { data: { merged: true } }; },
+      merge: async args => { record('protected-merge', args); return { data: options.mergeResult || { merged: true, sha: NEXT } }; },
     },
   }, paginate: async (method, args) => (await method(args)).data,
   graphql: async (query, args) => {
@@ -171,6 +178,30 @@ test('ready PR completion uses protected squash API with the exact head SHA', as
   const args = s.state.calls.find(([n]) => n === 'protected-merge')[1];
   assert.equal(args.sha, SHA); assert.equal(args.merge_method, 'squash');
   assert.equal(s.count('enable-auto'), 0);
+  const dispatch = s.state.calls.find(([name]) => name === 'dispatch-release')[1];
+  assert.deepEqual(dispatch, { owner: 'owner', repo: 'repo', workflow_id: 'release.yml', ref: 'main',
+    inputs: { source_sha: NEXT } });
+});
+
+test('a failed protected merge never dispatches a release', async () => {
+  const s = setup({ event: 'schedule', prs: [pull({ mergeable_state: 'clean' })], mergeResult: { merged: false } });
+  await assert.rejects(s.go(), /not completed/);
+  assert.equal(s.count('dispatch-release'), 0);
+});
+
+test('schedule recovers a missed merged-PR trigger and respects a previous dispatch', async () => {
+  const merged = overrides => pull({ state: 'closed', merged_at: new Date().toISOString(),
+    merge_commit_sha: NEXT, ...overrides });
+  const history = { display_title: 'Release ' + 'c'.repeat(40) };
+  const prs = [merged({}), merged({ number: 2, merge_commit_sha: 'c'.repeat(40) }),
+    merged({ number: 3, merge_commit_sha: 'd'.repeat(40) }), merged({ number: 4, merged_at: null }),
+    merged({ number: 5, labels: [] }),
+    merged({ number: 6, head: { ref: 'agent/fork', sha: SHA, repo: { id: 999 } } })];
+  const s = setup({ event: 'schedule', prs, beforeRelease: ['d'.repeat(40)], releaseRuns: [history] });
+  await s.go();
+  assert.equal(s.count('dispatch-release'), 1);
+  assert.equal(s.count('release-definition'), 2);
+  assert.equal(s.state.calls.find(([name]) => name === 'dispatch-release')[1].inputs.source_sha, NEXT);
 });
 
 test('a ready-looking PR never merges while CI is pending, failing, or absent', async () => {

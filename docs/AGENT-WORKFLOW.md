@@ -19,38 +19,18 @@
 
 2. **只在本任务 worktree 开发。** 在其中修改、构建和运行必要验证；只提交本任务文件。准备 Markdown PR 说明，记录需求、行为、真实检查结果、风险和未验收项，不含个人路径或凭据。不要暂存主目录 / 其他任务的修改，也不 reset、clean 或 force-push。
 
-3. **提交 PR 并登记自动合并。** 提交后在干净的任务 worktree 运行：
+3. **提交并等待交付。** 从实际检出 main 的工作区运行收尾命令。它调用现有 PR 提交脚本来推送当前任务分支、创建或复用 PR，以及按准确的 head SHA 登记自动合并。举例中的路径用本任务记录替换。
 
    ```bash
-   python3 scripts/submit-agent-pr.py --body-file /path/to/pr-description.md
+   python3 "$TASK_WORKTREE/scripts/deliver-agent-task.py" \
+     --worktree "$TASK_WORKTREE" --body-file /path/to/pr-description.md
    ```
 
-   脚本使用本机已有 GitHub CLI 登录，核对 origin，推送当前分支，幂等创建 / 复用 PR，加 `agent-automerge` 标签，并用当前 head SHA 登记 `--auto --squash`。若 GitHub 兜底刚好建了同一个 PR，会复用它。完成本步后继续验证合并及发布。
+   PR 已建成时，使用 `--pr <编号>` 代替 `--body-file` 来恢复等待。默认等待 45 分钟，可用 `--wait-minutes` 调整。遇到 Draft、暂停标签、冲突、失败检查或发布阻塞时，命令报出相应的 PR 或 Actions 链接，并保留 worktree。新版本的正式发布只在明确满足相应渠道条件后进行。
 
-4. **验证确已合并。** 等待并查询实际结果，例如 `gh pr view <URL> --json state,mergedAt,mergeCommit,baseRefName,headRefName,statusCheckRollup`。确认正确仓库 / 任务分支的 PR 为 `MERGED`、目标为 main，记录 `mergedAt` 和合并提交；再 `git fetch origin`，确认合并提交是 `origin/main` 的祖先。仅推送、排队或 CI 通过不能报告“已合并”；Squash 后原功能提交不一定是 main 祖先，不能以此误判。检查失败或冲突时修复自己的分支并正常推送，保留 worktree，不提前清理。
+4. **核对合并和独立发布。** 收尾命令要求 PR 已是 `MERGED`、目标为 main，且 GitHub 报告的合并提交已进入 `origin/main`。自动发布基于这一提交重新运行 CI，按宿主和插件自己的版本分别发包。收尾命令实际下载相应的独立 ZIP 和 `SHA256SUMS.txt`，核对标签提交与 SHA-256。流程、文档或目录条目的改动完成源码交付即可。宿主发行及签名配置见 [独立发布宿主与插件](DEVELOPMENT.md#独立发布宿主与插件)。
 
-5. **分别发布变更。** 按 [独立发布宿主与插件](DEVELOPMENT.md#独立发布宿主与插件)核对发行基线、版本和资产。通过 GitHub CLI 发布后，检查实际下载与 SHA-256。涉及插件商店时，待相应 ZIP 可验证再走目录 PR。因 CI、签名或版本冲突受阻时保留候选包和现场。
-
-6. **清理本任务 worktree，并拉取最新 main。** 从 `git worktree list --porcelain` 核对待清理路径 / 分支确属本任务，检查工作区干净并保存构建产物和验收记录。从任务 worktree 外执行普通删除，然后在干净、确实检出 main 的工作区同步。
-
-   ```bash
-   set -e
-   # 四个变量均来自本任务记录；MAIN_WORKTREE 不是任意主目录。
-   : "${REPO_ROOT:?}" "${TASK_WORKTREE:?}" "${TASK_BRANCH:?}" "${MAIN_WORKTREE:?}"
-   cd "$REPO_ROOT"
-   test "$TASK_WORKTREE" != "$REPO_ROOT"
-   test "$TASK_WORKTREE" != "$MAIN_WORKTREE"
-   test "$TASK_BRANCH" != main
-   test "$(git -C "$TASK_WORKTREE" branch --show-current)" = "$TASK_BRANCH"
-   test -z "$(git -C "$TASK_WORKTREE" status --porcelain)"
-   test "$(git -C "$MAIN_WORKTREE" branch --show-current)" = main
-   test -z "$(git -C "$MAIN_WORKTREE" status --porcelain)"
-   git worktree remove "$TASK_WORKTREE"
-   git -C "$MAIN_WORKTREE" pull --ff-only origin main
-   git -C "$MAIN_WORKTREE" rev-parse HEAD origin/main
-   ```
-
-   最后确认任务目录已移除、worktree 列表中已无该项，且本地 main 与最新 `origin/main` 一致。main 已在其他 worktree 检出时在该处同步。保留主工作区、其他任务目录及未提交改动。清理失败或 main 分叉时保留现场并报告阻塞。
+5. **清理任务 worktree 并同步 main。** 对直接由 Git 创建的任务 worktree，收尾命令检查两边的状态，在 Git common directory 下的 `untitled-delivery/` 保存交付记录与任务 `dist/`，再执行普通的 `git worktree remove` 和 `git pull --ff-only origin main`。待清理分支、HEAD、未提交数据或 main 快进条件有变化时，保留现场并报告。对 Codex 管理的 worktree，运行时加 `--keep-worktree`，由 Codex 归档任务附件，再在实际检出 main 的干净工作区快进并检查 `HEAD` 与 `origin/main` 一致。若有宿主发行，先完成本机安装和启动核对再清理。
 
 ## GitHub 兜底
 
@@ -74,7 +54,8 @@
 - 测试 CI 仍只有 `contents: read`。测试、打包和 Xcode 构建不会获得编排的 write token。
 - GitHub 当前对 token 创建的 PR 可能将 CI 置于 approval-required。编排只批准已登记、受信任同仓库 PR 的准确 head 上、本仓库既定 CI workflow 的 `action_required` run；不批准 fork、部署 environment 或 PR review，不伪造检查。
 - GitHub token 产生的 push 通常不会再触发 push 工作流。因此正常 update-branch 后显式 `workflow_dispatch` 只读 CI；该事件是 GitHub 明确支持的例外，新 run 绑定更新后的分支 SHA。普通 Agent 用本机 `gh` 建 PR 则正常触发 PR CI，无需此兜底。
-- 发布由交付任务在核对源码合并、构建验证和签名后使用本机 GitHub CLI 执行。PR 编排和测试 CI 的令牌不负责发布或签名。
+- `Untitled release` 监听 main 的 push。PR 编排使用短期 token 完成受保护合并后，显式按准确的合并 SHA `workflow_dispatch`，定时协调也会为近期已登记且缺少发布 run 的合并补发事件。首轮上线前的提交可以按 SHA 手动发起。
+- 发布流水线只接受受保护 main 第一父链上的提交。签名任务通过 `release` 环境读取凭据，独立的发布任务只在上传时使用写令牌。PR 检查和插件打包无签名凭据。发布重试验证已存在的标签和资产，继续自己的草稿或验证已公开的包。
 
 官方事件说明：[触发工作流](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-when-your-workflow-runs/triggering-a-workflow)、[workflow_run 安全边界](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run)。
 
@@ -97,4 +78,4 @@ node --test .github/scripts/agent-pr.test.cjs
 python3 -m unittest discover -s Tests/Automation
 ```
 
-离线测试注入 fake GitHub / gh / git，不调用真实写接口。覆盖受信任作者、fork / 旧 SHA / 冒名 workflow 拒绝、幂等、Draft / opt-out、冲突、失败 CI、带 SHA 的更新与 CI 重新触发。首次启用还应以真实 PR 验证创建、必需 CI 和自动合并，不能把 fake 测试当作已上线。
+离线测试覆盖受保护 PR 合并、发布触发补偿、独立版本、公开下载校验，以及 Git worktree 的安全清理和 main 快进。凭据配置完成后，用真实的宿主版本核对签名、公开下载和本机安装。

@@ -42,7 +42,7 @@ AppKit 焦点测试串行运行。TestingMacros 兼容命令及 Xcode 构建见 
 
 独立发布可指定 `--repository alice/my-plugin`；`--plugin` 也接受仓库外插件目录，这时必须附带自己的 LICENSE。默认只生成本地 ZIP 和目录，不更新在线商店。对应 Release 资产确已发布并可下载后才使用 `--write-catalog`；已发布同版本资产保持不变。
 
-按 [Agent 自动交付](../../../docs/AGENT-WORKFLOW.md) 从最新主线创建 worktree。验证后执行 `python3 scripts/submit-agent-pr.py --body-file <PR说明.md>`，待 PR 确为 `MERGED` 并确认提交进入 `origin/main`，按 [独立发布流程](../../../docs/DEVELOPMENT.md#独立发布宿主与插件)分别发布有改动的宿主或插件。验证实际下载和 SHA-256 后清理本任务 worktree，并同步本地 main。用户明确要求只改本地、暂停或不发布时按其范围保留现场。
+按 [Agent 自动交付](../../../docs/AGENT-WORKFLOW.md) 从最新主线创建任务 worktree。提交后从 main 工作区运行 `python3 <任务worktree>/scripts/deliver-agent-task.py --worktree <任务worktree> --body-file <PR说明.md>`。该命令登记受保护 PR，核对实际合并，等待宿主及插件的独立发布，并下载核对 SHA-256 后清理和同步本地 main。已登记的 PR 用 `--pr` 恢复。Codex 管理的 worktree 加 `--keep-worktree`，交付验证完成后用 Codex 归档，再同步 main。用户明确要求只改本地、暂停或不发布时按其范围保留现场。
 
 宿主原生代码或随宿主编译的插件功能改动，通过相关验证后按 [本机安装与回退](../../../docs/DEVELOPMENT.md#本机安装与回退) 默认替换 `/Applications/Untitled.app` 并核对重启后的运行路径，不能只在 `dist/` 留包。纯声明式插件或文档改动不触发宿主替换；用户要求安装或不安装时以明确要求为准。保留旧包并核对签名，不能沿用现有签名时先征得同意，不无声改为临时签名。
 
