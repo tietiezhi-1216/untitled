@@ -278,10 +278,12 @@ struct CaptureRecord: Codable, Identifiable {
         }
     }
 
-    func perform(_ action: ActionKind, permissions: PluginPermissionClient) async throws {
+    func perform(_ action: ActionKind, permissions: PluginPermissionClient,
+                 pinShortcutMatches: @escaping (UInt32, UInt32) -> Bool = { _, _ in false }) async throws {
         if action == .captureRecording, isRecording { try await stopRecording(); return }
         switch action {
         case .captureHistory: showHistory(); return
+        case .pinSelection: service.pinCurrentSelection(); return
         case .pinClipboard: try pinClipboard(); return
         case .togglePins: togglePins(); return
         case .restorePin: try pinManager.restoreLastClosed(); return
@@ -306,7 +308,11 @@ struct CaptureRecord: Codable, Identifiable {
                 throw PluginError.invalid("还没有上次截图区域，请先框选一次。")
             }
             chosen = try await service.repeatRegion(memory, permissions: permissions)
-        } else { chosen = try await service.choose(mode, permissions: permissions, allowComplexSelection: action != .captureScrolling && action != .captureRecording) }
+        } else {
+            chosen = try await service.choose(mode, permissions: permissions,
+                allowComplexSelection: action != .captureScrolling && action != .captureRecording,
+                pinShortcutMatches: pinShortcutMatches)
+        }
         guard let selection = chosen, generation == captureGeneration else { return }
         let memory = CaptureRegionMemory(displayID: selection.display.displayID, rect: selection.rect)
         if !selection.isComposite {

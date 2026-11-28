@@ -7,6 +7,14 @@ extension PluginManifest {
 }
 
 struct CapturePluginUIProvider: PluginUIProvider {
+    nonisolated static func migrateSelectionPinBinding(in record: inout InstalledPlugin, to manifest: PluginManifest) {
+        guard record.id == "com.untitled.screenshot",
+              record.manifest.templates.contains(where: { $0.id == "pin" && $0.action == .pinClipboard }),
+              manifest.templates.contains(where: { $0.id == "pin" && $0.action == .pinSelection }),
+              let index = record.commands.firstIndex(where: { $0.templateID == "pin" && $0.action == .pinClipboard }) else { return }
+        record.commands[index].action = .pinSelection
+    }
+
     func register(in registry: PluginUIRegistry) {
         registry.component("capture.history", requiredActions: [.captureHistory]) { context in
             AnyView(CaptureHistoryView(pluginID: context.pluginID, capture: context.store.screenshots))
@@ -23,7 +31,7 @@ struct CapturePluginUIProvider: PluginUIProvider {
         let actions: [(String, ActionKind)] = [
             ("region", .captureRegion), ("window", .captureWindow), ("screen", .captureScreen),
             ("scrollVertical", .captureScrolling), ("scrollHorizontal", .captureScrolling),
-            ("record", .captureRecording), ("pinClipboard", .pinClipboard),
+            ("record", .captureRecording), ("pinSelection", .pinSelection), ("pinClipboard", .pinClipboard),
             ("togglePins", .togglePins), ("history", .captureHistory),
             ("delayed", .captureDelayed), ("copy", .captureAndCopy), ("repeatRegion", .captureLastRegion),
             ("restorePin", .restorePin), ("closePins", .closePins), ("hideOtherPins", .hideOtherPins),
@@ -47,7 +55,7 @@ struct CapturePluginUIProvider: PluginUIProvider {
                     return .init(
                         title: title,
                         symbol: name == "record" && capture.isRecording ? "stop.circle.fill" : action.symbol,
-                        isEnabled: !capture.busy)
+                        isEnabled: action == .pinSelection || !capture.busy)
                 },
                 updates: { context in
                     context.store.screenshots.objectWillChange.eraseToAnyPublisher()
@@ -119,6 +127,7 @@ struct CapturePluginUIProvider: PluginUIProvider {
         case .captureScrolling: "capture.scrollVertical"
         case .captureRecording: "capture.record"
         case .pinClipboard: "capture.pinClipboard"
+        case .pinSelection: "capture.pinSelection"
         case .togglePins: "capture.togglePins"
         case .captureHistory: "capture.history"
         default: nil

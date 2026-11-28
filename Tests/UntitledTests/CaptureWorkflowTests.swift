@@ -8,13 +8,13 @@ struct CaptureWorkflowTests {
     private func manifest() throws -> PluginManifest {
         try JSONDecoder().decode(PluginManifest.self, from: Data(contentsOf: URL(fileURLWithPath: "Plugins/screenshot/manifest.json")))
     }
-    @Test func pixPinGlobalDefaultsAreExactAndConflictsAreNotStolen() throws {
+    @Test func screenshotDefaultsPreserveOccupiedKeys() throws {
         let manifest = try manifest()
         try manifest.validate()
         var plugin = InstalledPlugin(manifest: manifest, commands: [])
         let conflicts = plugin.initializeDefaultCommands(occupiedHotKeys: ["18:4096"])
         #expect(conflicts == ["区域截图"])
-        let expected: [ActionKind: String] = [.captureDelayed: "18:2048", .captureAndCopy: "18:6144", .pinClipboard: "19:4096", .restorePin: "20:4096", .cyclePinGroup: "50:4096"]
+        let expected: [ActionKind: String] = [.captureDelayed: "18:2048", .captureAndCopy: "18:6144", .pinSelection: "19:4096", .restorePin: "20:4096", .cyclePinGroup: "50:4096"]
         #expect(plugin.commands.count == 6)
         #expect(plugin.commands.first { $0.action == .captureRegion }?.hotKey == nil)
         for (action, identity) in expected { #expect(plugin.commands.first { $0.action == action }?.hotKey?.identity == identity) }
@@ -27,7 +27,7 @@ struct CaptureWorkflowTests {
         #expect(plugin.commands.first?.id == legacy.id)
         #expect(plugin.commands.first?.hotKey == legacy.hotKey)
         #expect(plugin.commands.first?.isEnabled == false)
-        let pinIndex = try #require(plugin.commands.firstIndex { $0.action == .pinClipboard })
+        let pinIndex = try #require(plugin.commands.firstIndex { $0.action == .pinSelection })
         plugin.commands[pinIndex].hotKey = nil
         plugin.commands.removeAll { $0.action == .restorePin }
         let saved = plugin.commands
@@ -38,6 +38,21 @@ struct CaptureWorkflowTests {
         #expect(plugin.initializeDefaultCommands(restoring: true).isEmpty)
         #expect(plugin.commands.count == 6)
         #expect(plugin.commands.first { $0.action == .captureRegion }?.hotKey?.identity == "18:4096")
+    }
+    @Test func migratingTheDefaultPinPreservesItsBindingAndCustomClipboardActions() throws {
+        let updated = try manifest()
+        let legacyTemplate = CommandTemplate(id: "pin", title: "剪贴板贴图", action: .pinClipboard)
+        let legacy = PluginManifest(schemaVersion: 2, id: updated.id, name: updated.name, version: "1.6.1",
+                                    summary: updated.summary, author: updated.author, repository: updated.repository,
+                                    minimumHostVersion: "0.12.0", actions: [.pinClipboard], templates: [legacyTemplate])
+        let customKey = HotKey(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(controlKey), key: "P")
+        let defaultPin = PluginCommand(action: .pinClipboard, hotKey: customKey, isEnabled: false, templateID: "pin")
+        let custom = PluginCommand(action: .pinClipboard)
+        var record = InstalledPlugin(manifest: legacy, commands: [defaultPin, custom], initializedDefaultTemplateIDs: ["pin"])
+        CapturePluginUIProvider.migrateSelectionPinBinding(in: &record, to: updated)
+        var expected = defaultPin
+        expected.action = .pinSelection
+        #expect(record.commands == [expected, custom])
     }
     @Test func restoringSwappedDefaultsDoesNotReportFalseConflicts() throws {
         var plugin = InstalledPlugin(manifest: try manifest(), commands: [])

@@ -10,6 +10,7 @@ final class PluginStore: ObservableObject {
     @Published private(set) var isInstalling = false
     @Published private(set) var catalogError: String?
     @Published private(set) var hotKeyErrors: [UUID: String] = [:]
+    private var selectionPinShortcuts: [String: [HotKey]] = [:]
     @Published private(set) var captureHotKeysPaused = false
     @Published var errorMessage: String?
     @Published var requestedPluginID: String?
@@ -243,6 +244,7 @@ final class PluginStore: ObservableObject {
             let resumeSharing = sharingControllers[manifest.id]?.isRunning == true && sharingDefaults.bool(forKey: "sharing.sessionEnabled")
             sharingControllers[manifest.id]?.stop(reason: "正在更新插件。")
             if manifest.version != record.manifest.version || readme != nil { record.readme = readme }
+            CapturePluginUIProvider.migrateSelectionPinBinding(in: &record, to: manifest)
             record.manifest = manifest
             let conflicts = record.initializeDefaultCommands(occupiedHotKeys: occupiedHotKeys(excluding: manifest.id))
             try save(record)
@@ -423,7 +425,14 @@ final class PluginStore: ObservableObject {
             self?.requestedPluginID = pluginID
             self?.showMainWindow()
         }
-        try await screenshots.perform(action, permissions: client)
+        try await screenshots.perform(action, permissions: client) { [weak self] keyCode, modifiers in
+            self?.matchesSelectionPinShortcut(keyCode: keyCode, modifiers: modifiers, pluginID: pluginID) == true
+        }
+    }
+
+    func matchesSelectionPinShortcut(keyCode: UInt32, modifiers: UInt32, pluginID: String) -> Bool {
+        guard !isPreparingForQuit else { return false }
+        return selectionPinShortcuts[pluginID]?.contains { $0.keyCode == keyCode && $0.modifiers == modifiers } == true
     }
 
     func permissionClient(for pluginID: String) -> PluginPermissionClient {
@@ -460,6 +469,7 @@ final class PluginStore: ObservableObject {
         } else { captureController?.globalMouse.stop() }
         hotKeys.clear()
         hotKeyErrors = [:]
+        selectionPinShortcuts.removeAll()
         guard !HotKeyRecordingSession.isRecording else { return }
         var identities = Set<String>()
         for plugin in installed where plugin.isEnabled {
@@ -470,6 +480,10 @@ final class PluginStore: ObservableObject {
                     try command.validate(allowedActions: plugin.manifest.actions)
                     guard identities.insert(hotKey.identity).inserted else {
                         throw PluginError.invalid("这个快捷键已绑定到其他操作。")
+                    }
+                    if command.action == .pinSelection {
+                        selectionPinShortcuts[plugin.id, default: []].append(hotKey)
+                        continue
                     }
                     let release: (() -> Void)? = command.action == .holdDoubaoDictation ? { [weak self] in
                         self?.dictationControllers[plugin.id]?.holdReleased(command.id)
