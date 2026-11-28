@@ -4,6 +4,7 @@ import AppKit
 enum ActionExecutor {
     static func execute(_ command: PluginCommand, showMainWindow: () -> Void,
                         peripheralAction: (ActionKind) throws -> Void = { _ in throw PluginError.invalid("键鼠共享插件尚未准备好。") },
+                        wirelessMicrophoneAction: () throws -> Void = { throw PluginError.invalid("无线麦插件尚未准备好。") },
                         dictationAction: (ActionKind) throws -> Void = { _ in throw PluginError.invalid("语音输入插件尚未准备好。") },
                         screenshotAction: (ActionKind) async throws -> Void = { _ in throw PluginError.invalid("截图插件尚未准备好。") }) async throws {
         try command.action.validateTarget(command.target)
@@ -30,6 +31,8 @@ enum ActionExecutor {
             showMainWindow()
         case .sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing:
             try peripheralAction(command.action)
+        case .shareWirelessMicrophone:
+            try wirelessMicrophoneAction()
         case .toggleDoubaoDictation, .holdDoubaoDictation, .cancelDoubaoDictation:
             try dictationAction(command.action)
         default:

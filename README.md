@@ -68,6 +68,7 @@ cd untitled
 | [全局快捷键](Plugins/global-shortcuts/README.md) | 打开应用、网址、系统快捷指令与主面板 |
 | [截图](Plugins/screenshot/README.md) | 截图、编辑、贴图、录屏与本地识别等工作流 |
 | [外设共享](Plugins/peripheral-sharing/README.md) | 双 Mac 键鼠与按需麦克风共享；完整双机验收范围见插件说明 |
+| [无线麦](Plugins/wireless-microphone/README.md) | 局域网双 Mac 麦克风共享，从源码构建宿主后通过 ZIP 安装 |
 
 ## 让 agent 开发插件
 

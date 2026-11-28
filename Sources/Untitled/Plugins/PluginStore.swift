@@ -150,6 +150,34 @@ final class PluginStore: ObservableObject {
         sharingControllers[pluginID] = controller
         return controller
     }
+    private var wirelessMicrophoneControllers: [String: WirelessMicrophoneController] = [:]
+    private let wirelessMicrophoneFactory: (String, UserDefaults) -> WirelessMicrophoneController
+
+    func wirelessMicrophone(for pluginID: String) -> WirelessMicrophoneController {
+        if let controller = wirelessMicrophoneControllers[pluginID] { return controller }
+        let controller = wirelessMicrophoneFactory(pluginID, sharingDefaults)
+        controller.isAllowed = { [weak self] in self?.canUseWirelessMicrophone(pluginID) == true }
+        controller.requireMicrophone = { [weak self] in
+            guard let self else { throw PluginError.invalid("宿主已关闭。") }
+            try self.permissionClient(for: pluginID).require([.microphone])
+        }
+        wirelessMicrophoneControllers[pluginID] = controller
+        return controller
+    }
+
+    private func canUseWirelessMicrophone(_ pluginID: String) -> Bool {
+        !isPreparingForQuit && installed.contains {
+            $0.id == pluginID && $0.isEnabled && $0.manifest.actions.contains(.shareWirelessMicrophone)
+        }
+    }
+
+    func performWirelessMicrophoneAction(pluginID: String) throws {
+        guard canUseWirelessMicrophone(pluginID) else { throw PluginError.invalid("请先安装并启用无线麦。") }
+        let controller = wirelessMicrophone(for: pluginID)
+        if controller.isRunning { controller.stop() }
+        else { try controller.start() }
+    }
+
     let uiRegistry: PluginUIRegistry
     let permissions: HostPermissionCenter
     var screenshots: ScreenshotController {
@@ -188,6 +216,7 @@ final class PluginStore: ObservableObject {
         #endif
         sharingSetup?.stopReporting(); sharingSetup = nil
         for controller in sharingControllers.values { controller.stop() }
+        for controller in wirelessMicrophoneControllers.values { controller.stop() }
         for controller in dictationControllers.values { controller.cancel(message: "应用正在退出，听写已停止。") }
         for history in dictationControllers.values.map(\.history) { await history.finishPendingIO() }
         let ready = await captureController?.prepareForQuit() ?? true
@@ -256,13 +285,17 @@ final class PluginStore: ObservableObject {
          priorityRecoverySleep: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for:$0) },
          presentations: PluginPresentationIndex = .bundled, initialCatalog: [CatalogEntry] = [],
          dictationFactory: @escaping (URL) -> DoubaoDictationController = { DoubaoDictationController(preferencesURL: $0) },
-        captureFactory: @escaping (URL?) -> ScreenshotController = { ScreenshotController(directory: $0) }) {
+         wirelessMicrophoneFactory: @escaping (String, UserDefaults) -> WirelessMicrophoneController = {
+             WirelessMicrophoneController(pluginID: $0, defaults: $1)
+         },
+         captureFactory: @escaping (URL?) -> ScreenshotController = { ScreenshotController(directory: $0) }) {
         self.hotKeys=HotKeyManager(driver:ordinaryHotKeyDriver)
         self.priorityRecoverySleep=priorityRecoverySleep
         self.captureFactory=captureFactory
         self.presentations = presentations
         self.catalog = initialCatalog
         self.dictationFactory = dictationFactory
+        self.wirelessMicrophoneFactory = wirelessMicrophoneFactory
         self.startupError = startupError
         if let sharingDefaults { self.sharingDefaults = sharingDefaults; isolatedSharingDomain = nil }
         else if directory != nil {
@@ -460,6 +493,7 @@ final class PluginStore: ObservableObject {
             dictationControllers[manifest.id]?.cancel(message: "本次听写因插件更新而中断。")
             let resumeSharing = sharingControllers[manifest.id]?.isRunning == true && sharingDefaults.bool(forKey: "sharing.sessionEnabled")
             sharingControllers[manifest.id]?.stop(reason: "正在更新插件。")
+            wirelessMicrophoneControllers[manifest.id]?.stop()
             if manifest.version != record.manifest.version || readme != nil { record.readme = readme }
             record.manifest = manifest
             let conflicts = record.initializeDefaultCommands(occupiedHotKeys: occupiedHotKeys(excluding: manifest.id))
@@ -549,6 +583,7 @@ final class PluginStore: ObservableObject {
             dictationControllers[pluginID]?.cancel(message: "插件已停用。")
             if pluginID == PeripheralSharingController.pluginID { sharingDefaults.set(false, forKey: "sharing.sessionEnabled") }
             sharingControllers[pluginID]?.stopUserSession()
+            wirelessMicrophoneControllers[pluginID]?.stop()
         }
         if record.manifest.hasCaptureCapability {
             if !enabled { screenshots.deactivate() }
@@ -593,6 +628,7 @@ final class PluginStore: ObservableObject {
             if pluginID == PeripheralSharingController.pluginID { sharingDefaults.set(false, forKey: "sharing.sessionEnabled") }
             sharingPriorityObservers.removeValue(forKey: pluginID)?.cancel()
             sharingControllers.removeValue(forKey: pluginID)?.stopUserSession()
+            wirelessMicrophoneControllers.removeValue(forKey: pluginID)?.stop()
             if let dictation = dictationControllers.removeValue(forKey: pluginID) {
                 dictation.cancel(message: "插件已卸载。")
                 dictation.history.invalidateForUninstall()
@@ -615,6 +651,8 @@ final class PluginStore: ObservableObject {
         do {
             try await ActionExecutor.execute(command, showMainWindow: showMainWindow, peripheralAction: { [self] action in
                 try performPeripheralAction(action, pluginID: pluginID)
+            }, wirelessMicrophoneAction: { [self] in
+                try performWirelessMicrophoneAction(pluginID: pluginID)
             }, dictationAction: { [self] action in
                 try performDictationAction(action, pluginID: pluginID)
             }) { [self] action in

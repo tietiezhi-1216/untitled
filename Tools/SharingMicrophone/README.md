@@ -1,6 +1,6 @@
 # Untitled Microphone（macOS 14+）
 
-本项目独立实现的 HAL 虚拟麦克风，用于外设共享插件。不是 Oink 驱动，也不包含或依赖其 GPL 代码。参考的是公开产品行为；音频驱动基础采用 [libASPL](https://github.com/gavv/libASPL)，MIT / Apple 示例代码许可。
+本项目独立实现的 HAL 虚拟麦克风，供无线麦插件及外设共享的麦克风开发实现使用。不是 Oink 驱动，也不包含或依赖其 GPL 代码。参考的是公开产品行为；音频驱动基础采用 [libASPL](https://github.com/gavv/libASPL)，MIT / Apple 示例代码许可。
 
 ## 构建
 

@@ -61,6 +61,9 @@ struct CommandEditor: View {
                     Text("按住开始听写，松开结束。").font(.callout).foregroundStyle(.secondary)
                 case .toggleDoubaoDictation, .cancelDoubaoDictation:
                     EmptyView()
+                case .shareWirelessMicrophone:
+                    Text("启动或停止无线麦连接。发送和接收需要在无线麦面板开启。")
+                        .font(.callout).foregroundStyle(.secondary)
                 default:
                     Text("绑定后可在任意应用中执行此截图操作。首次截屏或录屏时需要允许屏幕录制权限。")
                         .font(.callout).foregroundStyle(.secondary)

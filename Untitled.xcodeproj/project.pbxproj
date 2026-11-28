@@ -125,6 +125,9 @@
 		D1C700000000000000000032 /* DictationInputMethod.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C700000000000000000012 /* DictationInputMethod.swift */; };
 		D1C700000000000000000036 /* Waveform.tiff in Resources */ = {isa = PBXBuildFile; fileRef = D1C700000000000000000016 /* Waveform.tiff */; };
 		D1C700000000000000000065 /* DictationInputMethodCheck.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C700000000000000000066 /* DictationInputMethodCheck.swift */; };
+		A91A01000000000000000000 /* WirelessMicrophoneAudio.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91A02000000000000000000 /* WirelessMicrophoneAudio.swift */; };
+		A91A01000000000000000001 /* WirelessMicrophoneController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91A02000000000000000001 /* WirelessMicrophoneController.swift */; };
+		A91A01000000000000000002 /* WirelessMicrophonePluginUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A91A02000000000000000002 /* WirelessMicrophonePluginUI.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -251,6 +254,9 @@
 		D1C700000000000000000015 /* UntitledDictationInputMethod.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = UntitledDictationInputMethod.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D1C700000000000000000016 /* Waveform.tiff */ = {isa = PBXFileReference; lastKnownFileType = image.tiff; path = Resources/DictationInputMethod/Waveform.tiff; sourceTree = SOURCE_ROOT; };
 		D1C700000000000000000066 /* DictationInputMethodCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationInputMethodCheck.swift; sourceTree = "<group>"; };
+		A91A02000000000000000000 /* WirelessMicrophoneAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WirelessMicrophoneAudio.swift; sourceTree = "<group>"; };
+		A91A02000000000000000001 /* WirelessMicrophoneController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WirelessMicrophoneController.swift; sourceTree = "<group>"; };
+		A91A02000000000000000002 /* WirelessMicrophonePluginUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WirelessMicrophonePluginUI.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -294,6 +300,7 @@
 				11B4D3BA8AED401619B0EC79 /* App */,
 				20BF2DD8B154514F23DA8897 /* Capture */,
 				A91503000000000000000000 /* Sharing */,
+				A91A03000000000000000000 /* WirelessMicrophone */,
 				A91603000000000000000000 /* SpeechInput */,
 				22D00513236BA126D92BCCF8 /* Models */,
 				546B09B18166645FBEDD2DC6 /* Plugins */,
@@ -471,6 +478,16 @@
 		};
 		D1C700000000000000000050 /* DictationIMEKit */ = {isa = PBXGroup; children = (D1C700000000000000000010 /* DictationInputMethodProtocol.swift */, D1C700000000000000000011 /* DictationIMESocket.swift */); name = DictationIMEKit; path = "Sources/DictationIMEKit"; sourceTree = "<group>"; };
 		D1C700000000000000000051 /* UntitledDictationInputMethod */ = {isa = PBXGroup; children = (D1C700000000000000000012 /* DictationInputMethod.swift */, D1C700000000000000000016 /* Waveform.tiff */); name = UntitledDictationInputMethod; path = "Sources/UntitledDictationInputMethod"; sourceTree = "<group>"; };
+		A91A03000000000000000000 /* WirelessMicrophone */ = {
+			isa = PBXGroup;
+			children = (
+				A91A02000000000000000000 /* WirelessMicrophoneAudio.swift */,
+				A91A02000000000000000001 /* WirelessMicrophoneController.swift */,
+				A91A02000000000000000002 /* WirelessMicrophonePluginUI.swift */,
+			);
+			path = WirelessMicrophone;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 
@@ -566,6 +583,9 @@
 				A91501000000000000000004 /* SharingPluginView.swift in Sources */,
 				A91501000000000000000005 /* SharingProtocol.swift in Sources */,
 				A91501000000000000000006 /* SharingTransport.swift in Sources */,
+				A91A01000000000000000000 /* WirelessMicrophoneAudio.swift in Sources */,
+				A91A01000000000000000001 /* WirelessMicrophoneController.swift in Sources */,
+				A91A01000000000000000002 /* WirelessMicrophonePluginUI.swift in Sources */,
 				5963A6D32F9BD7161D8EF758 /* CaptureScrollSegments.swift in Sources */,
 				19DE7DA35A510A5D85E79D6F /* CaptureRecordingAnnotations.swift in Sources */,
 				CAA000000000000000000012 /* CaptureWebP.swift in Sources */,
