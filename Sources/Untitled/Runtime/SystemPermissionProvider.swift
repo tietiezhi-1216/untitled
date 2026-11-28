@@ -36,6 +36,7 @@ import AppKit
                         _ = await AVCaptureDevice.requestAccess(for: .audio)
                     }
                 }),
+            HostNativeCapabilities.notificationDriver,
         ]
     }
     private static func make(

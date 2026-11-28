@@ -155,6 +155,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
     case runShortcut
     case showMainWindow
     case sharePeripherals, switchPeripheralControl, stopPeripheralSharing
+    case shareWirelessMicrophone
     case toggleDoubaoDictation, holdDoubaoDictation, cancelDoubaoDictation
     case captureRegion, captureWindow, captureScreen, captureScrolling, captureRecording
     case pinSelection, togglePins, captureHistory
@@ -165,7 +166,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
     var isScreenshotAction: Bool {
         switch self {
         case .openApplication, .openURL, .runShortcut, .showMainWindow, .sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing,
-             .toggleDoubaoDictation, .holdDoubaoDictation, .cancelDoubaoDictation: false
+             .shareWirelessMicrophone, .toggleDoubaoDictation, .holdDoubaoDictation, .cancelDoubaoDictation: false
         default: true
         }
     }
@@ -179,6 +180,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
         case .sharePeripherals: "启动或停止键鼠共享"
         case .switchPeripheralControl: "切换键鼠控制目标"
         case .stopPeripheralSharing: "停止全部键鼠共享"
+        case .shareWirelessMicrophone: "启动或停止无线麦"
         case .toggleDoubaoDictation: "开始或结束豆包听写"
         case .holdDoubaoDictation: "按住说话（豆包）"
         case .cancelDoubaoDictation: "取消豆包听写"
@@ -212,6 +214,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
         case .sharePeripherals: "network"
         case .switchPeripheralControl: "keyboard"
         case .stopPeripheralSharing: "stop.circle"
+        case .shareWirelessMicrophone: "mic"
         case .toggleDoubaoDictation: "mic"
         case .holdDoubaoDictation: "mic.fill"
         case .cancelDoubaoDictation: "xmark.circle"

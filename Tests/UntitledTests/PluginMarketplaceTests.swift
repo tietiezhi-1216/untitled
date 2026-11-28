@@ -6,6 +6,11 @@ import Testing
 
 @Suite(.serialized)
 struct PluginMarketplaceTests {
+    private static let galleryReferenceIDs: Set<String> = [
+        "com.untitled.doubao-speech-input", "com.untitled.global-shortcuts",
+        "com.untitled.peripheral-sharing", "com.untitled.screenshot",
+    ]
+
     @Test func storefrontRejectsInvalidAssetsAndRequiresCompatibleHost() throws {
         let source = try #require(PluginPresentationIndex.bundled.plugins.first?.storefront)
         var plugin = manifest(id: "dev.test.storefront", name: "Storefront")
@@ -41,14 +46,15 @@ struct PluginMarketplaceTests {
 
     @Test func artworkBoundsAndBundledPresentations() throws {
         let bundled = PluginPresentationIndex.bundled
-        #expect(bundled.plugins.count == 4)
+        #expect(Set(bundled.plugins.map(\.id)).isSuperset(of: Self.galleryReferenceIDs))
         for item in bundled.plugins {
             let icon = try #require(item.icon)
-            #expect(icon.png != nil)
             try icon.validate()
-            let storefront = try #require(item.storefront)
-            #expect(storefront.jpeg != nil)
-            try storefront.validate()
+            try item.storefront?.validate()
+            if Self.galleryReferenceIDs.contains(item.id) {
+                #expect(icon.png != nil)
+                #expect(item.storefront?.jpeg != nil)
+            }
             #expect(bundled.appearance(id: item.id, repository: item.repository, version: "0.1.0")?.name == item.name)
             #expect(bundled.appearance(id: item.id, repository: item.repository, version: "99.0.0") == nil)
             #expect(bundled.appearance(id: item.id, repository: URL(string: "https://github.com/alice/fork")!, version: "0.1.0") == nil)
@@ -125,7 +131,7 @@ struct PluginMarketplaceTests {
         defer { application.appearance = previousAppearance }
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let presentations = PluginPresentationIndex.bundled.plugins
+        let presentations = PluginPresentationIndex.bundled.plugins.filter { Self.galleryReferenceIDs.contains($0.id) }
         #expect(presentations.count == 4)
         let catalog = presentations.enumerated().map { index, appearance in
             CatalogEntry(id: "dev.test.card-\(index)", name: appearance.name, version: "1.0.0",

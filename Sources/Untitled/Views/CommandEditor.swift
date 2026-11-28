@@ -57,6 +57,9 @@ struct CommandEditor: View {
                 case .sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing:
                     Text("使用键鼠共享插件中已配对的设备。切换控制需要两端明确开启键鼠共享；停止操作始终释放键鼠和麦克风。")
                         .font(.callout).foregroundStyle(.secondary)
+                case .shareWirelessMicrophone:
+                    Text("启动或停止无线麦连接。发送和接收需要在无线麦面板开启。")
+                        .font(.callout).foregroundStyle(.secondary)
                 case .holdDoubaoDictation:
                     Text("按住开始听写，松开结束。").font(.callout).foregroundStyle(.secondary)
                 case .toggleDoubaoDictation, .cancelDoubaoDictation:

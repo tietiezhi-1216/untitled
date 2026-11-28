@@ -19,6 +19,10 @@
 
 设置中的“软件更新”与插件商店独立，显示运行版本/构建号、手动检查正式发布版、更新说明与兼容本体包的下载页入口。没有自动轮询、后台下载或自替换安装；发布来源、资源预算及限制见 [软件更新](HOST-UPDATES.md)。
 
+### 原生能力
+
+主窗口侧栏的「原生能力」集中提供文件定位与系统分享、纯文本剪贴板、本地通知，以及已接入的插件动作和待接入能力。宿主工具放在 `Runtime/HostNativeCapabilities.swift`，权限由 `SystemPermissionProvider` 注册。插件功能继续从自己的工作区执行。接入状态和授权规则见 [权限与执行规范](PERMISSIONS.md)。
+
 ### 构建
 
 ```bash
@@ -104,7 +108,8 @@ Sources/Untitled/
 ├── Capture/     # 截图、编辑、贴图、滚动拼接、录制、OCR、文档导出与本地模型
 ├── Models/      # 应用外观设置
 ├── Plugins/     # 插件规范、目录、ZIP 安装和配置存储
-├── Sharing/     # 双 Mac TLS 配对、键鼠接力与按需虚拟麦克风同步
+├── Sharing/     # 双 Mac TLS 配对、键鼠接力与共享音频基础实现
+├── WirelessMicrophone/ # 无线麦配对、设备面板与按需音频会话
 ├── SpeechInput/ # 豆包游客双通道 ASR、麦克风、范围校验与非激活听写浮条
 ├── Runtime/     # 通用动作执行与 Carbon 全局热键
 └── Views/       # 原生商店、插件配置、录制器与设置
