@@ -132,20 +132,40 @@ scripts/         # 本地构建与插件打包
 | 声明式插件清单、README 或许可 | 递增该插件版本，按 `--plugin` 打包。独立仓库使用自己的标签，同仓插件使用 `plugin-<slug>-v<版本>` 并设置 `--latest=false` |
 | 两者都有 | 分别发布。插件依赖新宿主能力时先核对宿主已发，并在清单声明正确的最低版本 |
 
-### 宿主发行
+### GitHub 自动发布
 
-核对版本、构建号及上一次公开发行所含功能。常规从已合并提交构建。公开发行沿独立发行线维护时，将同一改动移植到该发行线上并对发行提交重新完成 CI，保留上个公开标签的祖先关系。标签指向实际构建提交。
+合并到受保护 main 后，`Untitled release` 根据该合并提交的改动生成发布计划，并针对同一 SHA 重新运行 macOS CI。宿主原生代码或构建改动递增 `Resources/Info.plist` 中的版本和构建号，并同步 `HostInfo.version`。ZIP 内的插件文件发生变更时递增自己的清单版本。共享的展示资源允许随插件清单更新，独立插件 ZIP 可以使用已经公开的兼容宿主。
 
-从干净的发行提交完成 Swift 测试、Release 构建和 Xcode CI。正式分发使用 Developer ID 和 Apple 公证，先将公证票据 staple 到应用。沿用已有签名发布预览时，明确标注签名、公证、架构和真机验收范围。签名身份缺失需在发布前确定预览渠道，避免以临时签名替换原有发行签名。可分别校验并打包宿主：
+宿主默认使用 Developer ID Application 和 Hardened Runtime 签名，作为 GitHub 公开预览发布。已有公开版保留自己的标签与资产。若旧公开版来自平行发行线，先通过受保护 PR 把已发布功能整合进 main。审查确认后，将仓库的 Actions 变量 `UNTITLED_ADOPTED_HOST_BASELINE` 设为 `<公开宿主标签>:<审核通过的 main 完整 SHA>`。候选提交应包含这一已审查的提交。后续版本正常沿 main 发布。
+
+在只允许受保护分支的 `release` 环境配置签名私钥和密码。仓库当前只有 main 受保护。使用同一 Apple 团队的 Developer ID Application 证书保留应用签名身份。[GitHub 签名环境](https://github.com/tietiezhi-1216/untitled/settings/environments) · [GitHub 证书配置](https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications)
+
+| 配置位置 | 名称 | 内容 |
+| --- | --- | --- |
+| `release` 环境 Secret | `UNTITLED_DEVELOPER_ID_P12` | 含配对私钥的 Developer ID Application 证书，按 Base64 编码的 `.p12` |
+| `release` 环境 Secret | `UNTITLED_DEVELOPER_ID_PASSWORD` | `.p12` 导出密码 |
+| 仓库 Actions 变量 | `UNTITLED_HOST_RELEASE_CHANNEL` | 默认 `preview`。正式分发设为 `stable` |
+| `release` 环境变量 | `UNTITLED_DEVELOPER_ID_TEAM` | Apple Developer Team ID，预览可用来核对团队，正式版必填 |
+| `release` 环境 Secret | `UNTITLED_NOTARY_APPLE_ID` | 正式版公证用的 Apple ID |
+| `release` 环境 Secret | `UNTITLED_NOTARY_PASSWORD` | 该 Apple ID 的专用密码，正式版公证用 |
+
+签名 job 使用临时 keychain。正式版还会提交 Apple 公证、将票据 staple 到应用并在打包时校验。草稿的 ZIP 和校验文件齐备后才公开，流水线再走公开下载链接复核 SHA-256。宿主预览和插件 Release 保持各自的标签，正式宿主 Release 才进入宿主更新渠道。
+
+初装时可以先演练发布计划和合并提交的 CI。真实发布受阻时，在修复配置后重跑失败 job；也可用相同的受保护提交重新触发。已有公开版保持对应的渠道。上传中断可续用同一草稿里的已上传 ZIP。遇到标签冲突或异常草稿时，先核对 GitHub 上的目标提交和上传记录。
+
+```bash
+gh workflow run release.yml --ref main -f source_sha="$MERGE_SHA" -f dry_run=true
+```
+
+独立发行线有已验证的旧候选提交时，仍可在本机沿该发行线完成签名和打包。标签须指向实际 CI 验证、签名和打包的提交。正式版先完成 Apple 公证及 stapling，公开预览追加 `--preview`，并标明签名、公证及验收范围。
 
 ```bash
 ./scripts/build-app.sh release
-python3 scripts/package-app-release.py --app dist/release/Untitled.app --output dist/host-release
-# 已选定预览渠道时，在打包命令追加 --preview
+python3 scripts/package-app-release.py --app dist/release/Untitled.app --output dist/host-release --require-developer-id
 ```
 
-确认标签未被占用后，使用 `gh release create` 指定已验证的源码 SHA、应用 ZIP、校验文件和发布说明。预览追加 `--prerelease --latest=false`。下载发布后的资产并核对 SHA-256。应用内的软件更新检查跟踪正式宿主 Release。
+通过 `gh release create` 发包后，下载资产并核对 SHA-256。公开预览创建时使用 `--prerelease --latest=false`。应用内的软件更新检查跟踪正式宿主 Release。
 
 ### 插件发行
 
-以该插件自己的版本运行 `scripts/package-plugins.py --tag <插件标签> --plugin <slug>`，选择生成的 ZIP。实际发布并核对下载、ID、版本和 SHA-256 后，如需上架再通过 PR 更新对应 `Plugins/catalog.json` 条目。相同版本已发布的资产和标签保持不变。独立仓库打包参阅 [插件协议](../Plugins/README.md#发布)。 [GitHub Release 的 Latest 设置](https://docs.github.com/en/rest/releases/releases#create-a-release)
+流水线分别发布变化的插件 ZIP 和 `SHA256SUMS.txt`。如需独立构建，以该插件自己的版本运行 `scripts/package-plugins.py --tag <插件标签> --plugin <slug>`，选择生成的 ZIP。实际发布并核对下载、ID、版本和 SHA-256 后，如需上架再通过 PR 更新对应 `Plugins/catalog.json` 条目。相同版本已发布的资产和标签保持不变。独立仓库打包参阅 [插件协议](../Plugins/README.md#发布)。 [GitHub Release 的 Latest 设置](https://docs.github.com/en/rest/releases/releases#create-a-release)

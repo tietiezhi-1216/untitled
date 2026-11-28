@@ -3,11 +3,47 @@
 const MANAGED = 'agent-automerge';
 const OPT_OUT = 'no-automerge';
 const CI_PATH = '.github/workflows/ci.yml';
+const RELEASE_WORKFLOW = 'release.yml';
+const SHA = /^[0-9a-f]{40}$/;
 const isAgentBranch = branch => /^(agent|codex)\/.+/.test(branch || '');
 const labels = pr => (pr.labels || []).map(label => label.name);
 const sameRepository = (pr, id) => pr.head?.repo?.id === id && pr.base?.repo?.id === id && pr.base.ref === 'main';
 const blocked = pr => pr.draft || labels(pr).includes(OPT_OUT);
 const failed = run => run.status === 'completed' && !['success', 'neutral', 'skipped', 'action_required'].includes(run.conclusion);
+
+async function dispatchRelease(github, repo, sha) {
+  if (!SHA.test(sha || '')) throw new Error('Cannot dispatch a release without the exact merge SHA.');
+  await github.rest.actions.createWorkflowDispatch({
+    ...repo, workflow_id: RELEASE_WORKFLOW, ref: 'main', inputs: { source_sha: sha },
+  });
+}
+
+async function reconcileReleaseTriggers(github, repo, repositoryID, core) {
+  const query = { ...repo, state: 'closed', base: 'main', sort: 'updated', direction: 'desc', per_page: 50 };
+  const { data: closed } = await github.rest.pulls.list(query);
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const candidates = closed.filter(pr => pr.state === 'closed' && Date.parse(pr.merged_at) >= cutoff &&
+    sameRepository(pr, repositoryID) && isAgentBranch(pr.head.ref) && labels(pr).includes(MANAGED) &&
+    SHA.test(pr.merge_commit_sha || ''));
+  if (!candidates.length) return;
+  const { data: history } = await github.rest.actions.listWorkflowRuns({
+    ...repo, workflow_id: RELEASE_WORKFLOW, branch: 'main', per_page: 100,
+  });
+  const known = new Set(history.workflow_runs.map(run => run.display_title));
+  for (const pr of candidates.reverse()) {
+    const source = pr.merge_commit_sha;
+    if (known.has('Release ' + source)) continue;
+    try {
+      // Do not backfill historical merges from before release automation existed.
+      await github.rest.repos.getContent({ ...repo, path: '.github/workflows/release.yml', ref: source });
+    } catch (error) {
+      if (error.status === 404) continue;
+      throw error;
+    }
+    await dispatchRelease(github, repo, source);
+    core.info('Recovered missing release trigger for merged PR #' + pr.number + '.');
+  }
+}
 
 async function automate({ github, context, core, mode = 'all' }) {
   const repo = context.repo;
@@ -50,7 +86,7 @@ async function automate({ github, context, core, mode = 'all' }) {
   if (mode !== 'reconcile' && context.eventName === 'workflow_run' && run?.event === 'push' &&
       run.workflow_id === ci.id && run.path?.split('@')[0] === CI_PATH &&
       run.head_repository?.id === repository.id && isAgentBranch(run.head_branch) &&
-      /^[0-9a-f]{40}$/.test(run.head_sha || '') && await writer(run.actor?.login)) {
+      SHA.test(run.head_sha || '') && await writer(run.actor?.login)) {
     const { data: branch } = await github.rest.repos.getBranch({ ...repo, branch: run.head_branch });
     if (branch.commit.sha === run.head_sha) {
       const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({ ...repo, basehead: `main...${run.head_branch}` });
@@ -140,6 +176,9 @@ async function automate({ github, context, core, mode = 'all' }) {
       // branch rules, and sha makes a racing head change fail rather than merge.
       const { data: result } = await github.rest.pulls.merge({ ...repo, pull_number: pr.number, sha: pr.head.sha, merge_method: 'squash' });
       if (!result.merged) throw new Error(`Protected merge of PR #${pr.number} was not completed.`);
+      // GITHUB_TOKEN merges can suppress push workflows. Dispatch the exact
+      // main commit as a supported new workflow event.
+      await dispatchRelease(github, repo, result.sha);
       core.info(`Completed protected squash merge for PR #${pr.number}.`);
       continue;
     }
@@ -153,6 +192,9 @@ async function automate({ github, context, core, mode = 'all' }) {
       await github.graphql('mutation($id:ID!){enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:SQUASH}){pullRequest{id}}}', { id: pr.node_id });
       core.info(`Queued protected squash auto-merge for PR #${pr.number}.`);
     }
+  }
+  if (context.eventName === 'schedule') {
+    await reconcileReleaseTriggers(github, repo, repository.id, core);
   }
 }
 
