@@ -2,7 +2,12 @@ import AppKit
 import ImageIO
 import Testing
 import UniformTypeIdentifiers
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 @Suite(.serialized)
 struct CapturePinMediaTests {

@@ -1,4 +1,5 @@
 import Carbon
+import UntitledPluginSDK
 import Foundation
 
 /// Suppress repeat-downs; clearing bindings releases only keys that actually started a gesture.
@@ -12,19 +13,19 @@ struct HotKeyPressState {
 }
 
 @MainActor
-final class HotKeyManager {
+package final class HotKeyManager {
     /// Native Carbon remains the default. Tests can own registrations without
     /// reserving real system chords, including deterministic conflict failures.
-    struct Driver {
-        typealias Stop = @MainActor @Sendable () -> Void
-        typealias Handler = @MainActor (Bool) -> Void
+    package struct Driver {
+        package typealias Stop = @MainActor @Sendable () -> Void
+        package typealias Handler = @MainActor (Bool) -> Void
         let register: (HotKey, Bool, @escaping Handler) throws -> Stop
 
-        init(register: @escaping (HotKey, Bool, @escaping Handler) throws -> Stop) {
+        package init(register: @escaping (HotKey, Bool, @escaping Handler) throws -> Stop) {
             self.register = register
         }
 
-        init(register: @escaping (HotKey, @escaping Handler) throws -> Stop) {
+        package init(register: @escaping (HotKey, @escaping Handler) throws -> Stop) {
             self.register = { key, _, handler in try register(key, handler) }
         }
     }

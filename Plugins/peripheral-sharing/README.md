@@ -124,7 +124,7 @@ Hello/心跳新增可选 `keyboardEnabled` 状态，旧端可忽略，缺失表�
 sudo "/path/to/PeripheralAudio/install.sh" install
 # 源码构建
 ./scripts/build-sharing-microphone.sh
-sudo ./Tools/SharingMicrophone/install.sh install "dist/SharingMicrophone/UntitledMicrophone.driver"
+sudo ./Plugins/peripheral-sharing/Tools/SharingMicrophone/install.sh install "dist/SharingMicrophone/UntitledMicrophone.driver"
 ```
 
 方便时重启 Mac，使系统加载驱动；安装器**不会**重启系统音频或打断当前通话。不自动修改系统默认输入或输出。公开分发须使用 Developer ID 签名与公证；本地自签/临时签名不能保证在另一台 Mac 加载。
@@ -146,7 +146,7 @@ sudo "/path/to/PeripheralAudio/install.sh" uninstall
 # 方便时重启 Mac
 ```
 
-卸载插件会停止共享，但不擅自申请管理员权限删除系统驱动。驱动的安全安装边界、设备 UID、许可与构建说明见 [Tools/SharingMicrophone/README.md](../../Tools/SharingMicrophone/README.md)。
+卸载插件会停止共享，但不擅自申请管理员权限删除系统驱动。驱动的安全安装边界、设备 UID、许可与构建说明见 [Tools/SharingMicrophone/README.md](Tools/SharingMicrophone/README.md)。
 
 ## 安全与首版边界
 

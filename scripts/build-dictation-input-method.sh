@@ -10,6 +10,6 @@ cd "$root"
 swift build --configuration "$configuration" --product UntitledDictationInputMethod
 bin="$(swift build --configuration "$configuration" --show-bin-path)"
 mkdir -p "$out/Contents/MacOS" "$out/Contents/Resources"
-cp Resources/DictationInputMethod/Waveform.tiff "$out/Contents/Resources/"
-cp Resources/DictationInputMethod/Info.plist "$out/Contents/Info.plist"
+cp Plugins/doubao-speech-input/IME/Resources/Waveform.tiff "$out/Contents/Resources/"
+cp Plugins/doubao-speech-input/IME/Resources/Info.plist "$out/Contents/Info.plist"
 cp "$bin/UntitledDictationInputMethod" "$out/Contents/MacOS/UntitledDictationInputMethod"

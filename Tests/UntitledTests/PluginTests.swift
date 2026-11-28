@@ -4,7 +4,12 @@ import CryptoKit
 import Foundation
 import SwiftUI
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 @Suite(.serialized)
 struct PluginTests {
@@ -176,6 +181,7 @@ struct PluginTests {
         _ = NSApplication.shared
         let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 200, height: 60), styleMask: [.titled], backing: .buffered, defer: true)
         let recorder = ShortcutRecorder.RecorderButton()
+        recorder.modifierKeyState = { _ in false } // The synthetic flags carry side information; ignore the user's physical keys.
         window.contentView = recorder
         defer { recorder.stopRecording(); window.orderOut(nil) }
         var recorded: [HotKey] = []; recorder.onRecord = { recorded.append($0) }

@@ -65,22 +65,7 @@ cp "$project_root/Resources/Info.plist" "$staged_bundle/Contents/Info.plist"
 cp "$project_root/Sources/Untitled/Resources/BundledPlugins.json" "$staged_bundle/Contents/Resources/BundledPlugins.json"
 "$project_root/scripts/build-icon.sh" "$staged_bundle/Contents/Resources/AppIcon.icns"
 
-if [[ -d "$project_root/Resources/KaTeX" ]]; then
-    cp -R "$project_root/Resources/KaTeX" "$staged_bundle/Contents/Resources/KaTeX"
-fi
-
-UNTITLED_SIGNING_IDENTITY="$signing_identity" "$project_root/scripts/build-sharing-microphone.sh" "$staged_bundle/Contents/Resources/PeripheralAudio"
-
-mkdir -p "$staged_bundle/Contents/Helpers" "$staged_bundle/Contents/Resources/Licenses/libwebp"
-cp "$project_root/LICENSE" "$staged_bundle/Contents/Resources/Licenses/Untitled.txt"
-"$project_root/scripts/build-webp-encoder.sh" "$staged_bundle/Contents/Helpers/img2webp"
-cp "$project_root/Tools/WebPEncoder/LICENSE" "$project_root/Tools/WebPEncoder/PATENTS" "$staged_bundle/Contents/Resources/Licenses/libwebp/"
-if [[ "$signing_identity" == "-" ]]; then
-    /usr/bin/codesign --force --sign - "$staged_bundle/Contents/Helpers/img2webp"
-else
-    /usr/bin/codesign --force --sign "$signing_identity" --options runtime --timestamp "$staged_bundle/Contents/Helpers/img2webp"
-fi
-/usr/bin/codesign --verify --strict "$staged_bundle/Contents/Helpers/img2webp"
+UNTITLED_SIGNING_IDENTITY="$signing_identity" /bin/bash "$project_root/scripts/stage-plugin-resources.sh" "$staged_bundle"
 /bin/bash scripts/check-app-sdk.sh "$staged_bundle" "$sdk_version"
 /usr/bin/codesign --force "${signing_arguments[@]}" "$staged_bundle"
 /usr/bin/codesign --verify --strict "$staged_bundle"

@@ -1,4 +1,5 @@
 import CryptoKit
+import UntitledPluginSDK
 import Foundation
 
 enum PluginArchive {

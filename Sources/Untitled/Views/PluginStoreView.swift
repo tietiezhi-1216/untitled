@@ -1,4 +1,5 @@
 import AppKit
+import UntitledPluginSDK
 import SwiftUI
 import UniformTypeIdentifiers
 

@@ -2,7 +2,12 @@ import AppKit
 import Carbon
 import Foundation
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 @Suite(.serialized) struct DoubaoDictationTests {
     @Test func utf16SelectionAndFinalRevisionOwnOnlyTheDictationSpan() throws {
@@ -633,6 +638,28 @@ import Testing
         #expect(d.target.writes.isEmpty && d.target.finalCalls == 0 && d.targetCaptures == 0 && d.copies.isEmpty && c.history.entries.isEmpty)
     }
 
+    @Test @MainActor func forkedPluginGetsScopedEscapeAndStopsItOnDisable() async throws {
+        let folder = temporary(), d = Dependencies(), keys = EscapeKeys()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var payload = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any])
+        payload["id"] = "test.voice-fork"
+        let manifest = try JSONDecoder().decode(PluginManifest.self, from: JSONSerialization.data(withJSONObject: payload))
+        let store = PluginStore(directory: folder, permissions: permissionCenter(), ordinaryHotKeyDriver: keys.driver,
+                                dictationFactory: { d.controller(preferencesURL: $0) })
+        try store.installManifest(manifest)
+        let controller = store.doubaoDictation(for: manifest.id)
+        defer { controller.cancel() }
+        try store.performDictationAction(.toggleDoubaoDictation, pluginID: manifest.id)
+        try await wait { controller.phase == .listening }
+        let cancel = try #require(keys.handlers[EscapeKeys.bare])
+        cancel(true)
+        #expect(controller.phase == .idle && keys.handlers[EscapeKeys.bare] == nil)
+        try store.performDictationAction(.toggleDoubaoDictation, pluginID: manifest.id)
+        try await wait { controller.phase == .listening }
+        store.setEnabled(false, pluginID: manifest.id)
+        #expect(controller.phase == .idle && keys.handlers[EscapeKeys.bare] == nil && d.copies.isEmpty)
+    }
+
     @Test @MainActor func networkFailureAndPermissionRevocationStopAudio() async throws {
         let dependencies = Dependencies()
         let controller = dependencies.allowedController()
@@ -658,6 +685,7 @@ import Testing
             modifierDriver: .init(start: { _ in {} }, secureInput: { false }, keyIsDown: { _ in false }), dictationFactory: { deps.controller(preferencesURL: $0) })
         var old = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any])
         old["version"] = "1.2.3"; old["minimumHostVersion"] = "0.13.30"
+        old.removeValue(forKey: "styles") // This manifest predates the HUD style contract.
         let tooOld = try JSONDecoder().decode(PluginManifest.self, from: JSONSerialization.data(withJSONObject: old))
         #expect(throws: PluginError.self) { try tooOld.validate() }
         var templates = try #require(old["templates"] as? [[String: Any]])
@@ -772,7 +800,9 @@ import Testing
         try await wait { c.phase == .listening }
         let hud = DictationHUD(), key = NSApp.keyWindow
         let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let testProcess = ProcessInfo.processInfo.processIdentifier
         hud.show(controller: c); defer { hud.close() }
+        #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == front)
         let window = try #require(NSApp.windows.first { $0.identifier?.rawValue == "doubao.dictation.hud" })
         #expect(!window.canBecomeKey && !window.canBecomeMain && window.styleMask.contains(.nonactivatingPanel))
         #expect(window.ignoresMouseEvents)
@@ -780,7 +810,7 @@ import Testing
         if let screen = window.screen { #expect(abs(canvas.midX - screen.visibleFrame.midX) <= 1) }
         let stage = try #require(window.contentView as? DictationHUDStage)
         let content = try #require(stage.plate), compact = content.frame
-        #expect(compact.size == DictationHUD.compact && compact.minY == 0)
+        #expect(compact.size == DictationHUDStyle.defaults.compact && compact.minY == 0)
         #expect(compact.midX == stage.bounds.midX)
         if #available(macOS 26, *), !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
             let glass = try #require(content as? NSGlassEffectView)
@@ -810,14 +840,14 @@ import Testing
         session.onTranscript?("明天下午三点")
         try await wait { stage.openness == 1 && stage.wave == nil }
         let expanded = content.frame
-        #expect(window.frame == canvas && expanded.height == DictationHUD.expanded.height)
+        #expect(window.frame == canvas && expanded.height == DictationHUDStyle.defaults.expanded.height)
         #expect(expanded.width > compact.width && expanded.width < canvas.width)
         #expect(abs(expanded.midX - compact.midX) <= 1 && expanded.minY == compact.minY)
         #expect(first(DictationWaveView.self, in: content) == nil && compactWave.window == nil && !compactWave.isAnimating)
         let ink = try #require(first(DictationCaptionView.self, in: content))
         let inkFrame = ink.convert(ink.bounds, to: content)
-        #expect(abs(inkFrame.width - DictationHUD.captionWidth(in: content.bounds.width)) <= 1)
-        #expect(abs(inkFrame.midY - content.bounds.midY) <= 1 && inkFrame.height == DictationHUD.captionHeight)
+        #expect(abs(inkFrame.width - DictationHUDStyle.defaults.captionWidth(in: content.bounds.width)) <= 1)
+        #expect(abs(inkFrame.midY - content.bounds.midY) <= 1 && inkFrame.height == DictationHUDStyle.captionHeight)
         #expect(content.bounds.contains(inkFrame))
         let large = String(repeating: "这是一句话，然后是另一句话。", count: 32) + "注意：最后一行是最新的草稿。"
         session.onTranscript?(large)
@@ -825,7 +855,9 @@ import Testing
         #expect(window.frame == canvas && content.frame.height == expanded.height && content.frame.midX == expanded.midX)
         #expect(c.bubblePreview.hasSuffix("最后一行是最新的草稿。") && stage.wave == nil)
         #expect(d.target.writes.isEmpty && NSApp.keyWindow === key)
-        #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == front)
+        // The user's frontmost app can change while awaiting AppKit. What must
+        // not happen is activation of our process by the nonactivating panel.
+        if front != testProcess { #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier != testProcess) }
         if ProcessInfo.processInfo.environment["UNTITLED_DICTATION_HUD_PREVIEW"] != nil {
             window.appearance = NSAppearance(named: .aqua); try await render("")
             window.appearance = NSAppearance(named: .darkAqua); try await render("dark")
@@ -833,6 +865,110 @@ import Testing
         }
         hud.close()
         #expect(!window.isVisible && !stage.isAnimating)
+    }
+
+    @Test @MainActor func twoZIPStylesUpdateTheSameRunningHostAndRejectInvalidUpdates() async throws {
+        _ = NSApplication.shared
+        let root = temporary(), source = root.appendingPathComponent("zip-source"), state = root.appendingPathComponent("installed")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bytes = try Data(contentsOf: manifestURL)
+        let original = try #require(try JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        let name = DictationHUDStyle.name
+        let styles = try #require(original["styles"] as? [String: [String: Any]])
+        let baseline = try #require(styles[name])
+        func zip(_ version: String, _ config: [String: Any]?, minimum: String = HostInfo.version) throws -> URL {
+            var manifest = original
+            manifest["version"] = version
+            manifest["minimumHostVersion"] = minimum
+            manifest["styles"] = config.map { [name: $0] }
+            try JSONSerialization.data(withJSONObject: manifest).write(to: source.appendingPathComponent("manifest.json"))
+            let archive = root.appendingPathComponent(UUID().uuidString + ".zip")
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+            process.currentDirectoryURL = source
+            process.arguments = ["-q", archive.path, "manifest.json"]
+            try process.run(); process.waitUntilExit()
+            try #require(process.terminationStatus == 0)
+            return archive
+        }
+        let dependencies = Dependencies(), keys = EscapeKeys()
+        let host = PluginStore(directory: state, permissions: permissionCenter(), ordinaryHotKeyDriver: keys.driver,
+                               dictationFactory: { dependencies.controller(preferencesURL: $0, showsHUD: true) })
+        let pluginID = DoubaoDictationController.pluginID
+        await host.importPackage(try zip("900.0.1", baseline))
+        try #require(host.installed.first?.manifest.version == "900.0.1")
+        let command = PluginCommand(action: .toggleDoubaoDictation)
+        try host.saveCommand(command, pluginID: pluginID)
+        let activeController = host.doubaoDictation(for: pluginID)
+        defer { activeController.cancel() }
+        func openHUD() async throws -> DictationHUDStage {
+            await host.execute(command, pluginID: pluginID)
+            try await wait { activeController.phase == .listening }
+            let panel = try #require(NSApp.windows.first { $0.isVisible && $0.identifier?.rawValue == "doubao.dictation.hud" })
+            #expect(!panel.canBecomeKey && panel.ignoresMouseEvents)
+            return try #require(panel.contentView as? DictationHUDStage)
+        }
+        func renderCaption(in stage: DictationHUDStage) throws -> (width: CGFloat, greenMinusRed: CGFloat) {
+            stage.configure(reduceMotion: true, solid: false)
+            let session = try #require(dependencies.sessions.last)
+            session.onTranscript?(String(repeating: "不过这一次只显示一行字幕。", count: 24))
+            #expect(stage.openness == 1 && stage.wave == nil && stage.liquid.elapsed == 0 && !stage.isAnimating)
+            let liquid = stage.liquid, bounds = liquid.bounds
+            let space = try #require(CGColorSpace(name: CGColorSpace.sRGB))
+            let context = try #require(CGContext(data: nil, width: Int(bounds.width), height: Int(bounds.height), bitsPerComponent: 8,
+                                                 bytesPerRow: 0, space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            NSGraphicsContext.saveGraphicsState()
+            defer { NSGraphicsContext.restoreGraphicsState() }
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            liquid.draw(bounds)
+            let pixels = NSBitmapImageRep(cgImage: try #require(context.makeImage()))
+            let point = try #require(pixels.colorAt(x: pixels.pixelsWide / 2, y: pixels.pixelsHigh / 2)?.usingColorSpace(.sRGB))
+            try #require(point.alphaComponent > 0.02)
+            return (bounds.width, point.greenComponent - point.redComponent)
+        }
+        let first = try await openHUD()
+        #expect(first.plate?.bounds.size == first.style.compact && first.wave != nil)
+        let old = try renderCaption(in: first)
+        #expect(old.width == 296)
+
+        let record = state.appendingPathComponent(pluginID + ".json"), before = try Data(contentsOf: record)
+        let invalidStyles: [[String: Any]] = [
+            ["version": 2], ["version": 1, "maximumWidth": 1000], ["version": 1, "poolColors": ["#oops"]],
+            ["version": 1, "compactHeight": 48, "expandedHeight": 49], ["version": 1, "unexpected": 13],
+        ]
+        for invalid in invalidStyles {
+            host.errorMessage = nil
+            await host.importPackage(try zip("900.0.2", invalid))
+            #expect(host.errorMessage?.contains("安装失败") == true)
+        }
+        host.errorMessage = nil
+        await host.importPackage(try zip("900.0.2", baseline, minimum: "0.13.50"))
+        #expect(host.errorMessage?.contains("安装失败") == true)
+        let afterInvalid = try Data(contentsOf: record)
+        #expect(activeController.isBusy && afterInvalid == before)
+
+        let alternative: [String: Any] = ["version": 1, "compactWidth": 102, "compactHeight": 42, "maximumWidth": 332,
+                                         "expandedHeight": 56, "openingMilliseconds": 460, "driftSpeed": 0.7,
+                                         "poolColors": Array(repeating: "#00DD00", count: 5)]
+        await host.importPackage(try zip("900.0.2", alternative))
+        #expect(host.installed.first?.manifest.version == "900.0.2" && host.installed.first?.commands.contains(command) == true)
+        #expect(!activeController.isBusy && first.window == nil && !first.isAnimating)
+        let second = try await openHUD()
+        #expect(second.plate?.bounds.size == CGSize(width: 102, height: 42) && second.wave != nil)
+        #expect(second.style.openingDuration == 0.46 && second.style.driftSpeed == 0.7)
+        let new = try renderCaption(in: second)
+        #expect(new.width == 332 && new.greenMinusRed > old.greenMinusRed + 0.20)
+        second.configure(reduceMotion: true, solid: true)
+        #expect(second.liquid.isHidden && !second.isAnimating)
+
+        // An older manifest needs no style at all. A style rollback can be
+        // packaged as a newer version without changing commands or the host.
+        await host.importPackage(try zip("900.0.3", nil, minimum: "0.13.50"))
+        #expect(host.installed.first?.commands.contains(command) == true)
+        #expect(activeController.hudStyle() == .defaults)
+        #expect(!activeController.isBusy && second.window == nil && !second.isAnimating)
+        #expect(dependencies.target.writes.isEmpty && dependencies.copies.isEmpty)
     }
 
     @Test(arguments: [false, true]) @MainActor func syntheticPCMAnimatesActualPixelsEvenWhileASRIsBlocked(connecting: Bool) async throws {

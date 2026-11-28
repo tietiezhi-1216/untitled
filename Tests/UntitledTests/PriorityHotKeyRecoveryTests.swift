@@ -1,7 +1,12 @@
 import AppKit
 import Carbon
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 @Suite(.serialized) @MainActor
 struct PriorityHotKeyRecoveryTests {

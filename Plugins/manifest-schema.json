@@ -55,45 +55,67 @@
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
-      "items": {
-        "enum": [
-          "openApplication",
-          "openURL",
-          "runShortcut",
-          "showMainWindow",
-          "sharePeripherals",
-          "shareWirelessMicrophone",
-          "switchPeripheralControl",
-          "stopPeripheralSharing",
-          "toggleDoubaoDictation",
-          "holdDoubaoDictation",
-          "cancelDoubaoDictation",
-          "captureRegion",
-          "captureWindow",
-          "captureScreen",
-          "captureScrolling",
-          "captureRecording",
-          "pinSelection",
-          "pinClipboard",
-          "togglePins",
-          "captureHistory",
-          "captureDelayed",
-          "captureAndCopy",
-          "captureLastRegion",
-          "restorePin",
-          "cyclePinGroup",
-          "closePins",
-          "hideOtherPins",
-          "togglePinClickThrough",
-          "pinFiles",
-          "toggleCaptureHotKeys"
-        ]
-      }
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/action" }
     },
     "shortcutInputs": {
       "type": "array",
       "uniqueItems": true,
       "items": { "enum": ["singleKey", "keyCombination", "mouseButton"] }
+    },
+    "styles": {
+      "description": "Optional data-only styles, supported from Untitled 0.13.51. Swift validates version and geometry relationships.",
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 8,
+      "propertyNames": {
+        "maxLength": 100,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.[A-Za-z0-9._-]+$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "minProperties": 1,
+        "maxProperties": 24,
+        "propertyNames": { "maxLength": 36, "pattern": "^[A-Za-z][A-Za-z0-9]*$" },
+        "additionalProperties": {
+          "oneOf": [
+            { "type": "number" },
+            {
+              "type": "array", "minItems": 1, "maxItems": 8,
+              "items": { "type": "string", "minLength": 1, "maxLength": 24 }
+            }
+          ]
+        }
+      },
+      "properties": {
+        "doubao.hud": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version"],
+          "properties": {
+            "version": { "const": 1 },
+            "compactWidth": { "type": "number", "minimum": 80, "maximum": 116 },
+            "compactHeight": { "type": "number", "minimum": 36, "maximum": 48 },
+            "maximumWidth": { "type": "number", "minimum": 200, "maximum": 360 },
+            "expandedHeight": { "type": "number", "minimum": 44, "maximum": 64 },
+            "minimumCaptionWidth": { "type": "number", "minimum": 120, "maximum": 168 },
+            "contentInset": { "type": "number", "minimum": 12, "maximum": 26 },
+            "openingMilliseconds": { "type": "number", "minimum": 180, "maximum": 520 },
+            "growthMilliseconds": { "type": "number", "minimum": 110, "maximum": 380 },
+            "waveFadeEnd": { "type": "number", "minimum": 0.5, "maximum": 0.82 },
+            "captionFadeStart": { "type": "number", "minimum": 0.18, "maximum": 0.36 },
+            "driftSpeed": { "type": "number", "minimum": 0.25, "maximum": 1.6 },
+            "driftAmount": { "type": "number", "minimum": 0.55, "maximum": 1.3 },
+            "poolOpacity": { "type": "number", "minimum": 0.65, "maximum": 1.12 },
+            "poolColors": {
+              "type": "array",
+              "minItems": 5,
+              "maxItems": 5,
+              "items": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }
+            }
+          }
+        }
+      }
     },
     "templates": {
       "type": "array",
@@ -116,40 +138,7 @@
             "minLength": 1,
             "maxLength": 100
           },
-          "action": {
-            "enum": [
-              "openApplication",
-              "openURL",
-              "runShortcut",
-              "showMainWindow",
-              "sharePeripherals",
-              "shareWirelessMicrophone",
-              "switchPeripheralControl",
-              "stopPeripheralSharing",
-              "toggleDoubaoDictation",
-              "holdDoubaoDictation",
-              "cancelDoubaoDictation",
-              "captureRegion",
-              "captureWindow",
-              "captureScreen",
-              "captureScrolling",
-              "captureRecording",
-              "pinSelection",
-              "pinClipboard",
-              "togglePins",
-              "captureHistory",
-              "captureDelayed",
-              "captureAndCopy",
-              "captureLastRegion",
-              "restorePin",
-              "cyclePinGroup",
-              "closePins",
-              "hideOtherPins",
-              "togglePinClickThrough",
-              "pinFiles",
-              "toggleCaptureHotKeys"
-            ]
-          },
+          "action": { "$ref": "#/$defs/action" },
           "installByDefault": {
             "type": "boolean"
           },
@@ -283,6 +272,12 @@
     }
   },
   "$defs": {
+    "action": {
+      "description": "Stable action ID. The running host must have a registered implementation.",
+      "type": "string",
+      "maxLength": 100,
+      "pattern": "^[A-Za-z][A-Za-z0-9._-]*$"
+    },
     "item": {
       "type": "object",
       "additionalProperties": false,

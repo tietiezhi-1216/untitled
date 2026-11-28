@@ -1,4 +1,5 @@
 import Combine
+import UntitledPluginSDK
 import SwiftUI
 
 /// The host renders slots. Providers supply components and commands; manifests arrange them.
@@ -7,7 +8,7 @@ struct PluginWorkspaceView: View {
     @StateObject private var navigation = PluginUINavigation()
     let pluginID: String
 
-    var body: some View {
+    package var body: some View {
         let context = PluginUIContext(pluginID: pluginID, store: store, navigation: navigation)
         if let ui = context.interface {
             PluginUILayoutView(slots: ui.slots, context: context, root: true)
@@ -31,17 +32,17 @@ private struct PluginTrailingScrollGutterKey: EnvironmentKey {
 }
 
 extension EnvironmentValues {
-    var pluginTrailingScrollGutter: CGFloat {
+    package var pluginTrailingScrollGutter: CGFloat {
         get { self[PluginTrailingScrollGutterKey.self] }
         set { self[PluginTrailingScrollGutterKey.self] = newValue }
     }
 
-    var pluginHeaderUsesIcons: Bool {
+    package var pluginHeaderUsesIcons: Bool {
         get { self[PluginHeaderUsesIconsKey.self] }
         set { self[PluginHeaderUsesIconsKey.self] = newValue }
     }
 
-    var pluginContentHasInsets: Bool {
+    package var pluginContentHasInsets: Bool {
         get { self[PluginContentHasInsetsKey.self] }
         set { self[PluginContentHasInsetsKey.self] = newValue }
     }
@@ -66,7 +67,7 @@ struct PluginContentViewport<Content: View>: View {
         self.content = content()
     }
 
-    var body: some View {
+    package var body: some View {
         let inset = forceInsets || !hasInsets
         let horizontal: CGFloat = inset ? PanelLayout.contentInset : 0
         let vertical: CGFloat = inset ? PanelLayout.contentVerticalInset : 0
@@ -104,7 +105,7 @@ struct PluginUILayoutView: View {
     }
     private func items(_ slot: PluginUISlot) -> [PluginUIItem] { slots[slot.rawValue] ?? [] }
 
-    var body: some View {
+    package var body: some View {
         VStack(spacing: 0) {
             if !items(.headerLeading).isEmpty || !items(.headerTrailing).isEmpty {
                 heading
@@ -202,14 +203,18 @@ struct PluginUILayoutView: View {
     }
 }
 
-struct PluginSlotItemView: View {
+package struct PluginSlotItemView: View {
     @EnvironmentObject private var store: PluginStore
     let item: PluginUIItem
     let context: PluginUIContext
     var menuItem = false
     var headerAction = false
 
-    var body: some View {
+    package init(item: PluginUIItem, context: PluginUIContext, menuItem: Bool = false, headerAction: Bool = false) {
+        self.item = item; self.context = context; self.menuItem = menuItem; self.headerAction = headerAction
+    }
+
+    package var body: some View {
         rendered.panelRegion("plugin.ui.\(item.id)")
     }
     private var rendered: AnyView {
@@ -251,7 +256,7 @@ struct PluginSlotItemView: View {
 private struct PluginItemLabel: View {
     let title: String
     let symbol: String?
-    var body: some View {
+    package var body: some View {
         if let symbol {
             if title.isEmpty {
                 Image(systemName: symbol).frame(width: 18, height: 18)
@@ -297,7 +302,7 @@ private struct PluginSlotButton: View {
         if !title.isEmpty { return title }
         return item.panel.flatMap { context.interface?.panel($0)?.title } ?? state?.title ?? "插件操作"
     }
-    var body: some View {
+    package var body: some View {
         let control = styledButton
             .disabled(item.command != nil && (store.installed.first { $0.id == context.pluginID }?.isEnabled != true || state?.isEnabled == false))
             .accessibilityLabel(accessibleTitle)
@@ -364,7 +369,7 @@ private struct PluginSlotTabs: View {
             get: { navigation.selectedTabs[item.id] ?? item.panels?.first ?? "" },
             set: { navigation.selectedTabs[item.id] = $0 })
     }
-    var body: some View {
+    package var body: some View {
         VStack(spacing: item.style == .plain ? 12 : 16) {
             if item.style == .plain {
                 ViewThatFits(in: .horizontal) {
@@ -398,7 +403,7 @@ struct PluginPanelContent: View {
     @EnvironmentObject private var store: PluginStore
     let panelID: String
     let context: PluginUIContext
-    var body: some View {
+    package var body: some View {
         if let manifest = store.installed.first(where: { $0.id == context.pluginID })?.manifest,
            let panel = store.uiRegistry.interface(for: manifest).panel(panelID) {
             if let component = panel.component {
@@ -416,7 +421,7 @@ struct PluginPanelSheet: View {
     @Environment(\.dismiss) private var dismiss
     let panelID: String
     let context: PluginUIContext
-    var body: some View {
+    package var body: some View {
         let panel = store.installed.first { $0.id == context.pluginID }
             .flatMap { store.uiRegistry.interface(for: $0.manifest).panel(panelID) }
         VStack(spacing: 0) {

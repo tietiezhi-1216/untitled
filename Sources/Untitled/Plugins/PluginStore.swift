@@ -1,240 +1,80 @@
 import AppKit
-import Carbon
+import UntitledPluginSDK
 import Combine
 import Foundation
 
 @MainActor
-final class PluginStore: ObservableObject {
-    @Published private(set) var installed: [InstalledPlugin] = []
-    @Published private(set) var catalog: [CatalogEntry] = []
-    @Published private(set) var isRefreshing = false
-    @Published private(set) var isInstalling = false
-    @Published private(set) var catalogError: String?
-    @Published private(set) var hotKeyErrors: [UUID: String] = [:]
-    private var selectionPinShortcuts: [String: [HotKey]] = [:]
-    @Published private(set) var captureHotKeysPaused = false
-    @Published private(set) var hotKeysPaused = false
-    @Published private(set) var priorityHotKeysEnabled = false
-    @Published private(set) var priorityHotKeyStatus: String?
-    @Published private(set) var priorityHotKeyRecoveryNeeded = false
-    @Published private(set) var sideButtonRecoveryNeeded = false
-    @Published private(set) var modifierRecoveryNeeded = false
-    var shortcutRecoveryNeeded: Bool { priorityHotKeyRecoveryNeeded || sideButtonRecoveryNeeded || modifierRecoveryNeeded }
-    @Published var errorMessage: String?
+package final class PluginStore: ObservableObject {
+    @Published package private(set) var installed: [InstalledPlugin] = []
+    @Published package private(set) var catalog: [CatalogEntry] = []
+    @Published package private(set) var isRefreshing = false
+    @Published package private(set) var isInstalling = false
+    @Published package private(set) var catalogError: String?
+    @Published package private(set) var hotKeyErrors: [UUID: String] = [:]
+    private var windowShortcuts: [String: [ActionKind: [HotKey]]] = [:]
+    @Published package private(set) var hotKeysPaused = false
+    @Published package private(set) var priorityHotKeysEnabled = false
+    @Published package private(set) var priorityHotKeyStatus: String?
+    @Published package private(set) var priorityHotKeyRecoveryNeeded = false
+    @Published package private(set) var sideButtonRecoveryNeeded = false
+    @Published package private(set) var modifierRecoveryNeeded = false
+    package var shortcutRecoveryNeeded: Bool { priorityHotKeyRecoveryNeeded || sideButtonRecoveryNeeded || modifierRecoveryNeeded }
+    @Published package var errorMessage: String?
     private var shortcutRegistrationNotice:(commandID:UUID,message:String)?
-    @Published var requestedPluginID: String?
-    var showMainWindow: () -> Void = {}
-    private let captureDirectory: URL?
-    private var captureController: ScreenshotController?
-    private let captureFactory: (URL?) -> ScreenshotController
-    private var sharingControllers: [String: PeripheralSharingController] = [:]
-    private var sharingPriorityObservers: [String: AnyCancellable] = [:]
-    private var dictationControllers: [String: DoubaoDictationController] = [:]
-    private let dictationFactory: (URL) -> DoubaoDictationController
+    @Published package var requestedPluginID: String?
+    package var showMainWindow: () -> Void = {}
+    package let runtime: PluginRuntimeRegistry
+    package let uiRegistry: PluginUIRegistry
+    package let permissions: HostPermissionCenter
     private var isPreparingForQuit = false
-    func doubaoDictation(for pluginID: String) -> DoubaoDictationController {
-        if let controller = dictationControllers[pluginID] { return controller }
-        let controller = dictationFactory(dictationPreferencesURL(pluginID))
-        controller.isAllowed = { [weak self] in
-            guard let self, !self.isPreparingForQuit else { return false }
-            return self.installed.contains(where: { $0.id == pluginID && $0.isEnabled && $0.manifest.actions.contains(.toggleDoubaoDictation) })
-        }
-        controller.requirePermissions = { [weak self] ids in
-            guard let self else { throw PluginError.invalid("宿主已关闭。") }
-            try self.permissionClient(for: pluginID).require(ids)
-        }
-        controller.hasInsertionAccess = { [weak self] in self?.permissionClient(for: pluginID).isAuthorized(.accessibility) == true }
-        controller.registerEscape = { [weak self] gesture, cancel in
-            self?.registerDictationEscape(for: pluginID, gesture: gesture, cancel: cancel)
-        }
-        dictationControllers[pluginID] = controller
-        return controller
+    package var allowsPluginActivity: Bool { !isPreparingForQuit }
+
+    package func enabledPlugin(_ pluginID: String, allowing action: ActionKind) -> InstalledPlugin? {
+        guard allowsPluginActivity else { return nil }
+        return installed.first { $0.id == pluginID && $0.isEnabled && $0.manifest.actions.contains(action) }
     }
-    private func registerDictationEscape(for pluginID: String, gesture: DictationGesture,
-                                         cancel: @escaping () -> Void) -> (() -> Void)? {
-        let escape = HotKey(keyCode: UInt32(kVK_Escape), modifiers: 0, key: "⎋")
-        guard pluginID == DoubaoDictationController.pluginID,
-              !hotKeysPaused, !isPreparingForQuit, !HotKeyRecordingSession.isRecording,
-              !sharingControllers.values.contains(where: { $0.reservesPriorityShortcut(escape) }),
-              let plugin = installed.first(where: { $0.id == pluginID && $0.isEnabled && $0.manifest.actions.contains(.cancelDoubaoDictation) }) else { return nil }
-        var modifiers: [UInt32] = [0]
-        if case .hold(let commandID) = gesture,
-           let key = plugin.commands.first(where: { $0.id == commandID && $0.isEnabled })?.hotKey {
-            let mask = key.isRightCommand ? UInt32(cmdKey) : key.isRightControl ? UInt32(controlKey) : key.modifiers
-            // Never try to reserve the system's Force Quit shortcut.
-            if mask != 0, mask != UInt32(cmdKey | optionKey) { modifiers.append(mask) }
-        }
-        let configured = Set(installed.filter(\.isEnabled).flatMap { $0.commands.compactMap { $0.isEnabled ? $0.hotKey?.identity : nil } })
-        let stops = modifiers.compactMap { modifier -> (() -> Void)? in
-            let key = HotKey(keyCode: UInt32(kVK_Escape), modifiers: modifier, key: "⎋")
-            // A saved binding (even in priority mode), sharing's emergency key,
-            // or a chord reserved by macOS/another app keeps precedence.
-            guard !configured.contains(key.identity) else { return nil }
-            return try? hotKeys.registerScoped(key, action: cancel)
-        }
-        guard !stops.isEmpty else { return nil }
-        return { stops.forEach { $0() } }
+    package func publishRuntimeEvent(_ event: PluginRuntimeEvent) { runtime.receive(event, in: self) }
+    package var pluginPreferencesDirectory: URL { directory.appendingPathComponent("Preferences", isDirectory: true) }
+
+    package func matchesWindowShortcut(keyCode: UInt32, modifiers: UInt32, action: ActionKind, pluginID: String) -> Bool {
+        guard allowsPluginActivity else { return false }
+        return windowShortcuts[pluginID]?[action]?.contains { $0.keyCode == keyCode && $0.modifiers == modifiers } == true
     }
 
-    private func dictationPreferencesURL(_ pluginID: String) -> URL {
-        directory.appendingPathComponent("Preferences", isDirectory: true).appendingPathComponent(pluginID + ".dictation.json")
-    }
-    func performDictationAction(_ action: ActionKind, pluginID: String, holdCommandID: UUID? = nil) throws {
-        guard let plugin = installed.first(where: { $0.id == pluginID }), plugin.isEnabled,
-              plugin.manifest.actions.contains(action), plugin.manifest.actions.contains(.toggleDoubaoDictation) else {
-            throw PluginError.invalid("请先启用并授权语音输入插件。")
+    package func launch(arguments: [String]) async {
+        guard allowsPluginActivity else { return }
+        publishRuntimeEvent(.willLaunch(arguments))
+        if let i = arguments.firstIndex(of: "--install-plugin"), arguments.indices.contains(i + 1) {
+            await importPackage(URL(fileURLWithPath: arguments[i + 1]))
         }
-        let controller = doubaoDictation(for: pluginID)
-        switch action {
-        case .toggleDoubaoDictation: try controller.toggle()
-        case .holdDoubaoDictation:
-            if let holdCommandID { try controller.holdPressed(holdCommandID) }
-            else { try controller.toggle() } // The command list's Run button is a toggle, not a stuck hold.
-        case .cancelDoubaoDictation: controller.cancel()
-        default: throw PluginError.invalid("不支持的语音输入操作。")
-        }
+        if allowsPluginActivity { publishRuntimeEvent(.didLaunch(arguments)) }
     }
-    private let sharingDefaults: UserDefaults
-    private let isolatedSharingDomain: String?
+
     deinit {
         priorityRecoveryTask?.cancel()
-        if let isolatedSharingDomain { UserDefaults.standard.removePersistentDomain(forName: isolatedSharingDomain) }
-    }
-    func restorePeripheralSharingSessionIfRequested() throws {
-        guard installed.contains(where: { $0.id == PeripheralSharingController.pluginID && $0.isEnabled }) else { return }
-        try peripheralSharing(for: PeripheralSharingController.pluginID).restoreUserSessionIfRequested()
-    }
-    private var sharingSetup: SharingSetupSession?
-    func startSharingSetup(at url: URL) throws {
-        guard sharingSetup == nil else { return }
-        let session = try SharingSetupSession(store: self, profileURL: url)
-        sharingSetup = session
-        try session.confirmAndStart(profileURL: url)
-    }
-    #if DEBUG
-    private var sharingAcceptance: SharingAcceptance?
-    func startSharingAcceptance(at directory: URL) throws {
-        guard sharingAcceptance == nil else { return }
-        sharingAcceptance = try SharingAcceptance(store: self, directory: directory)
-    }
-    #endif
-    func peripheralSharing(for pluginID: String) -> PeripheralSharingController {
-        if let controller = sharingControllers[pluginID] { return controller }
-        let controller = PeripheralSharingController(defaults: sharingDefaults)
-        controller.isAllowed = { [weak self] in
-            self?.installed.contains(where: { $0.id == pluginID && $0.isEnabled && $0.manifest.actions.contains(.sharePeripherals) }) == true
-        }
-        controller.requirePermissions = { [weak self] ids in
-            guard let self else { throw PluginError.invalid("宿主已关闭。") }
-            try self.permissionClient(for: pluginID).require(ids)
-        }
-        controller.reportError = { [weak self] in self?.handleExecutionError($0) }
-        controller.configurePriorityShortcutRouting(route: { [weak self] type, event in
-            guard let self else { return false }
-            return self.priorityHotKeys.handle(type, event) || self.sideButtons.handle(type, event)
-        }, ownsKey: { [weak self] in self?.priorityHotKeys.ownsKey($0) ?? false },
-        ownsButton: { [weak self] in self?.sideButtons.ownsKey($0) ?? false }, hasKeys: { [weak self] in
-            guard let self else { return false }
-            return self.priorityHotKeys.hasOutstandingKeys || self.sideButtons.hasOutstandingKeys
-        })
-        sharingPriorityObservers[pluginID] = Publishers.CombineLatest(
-            controller.$control.removeDuplicates(), controller.$keyboardMouseEnabled.removeDuplicates()
-        ).dropFirst().sink { [weak self] _ in
-            self?.objectWillChange.send()
-            // @Published emits before assignment; read the settled sharing state
-            // next turn before arming any Esc that sharing no longer reserves.
-            Task { @MainActor [weak self] in
-                self?.dictationControllers[DoubaoDictationController.pluginID]?.refreshEscapeShortcut()
-            }
-        }
-        sharingControllers[pluginID] = controller
-        return controller
-    }
-    private var wirelessMicrophoneControllers: [String: WirelessMicrophoneController] = [:]
-    private let wirelessMicrophoneFactory: (String, UserDefaults) -> WirelessMicrophoneController
-
-    func wirelessMicrophone(for pluginID: String) -> WirelessMicrophoneController {
-        if let controller = wirelessMicrophoneControllers[pluginID] { return controller }
-        let controller = wirelessMicrophoneFactory(pluginID, sharingDefaults)
-        controller.isAllowed = { [weak self] in self?.canUseWirelessMicrophone(pluginID) == true }
-        controller.requireMicrophone = { [weak self] in
-            guard let self else { throw PluginError.invalid("宿主已关闭。") }
-            try self.permissionClient(for: pluginID).require([.microphone])
-        }
-        wirelessMicrophoneControllers[pluginID] = controller
-        return controller
+        if let isolatedShortcutDomain { UserDefaults.standard.removePersistentDomain(forName: isolatedShortcutDomain) }
     }
 
-    private func canUseWirelessMicrophone(_ pluginID: String) -> Bool {
-        !isPreparingForQuit && installed.contains {
-            $0.id == pluginID && $0.isEnabled && $0.manifest.actions.contains(.shareWirelessMicrophone)
-        }
-    }
-
-    func performWirelessMicrophoneAction(pluginID: String) throws {
-        guard canUseWirelessMicrophone(pluginID) else { throw PluginError.invalid("请先安装并启用无线麦。") }
-        let controller = wirelessMicrophone(for: pluginID)
-        if controller.isRunning { controller.stop() }
-        else { try controller.start() }
-    }
-
-    let uiRegistry: PluginUIRegistry
-    let permissions: HostPermissionCenter
-    var screenshots: ScreenshotController {
-        if let captureController { return captureController }
-        let controller = captureFactory(captureDirectory)
-        controller.didCopyPNG = { [weak self] data, count in
-            // No controller/listener is created by copying a screenshot.
-            self?.sharingControllers[PeripheralSharingController.pluginID]?.shareCopiedScreenshot(data, changeCount: count)
-        }
-        controller.reportError = { [weak self] in self?.errorMessage = $0 }
-        if let error = controller.errorMessage { errorMessage = error }
-        controller.canUseFeatures = { [weak self] in
-            self?.installed.contains(where: { $0.isEnabled && $0.manifest.actions.contains(where: \.isScreenshotAction) }) == true
-        }
-        captureController = controller
-        if let plugin = installed.first(where: { $0.isEnabled && $0.manifest.hasCaptureCapability }) {
-            controller.configureGlobalMouse(permissions: permissionClient(for: plugin.id), allowed: { [weak self] in self?.captureHotKeysPaused == false && !HotKeyRecordingSession.isRecording })
-        }
-        controller.pinManager.activate()
-        return controller
-    }
-
-    private func refreshCaptureHistoryCleanup() {
-        let active = usesLiveCaptureHistory && !isPreparingForQuit &&
-            installed.contains { $0.isEnabled && $0.manifest.actions.contains(.captureHistory) }
-        if active { screenshots.setHistoryCleanupActive(true) }
-        else { captureController?.setHistoryCleanupActive(false) }
-    }
-
-    func prepareForQuit() async -> Bool {
+    package func prepareForQuit() async -> Bool {
         isPreparingForQuit = true
-        cancelPriorityRecovery();priorityHotKeyRecoveryNeeded=false
+        cancelPriorityRecovery(); priorityHotKeyRecoveryNeeded = false
         hotKeys.clear(); priorityHotKeys.shutdown(); sideButtons.shutdown(); modifierKeys.clear()
-        #if DEBUG
-        sharingAcceptance?.stop(); sharingAcceptance = nil
-        #endif
-        sharingSetup?.stopReporting(); sharingSetup = nil
-        for controller in sharingControllers.values { controller.stop() }
-        for controller in wirelessMicrophoneControllers.values { controller.stop() }
-        for controller in dictationControllers.values { controller.cancel(message: "应用正在退出，听写已停止。") }
-        for history in dictationControllers.values.map(\.history) { await history.finishPendingIO() }
-        let ready = await captureController?.prepareForQuit() ?? true
+        let ready = await runtime.prepareForQuit()
         if !ready {
             isPreparingForQuit = false
             reloadHotKeys()
-            refreshCaptureHistoryCleanup()
+            publishRuntimeEvent(.installedPluginsChanged)
         }
         return ready
     }
 
     private let directory: URL
-    private let usesLiveCaptureHistory: Bool
-    let presentations: PluginPresentationIndex
+    package let presentations: PluginPresentationIndex
     private var documentationCache: [(key: String, text: String)] = []
     private let startupError: String?
     private let hotKeys: HotKeyManager
     private let shortcutDefaults: UserDefaults
+    private let isolatedShortcutDomain: String?
     private let priorityDriver: PriorityHotKeyDriver
     private let sideButtonDriver: PriorityHotKeyDriver
     private var priorityFailure: String?
@@ -243,31 +83,32 @@ final class PluginStore: ObservableObject {
     private var modifierFailure: String?
     private lazy var modifierKeys = ModifierShortcutMonitor(driver: modifierDriver, access: { [weak self] in
         self?.permissions.hasShortcutRoutingAccess() == true
+    }, ignoreEvent: { [weak self] event in
+        self?.runtime.ignoresShortcutEvent(event) == true
     }, failed: { [weak self] reason in
         self?.modifierFailure = reason; self?.reloadHotKeys()
     })
     private lazy var sideButtons = PriorityHotKeyMonitor(driver: sideButtonDriver, channel: .sideButtons, accessAllowed: { [weak self] in
         self?.permissions.hasShortcutRoutingAccess() == true
-    }, ignoreEvent: { $0.getIntegerValueField(.eventSourceUnixProcessID) != 0 || SharingInput.isHostShortcutReplay($0) },
-    noteOwnership: { [weak self] code, _ in
-        self?.sharingControllers.values.forEach { $0.notePriorityShortcutOwnership(code, mouse: true) }
+    }, ignoreEvent: { [weak self] event in
+        event.getIntegerValueField(.eventSourceUnixProcessID) != 0 || self?.runtime.ignoresShortcutEvent(event) == true
+    }, noteOwnership: { [weak self] code, _ in
+        self?.publishRuntimeEvent(.shortcutOwned(code, mouse: true))
     }, ownershipChanged: { [weak self] in
-        self?.sharingControllers.values.forEach { $0.priorityShortcutOwnershipChanged() }
+        self?.publishRuntimeEvent(.shortcutOwnershipChanged)
     }, failed: { [weak self] message in
-        self?.sideButtonFailure = message
-        self?.reloadHotKeys()
+        self?.sideButtonFailure = message; self?.reloadHotKeys()
     })
     private lazy var priorityHotKeys = PriorityHotKeyMonitor(driver: priorityDriver, accessAllowed: { [weak self] in
-        guard let self else { return false }
-        return self.permissions.hasShortcutRoutingAccess()
-    }, ignoreEvent: { $0.getIntegerValueField(.eventSourceUnixProcessID) != 0 || SharingInput.isHostShortcutReplay($0) },
-    noteOwnership: { [weak self] code, _ in
-        self?.sharingControllers.values.forEach { $0.notePriorityShortcutOwnership(code) }
+        self?.permissions.hasShortcutRoutingAccess() == true
+    }, ignoreEvent: { [weak self] event in
+        event.getIntegerValueField(.eventSourceUnixProcessID) != 0 || self?.runtime.ignoresShortcutEvent(event) == true
+    }, noteOwnership: { [weak self] code, _ in
+        self?.publishRuntimeEvent(.shortcutOwned(code, mouse: false))
     }, ownershipChanged: { [weak self] in
-        self?.sharingControllers.values.forEach { $0.priorityShortcutOwnershipChanged() }
+        self?.publishRuntimeEvent(.shortcutOwnershipChanged)
     }, failed: { [weak self] message in
-        self?.priorityFailure = message
-        self?.reloadHotKeys()
+        self?.priorityFailure = message; self?.reloadHotKeys()
     })
     private var recordingObserver: AnyCancellable?
     private var shortcutPermissionObserver: AnyCancellable?
@@ -276,41 +117,38 @@ final class PluginStore: ObservableObject {
     private let priorityRecoverySleep: @MainActor (Duration) async throws -> Void
     private var priorityRecoveryTask: Task<Void,Never>?
     private var priorityRecoveryGeneration: UInt64 = 0
-    static let priorityRecoveryDelays: [Duration] = [.milliseconds(250),.milliseconds(500),.seconds(1),.seconds(2),.seconds(4),.seconds(8),.seconds(16),.seconds(30)]
-    var priorityRecoveryIsScheduled:Bool { priorityRecoveryTask != nil }
+    package static let priorityRecoveryDelays: [Duration] = [.milliseconds(250),.milliseconds(500),.seconds(1),.seconds(2),.seconds(4),.seconds(8),.seconds(16),.seconds(30)]
+    package var priorityRecoveryIsScheduled:Bool { priorityRecoveryTask != nil }
 
-    init(directory: URL? = nil, captureDirectory: URL? = nil, startupError: String? = nil, uiRegistry: PluginUIRegistry? = nil, permissions: HostPermissionCenter? = nil, sharingDefaults: UserDefaults? = nil,
-         shortcutDefaults: UserDefaults? = nil, priorityHotKeyDriver: PriorityHotKeyDriver? = nil,
-         ordinaryHotKeyDriver: HotKeyManager.Driver? = nil, sideButtonDriver: PriorityHotKeyDriver? = nil, modifierDriver: PriorityHotKeyDriver? = nil,
-         priorityRecoverySleep: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for:$0) },
-         presentations: PluginPresentationIndex = .bundled, initialCatalog: [CatalogEntry] = [],
-         dictationFactory: @escaping (URL) -> DoubaoDictationController = { DoubaoDictationController(preferencesURL: $0) },
-         captureFactory: @escaping (URL?) -> ScreenshotController = { ScreenshotController(directory: $0) },
-         wirelessMicrophoneFactory: @escaping (String, UserDefaults) -> WirelessMicrophoneController = {
-             WirelessMicrophoneController(pluginID: $0, defaults: $1)
-         }) {
+    package init(runtime: PluginRuntimeRegistry, directory: URL?, startupError: String?,
+         uiRegistry: PluginUIRegistry, permissions: HostPermissionCenter, shortcutDefaults: UserDefaults?,
+         priorityHotKeyDriver: PriorityHotKeyDriver?, ordinaryHotKeyDriver: HotKeyManager.Driver?,
+         sideButtonDriver: PriorityHotKeyDriver?, modifierDriver: PriorityHotKeyDriver?,
+         priorityRecoverySleep: @escaping @MainActor (Duration) async throws -> Void,
+         presentations: PluginPresentationIndex, initialCatalog: [CatalogEntry]) {
+        self.runtime = runtime
         self.hotKeys = HotKeyManager(driver: ordinaryHotKeyDriver)
         self.priorityRecoverySleep = priorityRecoverySleep
-        self.captureFactory = captureFactory
         self.presentations = presentations
         self.catalog = initialCatalog
-        self.dictationFactory = dictationFactory
-        self.wirelessMicrophoneFactory = wirelessMicrophoneFactory
         self.startupError = startupError
-        if let sharingDefaults { self.sharingDefaults = sharingDefaults; isolatedSharingDomain = nil }
-        else if directory != nil {
-            let domain = "com.untitled.app.sharing.isolated." + UUID().uuidString
-            self.sharingDefaults = UserDefaults(suiteName: domain)!; isolatedSharingDomain = domain
-        } else { self.sharingDefaults = .standard; isolatedSharingDomain = nil }
-        self.shortcutDefaults = shortcutDefaults ?? self.sharingDefaults
+        if let shortcutDefaults {
+            self.shortcutDefaults = shortcutDefaults
+            isolatedShortcutDomain = nil
+        } else if directory != nil {
+            let domain = HostInfo.bundleIdentifier + ".shortcuts.isolated." + UUID().uuidString
+            self.shortcutDefaults = UserDefaults(suiteName: domain)!
+            isolatedShortcutDomain = domain
+        } else {
+            self.shortcutDefaults = .standard
+            isolatedShortcutDomain = nil
+        }
         self.priorityDriver = priorityHotKeyDriver ?? (directory == nil ? .native : .unavailable)
         self.sideButtonDriver = sideButtonDriver ?? (directory == nil ? .native(for: .sideButtons) : .unavailable)
         self.modifierDriver = modifierDriver ?? (directory == nil ? .native(for: .modifierOnly) : .unavailable)
         self.priorityHotKeysEnabled = self.shortcutDefaults.bool(forKey: "shortcuts.priorityEnabled")
-        self.captureDirectory = captureDirectory
-        self.usesLiveCaptureHistory = directory == nil && captureDirectory == nil
-        self.uiRegistry = uiRegistry ?? PluginComposition.makeUIRegistry()
-        self.permissions = permissions ?? PluginComposition.makePermissionCenter()
+        self.uiRegistry = uiRegistry
+        self.permissions = permissions
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("com.untitled.app/Plugins", isDirectory: true)
         do {
@@ -321,6 +159,7 @@ final class PluginStore: ObservableObject {
                 do {
                     let record = try JSONDecoder().decode(InstalledPlugin.self, from: Data(contentsOf: file))
                     try record.manifest.validate()
+                    try runtime.validate(record.manifest)
                     try self.uiRegistry.validate(record.manifest)
                     try self.permissions.validate(record.manifest)
                     guard file.lastPathComponent == record.id + ".json",
@@ -336,7 +175,7 @@ final class PluginStore: ObservableObject {
                 }
             }
             reloadHotKeys()
-            refreshCaptureHistoryCleanup()
+            publishRuntimeEvent(.installedPluginsChanged)
         } catch { errorMessage = "无法读取插件目录：\(error.localizedDescription)" }
         recordingObserver = NotificationCenter.default.publisher(for: HotKeyRecordingSession.changed).sink { [weak self] _ in
             MainActor.assumeIsolated { self?.reloadHotKeys() }
@@ -364,13 +203,13 @@ final class PluginStore: ObservableObject {
             } }
     }
 
-    func setPriorityHotKeysEnabled(_ value: Bool) {
+    package func setPriorityHotKeysEnabled(_ value: Bool) {
         priorityHotKeysEnabled = value
         shortcutDefaults.set(value, forKey: "shortcuts.priorityEnabled")
         retryHotKeys()
         if value, !permissions.hasShortcutRoutingAccess() { permissions.revealShortcutRoutingPermissions() }
     }
-    func setHotKeysPaused(_ value: Bool) {
+    package func setHotKeysPaused(_ value: Bool) {
         hotKeysPaused = value
         reloadHotKeys()
     }
@@ -382,14 +221,14 @@ final class PluginStore: ObservableObject {
         (priorityHotKeyRecoveryNeeded && priorityDriver.secureInput()) || (sideButtonRecoveryNeeded && sideButtonDriver.secureInput()) ||
             (modifierRecoveryNeeded && modifierDriver.secureInput())
     }
-    func retryHotKeys() {
+    package func retryHotKeys() {
         priorityFailure = nil; sideButtonFailure = nil; modifierFailure = nil
         reloadHotKeys()
     }
     /// Permission snapshots can remain unchanged when Secure Input ends. A
     /// lifecycle event must still recover a failed route, but never churn a
     /// healthy tap or cancel an in-flight priority stroke.
-    func recoverPriorityHotKeysIfNeeded() {
+    package func recoverPriorityHotKeysIfNeeded() {
         guard shortcutRecoveryNeeded,!hotKeysPaused,
               !isPreparingForQuit,!HotKeyRecordingSession.isRecording else { return }
         if permissions.hasShortcutRoutingAccess(), !recoveryIsSecure, !routeHasOutstandingKeys { retryHotKeys() }
@@ -422,7 +261,7 @@ final class PluginStore: ObservableObject {
         }
     }
 
-    func refreshCatalog() async {
+    package func refreshCatalog() async {
         guard !isRefreshing else { return }
         isRefreshing = true
         catalogError = nil
@@ -437,7 +276,7 @@ final class PluginStore: ObservableObject {
         } catch { catalogError = "无法加载插件商店：\(error.localizedDescription)" }
     }
 
-    func install(_ entry: CatalogEntry) async {
+    package func install(_ entry: CatalogEntry) async {
         guard !isInstalling else { return }
         isInstalling = true
         defer { isInstalling = false }
@@ -458,7 +297,7 @@ final class PluginStore: ObservableObject {
         } catch { errorMessage = "安装失败：\(error.localizedDescription)" }
     }
 
-    func importPackage(_ url: URL) async {
+    package func importPackage(_ url: URL) async {
         guard !isInstalling else { return }
         isInstalling = true
         let scoped = url.startAccessingSecurityScopedResource()
@@ -474,15 +313,17 @@ final class PluginStore: ObservableObject {
         } catch { errorMessage = "安装失败：\(error.localizedDescription)" }
     }
 
-    func installManifest(_ source: PluginManifest, readme: String? = nil) throws {
+    package func installManifest(_ source: PluginManifest, readme: String? = nil) throws {
         guard readme.map({ $0.utf8.count <= PluginArchive.maximumReadmeSize }) ?? true else {
             throw PluginError.invalid("插件说明超过 128 KiB 限制。")
         }
         let manifest = IdentityMigration.manifest(source)
         try manifest.validate()
+        try runtime.validate(manifest)
         try uiRegistry.validate(manifest)
         try permissions.validate(manifest)
-        if var record = installed.first(where: { $0.id == manifest.id }) {
+        if let previous = installed.first(where: { $0.id == manifest.id }) {
+            var record = previous
             guard Version(manifest.version)! >= Version(record.manifest.version)! else {
                 throw PluginError.invalid("不能安装更早版本的插件。")
             }
@@ -490,16 +331,14 @@ final class PluginStore: ObservableObject {
             guard record.commands.allSatisfy({ manifest.actions.contains($0.action) }) else {
                 throw PluginError.invalid("新版本不再支持部分已有操作，请先移除这些操作。")
             }
-            dictationControllers[manifest.id]?.cancel(message: "本次听写因插件更新而中断。")
-            let resumeSharing = sharingControllers[manifest.id]?.isRunning == true && sharingDefaults.bool(forKey: "sharing.sessionEnabled")
-            sharingControllers[manifest.id]?.stop(reason: "正在更新插件。")
-            wirelessMicrophoneControllers[manifest.id]?.stop()
             if manifest.version != record.manifest.version || readme != nil { record.readme = readme }
             record.manifest = manifest
             let conflicts = record.initializeDefaultCommands(occupiedHotKeys: occupiedHotKeys(excluding: manifest.id))
-            try save(record)
+            // A failed write must not interrupt the currently running module.
+            try save(record, reloadBindings: false)
+            runtime.didReplace(previous, with: record, in: self)
+            reloadHotKeys()
             reportDefaultConflicts(conflicts)
-            if resumeSharing { do { try sharingControllers[manifest.id]?.restoreUserSessionIfRequested() } catch { handleExecutionError(error) } }
         } else {
             var record = InstalledPlugin(manifest: manifest, commands: [])
             record.readme = readme
@@ -507,10 +346,15 @@ final class PluginStore: ObservableObject {
             try save(record)
             reportDefaultConflicts(conflicts)
         }
-        refreshCaptureHistoryCleanup()
+        publishRuntimeEvent(.installedPluginsChanged)
     }
 
-    func presentation(for manifest: PluginManifest) -> PluginPresentation {
+    package func presentation(for action: ActionKind) -> PluginActionPresentation { runtime.presentation(for: action) }
+    package func title(for command: PluginCommand) -> String {
+        command.title(actionTitle: presentation(for: command.action).title)
+    }
+
+    package func presentation(for manifest: PluginManifest) -> PluginPresentation {
         let bundled = presentations.appearance(id: manifest.id, repository: manifest.repository, version: manifest.version)
         return PluginPresentation(id: manifest.id, repository: manifest.repository, version: manifest.version,
             name: bundled?.name ?? manifest.name, summary: bundled?.summary ?? manifest.summary,
@@ -518,7 +362,7 @@ final class PluginStore: ObservableObject {
             storefront: bundled?.storefront ?? manifest.storefront)
     }
 
-    func presentation(for entry: CatalogEntry) -> PluginPresentation {
+    package func presentation(for entry: CatalogEntry) -> PluginPresentation {
         let repository = URL(string: "https://github.com/" + entry.downloadURL.pathComponents.dropFirst().prefix(2).joined(separator: "/"))!
         let bundled = presentations.appearance(id: entry.id, repository: repository, version: entry.version)
         return PluginPresentation(id: entry.id, repository: repository, version: entry.version,
@@ -526,7 +370,7 @@ final class PluginStore: ObservableObject {
             readmeURL: bundled?.readmeURL, storefront: bundled?.storefront ?? entry.storefront)
     }
 
-    func documentation(for entry: CatalogEntry) async throws -> String? {
+    package func documentation(for entry: CatalogEntry) async throws -> String? {
         if let plugin = installed.first(where: { $0.id == entry.id && $0.manifest.version == entry.version }), let readme = plugin.readme {
             return readme
         }
@@ -556,7 +400,7 @@ final class PluginStore: ObservableObject {
         return contents.readme
     }
 
-    func restoreDefaultCommands(pluginID: String) throws {
+    package func restoreDefaultCommands(pluginID: String) throws {
         guard var record = installed.first(where: { $0.id == pluginID }) else { throw PluginError.invalid("插件已卸载。") }
         let conflicts = record.initializeDefaultCommands(occupiedHotKeys: occupiedHotKeys(excluding: pluginID), restoring: true)
         try save(record)
@@ -574,25 +418,16 @@ final class PluginStore: ObservableObject {
         }
     }
 
-    func setEnabled(_ enabled: Bool, pluginID: String) {
+    package func setEnabled(_ enabled: Bool, pluginID: String) {
         guard var record = installed.first(where: { $0.id == pluginID }) else { return }
         record.isEnabled = enabled
         do { try save(record) }
         catch { errorMessage = error.localizedDescription; return }
-        if !enabled {
-            dictationControllers[pluginID]?.cancel(message: "插件已停用。")
-            if pluginID == PeripheralSharingController.pluginID { sharingDefaults.set(false, forKey: "sharing.sessionEnabled") }
-            sharingControllers[pluginID]?.stopUserSession()
-            wirelessMicrophoneControllers[pluginID]?.stop()
-        }
-        if record.manifest.hasCaptureCapability {
-            if !enabled { screenshots.deactivate() }
-            else { captureController?.pinManager.activate(); captureController?.objectWillChange.send() }
-            refreshCaptureHistoryCleanup()
-        }
+        runtime.didSetEnabled(record, in: self)
+        publishRuntimeEvent(.installedPluginsChanged)
     }
 
-    func saveCommand(_ command: PluginCommand, pluginID: String) throws {
+    package func saveCommand(_ command: PluginCommand, pluginID: String) throws {
         guard var record = installed.first(where: { $0.id == pluginID }) else { throw PluginError.invalid("插件已卸载。") }
         try command.validate(allowedActions: record.manifest.actions)
         try uiRegistry.validateBinding(command, in: record)
@@ -600,7 +435,7 @@ final class PluginStore: ObservableObject {
             for plugin in installed where plugin.isEnabled {
                 for other in plugin.commands where other.isEnabled && other.id != command.id {
                     if other.hotKey?.identity == hotKey.identity {
-                        throw PluginError.invalid("\(hotKey.display) 已绑定到「\(other.title)」。")
+                        throw PluginError.invalid("\(hotKey.display) 已绑定到「\(title(for: other))」。")
                     }
                 }
             }
@@ -615,101 +450,58 @@ final class PluginStore: ObservableObject {
         }
     }
 
-    func removeCommand(_ commandID: UUID, pluginID: String) {
+    package func removeCommand(_ commandID: UUID, pluginID: String) {
         guard var record = installed.first(where: { $0.id == pluginID }) else { return }
         record.commands.removeAll { $0.id == commandID }
         do { try save(record) } catch { errorMessage = error.localizedDescription }
     }
 
-    func uninstall(_ pluginID: String) {
-        guard installed.contains(where: { $0.id == pluginID }) else { return }
+    package func uninstall(_ pluginID: String) {
+        guard let plugin = installed.first(where: { $0.id == pluginID }) else { return }
         do {
-            if installed.first(where: { $0.id == pluginID })?.manifest.hasCaptureCapability == true { screenshots.deactivate() }
-            if pluginID == PeripheralSharingController.pluginID { sharingDefaults.set(false, forKey: "sharing.sessionEnabled") }
-            sharingPriorityObservers.removeValue(forKey: pluginID)?.cancel()
-            sharingControllers.removeValue(forKey: pluginID)?.stopUserSession()
-            wirelessMicrophoneControllers.removeValue(forKey: pluginID)?.stop()
-            if let dictation = dictationControllers.removeValue(forKey: pluginID) {
-                dictation.cancel(message: "插件已卸载。")
-                dictation.history.invalidateForUninstall()
-            }
-            let preferences = dictationPreferencesURL(pluginID)
-            let history = DictationHistory.directory(for: preferences)
-            if FileManager.default.fileExists(atPath: history.path) { try FileManager.default.removeItem(at: history) }
-            if FileManager.default.fileExists(atPath: preferences.path) { try FileManager.default.removeItem(at: preferences) }
+            try runtime.willUninstall(plugin, in: self)
             try FileManager.default.removeItem(at: directory.appendingPathComponent(pluginID + ".json"))
             installed.removeAll { $0.id == pluginID }
             reloadHotKeys()
         } catch { errorMessage = "卸载失败：\(error.localizedDescription)" }
-        refreshCaptureHistoryCleanup()
+        publishRuntimeEvent(.installedPluginsChanged)
     }
 
-    func execute(_ command: PluginCommand, pluginID: String) async {
-        guard !isPreparingForQuit else { return }
-        guard let plugin = installed.first(where: { $0.id == pluginID }), plugin.isEnabled, command.isEnabled,
-              plugin.commands.contains(command), plugin.manifest.actions.contains(command.action) else { return }
+    package func execute(_ command: PluginCommand, pluginID: String) async {
+        guard commandIsAvailable(command, pluginID: pluginID) else { return }
         do {
-            try await ActionExecutor.execute(command, showMainWindow: showMainWindow, peripheralAction: { [self] action in
-                try performPeripheralAction(action, pluginID: pluginID)
-            }, wirelessMicrophoneAction: { [self] in
-                try performWirelessMicrophoneAction(pluginID: pluginID)
-            }, dictationAction: { [self] action in
-                try performDictationAction(action, pluginID: pluginID)
-            }) { [self] action in
-                try await performScreenshot(action, pluginID: pluginID)
+            try command.action.validateTarget(command.target)
+            if let owner = runtime.owner(of: command.action) {
+                try await owner.perform(command, for: pluginID, in: self)
+            } else {
+                try await ActionExecutor.execute(command, showMainWindow: showMainWindow)
             }
-        }
-        catch { handleExecutionError(error) }
+        } catch { handleExecutionError(error) }
+    }
+    private func commandIsAvailable(_ command: PluginCommand, pluginID: String) -> Bool {
+        command.isEnabled && enabledPlugin(pluginID, allowing: command.action)?.commands.contains(command) == true
     }
 
-    func performPeripheralAction(_ action: ActionKind, pluginID: String) throws {
-        guard let plugin = installed.first(where: { $0.id == pluginID }), plugin.isEnabled,
-              plugin.manifest.actions.contains(action), plugin.manifest.actions.contains(.sharePeripherals) else {
-            throw PluginError.invalid("请先启用并授权键鼠共享插件。")
-        }
-        let controller = peripheralSharing(for: pluginID)
-        switch action {
-        case .sharePeripherals: if controller.isRunning { controller.stopUserSession() } else { try controller.startUserSession() }
-        case .switchPeripheralControl: controller.toggleControl()
-        case .stopPeripheralSharing: controller.stopUserSession()
-        default: throw PluginError.invalid("不支持的键鼠共享操作。")
-        }
+    package func refreshShortcutBindings() { reloadHotKeys(); objectWillChange.send() }
+    package func routeShortcutInput(_ type: CGEventType, _ event: CGEvent) -> Bool {
+        priorityHotKeys.handle(type, event) || sideButtons.handle(type, event)
+    }
+    package func ownsShortcutInput(_ code: UInt32, mouse: Bool) -> Bool {
+        mouse ? sideButtons.ownsKey(code) : priorityHotKeys.ownsKey(code)
+    }
+    package var hasOutstandingShortcutInput: Bool { priorityHotKeys.hasOutstandingKeys || sideButtons.hasOutstandingKeys }
+
+    package func registerTemporaryShortcut(_ key: HotKey, pluginID: String, action: ActionKind,
+                                   onPress: @escaping () -> Void) -> (() -> Void)? {
+        guard !hotKeysPaused, !HotKeyRecordingSession.isRecording, enabledPlugin(pluginID, allowing: action) != nil,
+              !runtime.reservesShortcut(key),
+              !installed.contains(where: { plugin in
+                  plugin.isEnabled && plugin.commands.contains { $0.isEnabled && $0.hotKey?.identity == key.identity }
+              }) else { return nil }
+        return try? hotKeys.registerScoped(key, action: onPress)
     }
 
-    func performScreenshot(_ action: ActionKind, pluginID: String) async throws {
-        guard action.isScreenshotAction,
-              let plugin = installed.first(where: { $0.id == pluginID }), plugin.isEnabled,
-              plugin.manifest.actions.contains(action) else { throw PluginError.invalid("请先启用截图插件。") }
-        if action == .toggleCaptureHotKeys {
-            captureHotKeysPaused.toggle()
-            reloadHotKeys()
-            return
-        }
-        // Repeated capture keys are a no-op, before any permission work or UI.
-        guard captureController?.shouldIgnoreCaptureRequest(action) != true else { return }
-        let client = permissionClient(for: pluginID)
-        if !(action == .captureRecording && screenshots.isRecording) {
-            try client.require(CapturePermissionRequirements.permissions(for: action))
-        }
-        screenshots.showHistory = { [weak self] in
-            self?.requestedPluginID = pluginID
-            self?.showMainWindow()
-        }
-        let liveActions = Set(CaptureSelectionLiveAction.allCases.filter { plugin.manifest.actions.contains($0.action) })
-        try await screenshots.perform(action, permissions: client, liveActions: liveActions, pinShortcutMatches: { [weak self] keyCode, modifiers in
-            self?.matchesSelectionPinShortcut(keyCode: keyCode, modifiers: modifiers, pluginID: pluginID) == true
-        }) { [weak self] action in
-            guard let self, !self.isPreparingForQuit else { return false }
-            return self.installed.contains { $0.id == pluginID && $0.isEnabled && $0.manifest.actions.contains(action) }
-        }
-    }
-
-    func matchesSelectionPinShortcut(keyCode: UInt32, modifiers: UInt32, pluginID: String) -> Bool {
-        guard !isPreparingForQuit else { return false }
-        return selectionPinShortcuts[pluginID]?.contains { $0.keyCode == keyCode && $0.modifiers == modifiers } == true
-    }
-
-    func permissionClient(for pluginID: String) -> PluginPermissionClient {
+    package func permissionClient(for pluginID: String) -> PluginPermissionClient {
         PluginPermissionClient(isAuthorized: { [weak self] id in
             guard let self, let plugin = self.installed.first(where: { $0.id == pluginID }) else { return false }
             return self.permissions.isAuthorized(id, for: plugin)
@@ -717,11 +509,11 @@ final class PluginStore: ObservableObject {
             guard let self, let plugin = self.installed.first(where: { $0.id == pluginID }) else {
                 throw PluginError.invalid("插件已卸载。")
             }
-            try self.permissions.require(ids, for: plugin)
+            try self.permissions.require(ids, for: plugin, displayName: self.presentation(for: plugin.manifest).name)
         }
     }
 
-    func handleExecutionError(_ error: Error) {
+    package func handleExecutionError(_ error: Error) {
         if error is HostPermissionError { return } // The host has already opened permission management.
         errorMessage = "执行失败：\(error.localizedDescription)"
         showMainWindow()
@@ -740,39 +532,35 @@ final class PluginStore: ObservableObject {
 
     private func reloadHotKeys(automaticRecovery:Bool=false) {
         defer {
-            for controller in dictationControllers.values { controller.refreshEscapeShortcut() }
+            publishRuntimeEvent(.didReloadShortcuts)
             reconcileShortcutRegistrationNotice()
             if !automaticRecovery { schedulePriorityRecovery() }
         }
         if !automaticRecovery { cancelPriorityRecovery() }
         priorityHotKeyRecoveryNeeded=false; sideButtonRecoveryNeeded=false; modifierRecoveryNeeded=false
-        if let plugin = installed.first(where: { $0.isEnabled && $0.manifest.hasCaptureCapability }) {
-            if let controller = captureController {
-                controller.configureGlobalMouse(permissions: permissionClient(for: plugin.id), allowed: { [weak self] in self?.captureHotKeysPaused == false && !HotKeyRecordingSession.isRecording })
-            } else if UserDefaults.standard.bool(forKey: "capture.mouse.enabled") { _ = screenshots }
-        } else { captureController?.globalMouse.stop() }
+        publishRuntimeEvent(.willReloadShortcuts)
         hotKeys.clear(); priorityHotKeys.clear(); sideButtons.clear(); modifierKeys.clear()
         hotKeyErrors = [:]
-        selectionPinShortcuts.removeAll()
+        windowShortcuts.removeAll()
         priorityHotKeyStatus = hotKeysPaused ? "所有快捷键已暂停" : (HotKeyRecordingSession.isRecording ? "正在录制快捷键，已暂停全局触发" : nil)
         guard !hotKeysPaused, !isPreparingForQuit, !HotKeyRecordingSession.isRecording else { return }
         var identities = Set<String>()
-        var bindings: [(pluginID: String, command: PluginCommand, key: HotKey)] = []
+        var bindings: [(pluginID: String, command: PluginCommand, key: HotKey, exclusive: Bool)] = []
         for plugin in installed where plugin.isEnabled {
             for command in plugin.commands where command.isEnabled {
-                if captureHotKeysPaused, plugin.manifest.hasCaptureCapability, command.action != .toggleCaptureHotKeys { continue }
-                guard let key = command.hotKey else { continue }
+                guard runtime.includesShortcut(command, in: plugin), let key = command.hotKey else { continue }
                 do {
                     try command.validate(allowedActions: plugin.manifest.actions)
                     try uiRegistry.validateBinding(command, in: plugin)
                     guard identities.insert(key.identity).inserted else {
                         throw PluginError.invalid("这个快捷键已绑定到其他操作。")
                     }
-                    if command.action == .pinSelection, key.mouseButton == nil, !key.isStandaloneModifier {
-                        selectionPinShortcuts[plugin.id, default: []].append(key)
-                        continue
+                    let registration = runtime.owner(of: command.action)?.shortcutRegistration(for: command, key: key) ?? .exclusive
+                    if registration == .window {
+                        windowShortcuts[plugin.id, default: [:]][command.action, default: []].append(key)
+                    } else {
+                        bindings.append((plugin.id, command, key, registration == .exclusive))
                     }
-                    bindings.append((plugin.id, command, key))
                 } catch { hotKeyErrors[command.id] = error.localizedDescription }
             }
         }
@@ -781,13 +569,14 @@ final class PluginStore: ObservableObject {
         let solo = bindings.filter { $0.key.isStandaloneModifier }
         bindings.removeAll { $0.key.isStandaloneModifier }
         if solo.isEmpty { modifierFailure = nil }
-        for (pluginID, command, key) in solo {
+        for (pluginID, command, key, _) in solo {
             do {
                 if let modifierFailure { throw PluginError.invalid(modifierFailure) }
-                let release = hotKeyRelease(command, pluginID: pluginID)
-                try modifierKeys.register(key, allowed: { [weak self] in self?.allowsPriorityHotKey(command, pluginID: pluginID) == true },
-                    onRelease: release, onCancel: { [weak self] in self?.dictationControllers[pluginID]?.holdCancelled(command.id) }) { [weak self] in
-                    self?.hotKeyPressed(command, pluginID: pluginID)
+                let gesture = runtime.owner(of: command.action)?.shortcutGesture(for: command, pluginID: pluginID,
+                                                                               channel: .modifier, in: self)
+                try modifierKeys.register(key, allowed: { [weak self] in self?.allowsEventShortcut(command, pluginID: pluginID) == true },
+                    onRelease: gesture?.release, onCancel: gesture?.cancel) { [weak self] in
+                    self?.shortcutPressed(command, pluginID: pluginID, gesture: gesture)
                 }
             } catch { modifierRecoveryNeeded = true; hotKeyErrors[command.id] = error.localizedDescription }
         }
@@ -825,9 +614,10 @@ final class PluginStore: ObservableObject {
         }
         for binding in bindings {
             do {
-                try hotKeys.register(binding.key, exclusive: !binding.command.action.isScreenshotAction,
-                                     onRelease: hotKeyRelease(binding.command, pluginID: binding.pluginID)) { [weak self] in
-                    self?.hotKeyPressed(binding.command, pluginID: binding.pluginID)
+                let gesture = runtime.owner(of: binding.command.action)?.shortcutGesture(for: binding.command,
+                    pluginID: binding.pluginID, channel: .ordinary, in: self)
+                try hotKeys.register(binding.key, exclusive: binding.exclusive, onRelease: gesture?.release) { [weak self] in
+                    self?.shortcutPressed(binding.command, pluginID: binding.pluginID, gesture: gesture)
                 }
             } catch { hotKeyErrors[binding.command.id] = error.localizedDescription }
         }
@@ -846,46 +636,23 @@ final class PluginStore: ObservableObject {
         }
     }
 
-    var priorityShortcutsYieldToSharing: Bool {
-        sharingControllers.values.contains { !$0.allowsLocalPriorityShortcuts }
-    }
     private func registerEventShortcut(_ key: HotKey, via monitor: PriorityHotKeyMonitor, command: PluginCommand, pluginID: String) throws {
-        let allowed = { [weak self] in self?.allowsPriorityHotKey(command, pluginID: pluginID) == true }
-        if command.action == .switchPeripheralControl {
-            // A local-to-remote request waits for this shortcut's physical release.
-            // Cancellation must never turn into a new handoff or reverse a queued intent.
-            var armed = false
-            try monitor.register(key, allowed: allowed, onRelease: { [weak self] in
-                guard armed else { return }
-                armed = false
-                guard let self, self.allowsPriorityHotKey(command, pluginID: pluginID) else { return }
-                do { try self.performPeripheralAction(.switchPeripheralControl, pluginID: pluginID) }
-                catch { self.handleExecutionError(error) }
-            }, onCancel: { armed = false }, action: { armed = true })
-        } else {
-            try monitor.register(key, allowed: allowed, onRelease: hotKeyRelease(command, pluginID: pluginID)) { [weak self] in
-                self?.hotKeyPressed(command, pluginID: pluginID)
-            }
+        let gesture = runtime.owner(of: command.action)?.shortcutGesture(for: command, pluginID: pluginID, channel: .eventTap, in: self)
+        try monitor.register(key, allowed: { [weak self] in self?.allowsEventShortcut(command, pluginID: pluginID) == true },
+                             onRelease: gesture?.release, onCancel: gesture?.cancel) { [weak self] in
+            self?.shortcutPressed(command, pluginID: pluginID, gesture: gesture)
         }
     }
-    private func hotKeyRelease(_ command: PluginCommand, pluginID: String) -> (() -> Void)? {
-        guard command.action == .holdDoubaoDictation else { return nil }
-        return { [weak self] in self?.dictationControllers[pluginID]?.holdReleased(command.id) }
-    }
-    private func hotKeyPressed(_ command: PluginCommand, pluginID: String) {
-        guard !isPreparingForQuit, !hotKeysPaused,
-              installed.contains(where: { $0.id == pluginID && $0.isEnabled && $0.commands.contains(command) && command.isEnabled }) else { return }
-        if command.action == .holdDoubaoDictation {
-            do { try performDictationAction(command.action, pluginID: pluginID, holdCommandID: command.id) }
-            catch { handleExecutionError(error) }
+    private func shortcutPressed(_ command: PluginCommand, pluginID: String, gesture: PluginShortcutGesture?) {
+        guard !hotKeysPaused, commandIsAvailable(command, pluginID: pluginID) else { return }
+        if let gesture {
+            do { try gesture.press() } catch { handleExecutionError(error) }
         } else { Task { [weak self] in await self?.execute(command, pluginID: pluginID) } }
     }
-    private func allowsPriorityHotKey(_ command: PluginCommand, pluginID: String) -> Bool {
-        guard (priorityHotKeysEnabled || command.hotKey?.mouseButton != nil || command.hotKey?.isStandaloneModifier == true), !isPreparingForQuit, !hotKeysPaused, !HotKeyRecordingSession.isRecording,
-              installed.contains(where: { $0.id == pluginID && $0.isEnabled && $0.commands.contains(command) && command.isEnabled }) else { return false }
-        if sharingControllers.values.contains(where: { $0.reservesPriorityShortcut(command.hotKey) }) { return false }
-        if command.action == .stopPeripheralSharing { return true }
-        return sharingControllers.values.allSatisfy(\.allowsLocalPriorityShortcuts)
+    package func allowsEventShortcut(_ command: PluginCommand, pluginID: String) -> Bool {
+        (priorityHotKeysEnabled || command.hotKey?.mouseButton != nil || command.hotKey?.isStandaloneModifier == true)
+            && !hotKeysPaused && !HotKeyRecordingSession.isRecording && commandIsAvailable(command, pluginID: pluginID)
+            && runtime.permitsShortcut(command)
     }
 
     private static func fetch(_ url: URL, maximumBytes: Int) async throws -> Data {

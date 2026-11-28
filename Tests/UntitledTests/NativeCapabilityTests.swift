@@ -1,7 +1,8 @@
 import AppKit
 import Testing
 
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
 
 @Suite(.serialized) struct NativeCapabilityTests {
     @Test @MainActor func clipboardRoundTripAndOversizeWritePreservesTheExistingValue() throws {

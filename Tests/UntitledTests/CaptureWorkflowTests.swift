@@ -1,13 +1,39 @@
 import AppKit
 import Carbon
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 @Suite(.serialized)
 struct CaptureWorkflowTests {
     private func manifest() throws -> PluginManifest {
         try JSONDecoder().decode(PluginManifest.self, from: Data(contentsOf: URL(fileURLWithPath: "Plugins/screenshot/manifest.json")))
     }
+    @Test @MainActor func deniedNewRecordingDoesNotConstructScreenshotController() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let manifest = try manifest()
+        let drivers = (manifest.permissions ?? []).map { permission in
+            HostPermissionDriver(descriptor: .init(id: permission.id, title: "测试", summary: "测试", symbol: "lock"),
+                                 status: { .notGranted }, request: {}, openSettings: {})
+        }
+        var constructions = 0
+        let store = PluginStore(directory: folder, permissions: HostPermissionCenter(drivers: drivers),
+                                ordinaryHotKeyDriver: .init(register: { _, _ in {} }), captureFactory: { directory in
+            constructions += 1
+            return ScreenshotController(directory: directory)
+        })
+        try store.installManifest(manifest)
+        await #expect(throws: HostPermissionError.self) {
+            try await store.performScreenshot(.captureRecording, pluginID: manifest.id)
+        }
+        #expect(constructions == 0 && store.permissions.pendingRequest?.pluginID == manifest.id)
+    }
+
     @Test func onlyThreeDefaultsAreInstalledAndConflictsAreNotStolen() throws {
         let manifest = try manifest()
         try manifest.validate()
@@ -82,7 +108,7 @@ struct CaptureWorkflowTests {
         let updated = try manifest()
         let legacyActions: [ActionKind] = [.captureRegion, .pinClipboard, .restorePin, .captureDelayed, .cyclePinGroup]
         let legacyTemplates = zip(["region", "pin", "restore-pin", "delayed", "cycle-group"], legacyActions).map { id, action in
-            CommandTemplate(id: id, title: action.title, action: action)
+            CommandTemplate(id: id, title: CapturePluginActions.presentation[action]?.title ?? action.rawValue, action: action)
         }
         let legacy = PluginManifest(schemaVersion: 2, id: updated.id, name: updated.name, version: "1.9.5",
                                     summary: updated.summary, author: updated.author, repository: updated.repository,

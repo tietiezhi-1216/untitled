@@ -1,7 +1,12 @@
 import AppKit
 import Combine
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 @Suite(.serialized) struct DictationHUDStyleTests {
     @Test func eachGraphemeHasItsOwnOnsetAcrossPacketsAndVisibleTextNeverRefades() throws {
@@ -68,7 +73,7 @@ import Testing
 
     @Test @MainActor func systemGlassAndOpaqueFallbackContainTheActualContent() {
         _ = NSApplication.shared
-        let rect = NSRect(origin: .zero, size: DictationHUD.expanded), ink = NSView(frame: rect)
+        let rect = NSRect(origin: .zero, size: DictationHUDStyle.defaults.expanded), ink = NSView(frame: rect)
         let native = DictationHUDPlate.make(in: rect, content: ink, reduceTransparency: false)
         if #available(macOS 26, *) {
             #expect((native as? NSGlassEffectView)?.contentView === ink)
@@ -257,15 +262,15 @@ import Testing
     @Test @MainActor func openingBlendsTheWaveIntoGlassAndWidensFromTheSameMidpoint() throws {
         _ = NSApplication.shared
         var now = 10.0
-        let stage = DictationHUDStage(size: DictationHUD.expanded, now: { now })
+        let stage = DictationHUDStage(size: DictationHUDStyle.defaults.expanded, now: { now })
         stage.configure(reduceMotion: false, solid: false)
         let plate = try #require(stage.plate), wave = try #require(stage.wave)
-        #expect(plate.frame.size == DictationHUD.compact && stage.liquid.isHidden && wave.alphaValue == 1)
+        #expect(plate.frame.size == DictationHUDStyle.defaults.compact && stage.liquid.isHidden && wave.alphaValue == 1)
 
         stage.display(DictationCaptionSlice("你好"), finishing: false)
         now += 0.14; stage.refresh()
         let middle = plate.frame
-        #expect(middle.width > DictationHUD.compact.width && middle.height > DictationHUD.compact.height)
+        #expect(middle.width > DictationHUDStyle.defaults.compact.width && middle.height > DictationHUDStyle.defaults.compact.height)
         #expect((0.05...0.95).contains(wave.alphaValue) && (0.05...0.95).contains(stage.liquid.alphaValue))
         if #available(macOS 26, *), let native = plate as? NSGlassEffectView {
             #expect(native.cornerRadius == middle.height / 2)
@@ -273,7 +278,7 @@ import Testing
         now += 0.3; stage.refresh()
         let short = plate.frame
         #expect(stage.openness == 1 && stage.wave == nil && wave.superview == nil && !wave.isAnimating)
-        #expect(short.width > middle.width && short.width < stage.bounds.width && short.height == DictationHUD.expanded.height)
+        #expect(short.width > middle.width && short.width < stage.bounds.width && short.height == DictationHUDStyle.defaults.expanded.height)
 
         stage.display(DictationCaptionSlice("明天上午去喝杯咖啡"), finishing: false)
         #expect(plate.frame == short)
@@ -284,7 +289,7 @@ import Testing
         #expect(plate.frame == changing) // Retarget from the current visible width.
         now += 0.24; stage.refresh()
         let widest = plate.frame
-        #expect(widest.size == DictationHUD.expanded)
+        #expect(widest.size == DictationHUDStyle.defaults.expanded)
         stage.display(DictationCaptionSlice("更短的修订"), finishing: false)
         now += 1; stage.refresh()
         #expect(plate.frame == widest)
@@ -293,7 +298,7 @@ import Testing
 
     @Test @MainActor func glassOnlyTicksWhileListeningAndHonoursDisplayOptions() throws {
         _ = NSApplication.shared
-        let rect = CGRect(origin: .zero, size: DictationHUD.expanded)
+        let rect = CGRect(origin: .zero, size: DictationHUDStyle.defaults.expanded)
         let window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; defer { window.close() }
         var now = 5.0
@@ -360,8 +365,8 @@ import Testing
 
     @Test @MainActor func theLatestGlyphsStayOnOneUncutLineWithNaturalWidths() throws {
         _ = NSApplication.shared
-        let width = DictationHUD.captionWidth(in: DictationHUD.expanded.width)
-        let rect = NSRect(x: 0,y: 0,width: width,height: DictationHUD.captionHeight)
+        let width = DictationHUDStyle.defaults.captionWidth(in: DictationHUDStyle.defaults.expanded.width)
+        let rect = NSRect(x: 0,y: 0,width: width,height: DictationHUDStyle.captionHeight)
         let view = DictationCaptionView(frame: rect); view.appearance = NSAppearance(named: .aqua)
         for text in ["🟥", "明天 上午 9 点去展览馆，🟥", String(repeating:"晨",count:19)+"🟥",
                      String(repeating:"沿河岸 café 👨‍👩‍👦\n",count:180)+"🟥"] {
@@ -379,8 +384,8 @@ import Testing
     @Test @MainActor func actualOverflowMovesRetainedInkLeftThenHoldsAndCanBeRetargeted() throws {
         _ = NSApplication.shared
         var t = 20.0
-        let width = DictationHUD.captionWidth(in: DictationHUD.expanded.width)
-        let view = DictationCaptionView(frame: NSRect(x:0,y:0,width:width,height:DictationHUD.captionHeight), now: { t })
+        let width = DictationHUDStyle.defaults.captionWidth(in: DictationHUDStyle.defaults.expanded.width)
+        let view = DictationCaptionView(frame: NSRect(x:0,y:0,width:width,height:DictationHUDStyle.captionHeight), now: { t })
         view.appearance = NSAppearance(named: .aqua)
         func x() throws -> CGFloat { let ink = try view.tickerInk(); return try #require(ink.redX) }
         // The source window already rolls at 96 characters. The red marker is a
@@ -428,8 +433,8 @@ import Testing
     @Test @MainActor func actualCaptionPixelsStartOneGraphemeAtATimeEvenFromTheSamePacket() throws {
         _ = NSApplication.shared
         var t = 50.0
-        let rect = NSRect(x: 0,y: 0,width: DictationHUD.captionWidth(in: DictationHUD.expanded.width),
-                          height: DictationHUD.captionHeight)
+        let rect = NSRect(x: 0,y: 0,width: DictationHUDStyle.defaults.captionWidth(in: DictationHUDStyle.defaults.expanded.width),
+                          height: DictationHUDStyle.captionHeight)
         let view = DictationCaptionView(frame: rect, now: { t })
         let window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; defer { window.close() }

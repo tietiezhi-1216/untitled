@@ -1,7 +1,12 @@
 import AppKit
 import DictationIMEKit
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 /// Real NSTextInputClient composition in an offscreen, test-owned NSTextView. No user editor,
 /// TIS selection, physical keyboard/mouse events, microphone, editor automation, or clipboard.

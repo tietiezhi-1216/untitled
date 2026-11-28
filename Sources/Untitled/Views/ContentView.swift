@@ -1,7 +1,8 @@
 import AppKit
+import UntitledPluginSDK
 import SwiftUI
 
-struct ContentView: View {
+package struct ContentView: View {
     private static let nativeCapabilitiesID = "__native_capabilities__"
     @EnvironmentObject private var store: PluginStore
     @Environment(\.openWindow) private var openWindow
@@ -13,7 +14,7 @@ struct ContentView: View {
     @ViewState private var selection: String
     @StateObject private var marketplace = PluginMarketplaceNavigation()
 
-    init(initialSelection: String = "__store__") {
+    package init(initialSelection: String = "__store__") {
         _selection = ViewState(wrappedValue: initialSelection)
     }
 
@@ -25,7 +26,7 @@ struct ContentView: View {
         selection != Self.nativeCapabilitiesID && selectedPlugin == nil
     }
 
-    var body: some View {
+    package var body: some View {
         HStack(spacing: 0) {
             sidebar
                 .frame(width: PanelLayout.sidebarWidth)

@@ -1,6 +1,11 @@
 import Foundation
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 struct DoubaoASRTests {
     @Test func observedProtobufAndUnknownFields() throws {

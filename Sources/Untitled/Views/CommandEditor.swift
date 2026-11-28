@@ -1,4 +1,5 @@
 import AppKit
+import UntitledPluginSDK
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -18,16 +19,16 @@ struct CommandEditor: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Text(draft.title)
+            Text(store.title(for: draft))
                 .font(.headline)
                 .lineLimit(2)
-                .help(draft.title)
+                .help(store.title(for: draft))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, PanelLayout.contentInset)
                 .padding(.top, PanelLayout.contentInset)
             Form {
                 Picker("操作", selection: $draft.action) {
-                    ForEach(actions, id: \.self) { action in Text(action.title).tag(action) }
+                    ForEach(actions, id: \.self) { action in Text(store.presentation(for: action).title).tag(action) }
                 }
                 .onChange(of: draft.action) { _, _ in
                     draft.target = ""
@@ -54,19 +55,10 @@ struct CommandEditor: View {
                 case .showMainWindow:
                     Text("将主面板带到前台；窗口已关闭时会重新打开。")
                         .font(.callout).foregroundStyle(.secondary)
-                case .sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing:
-                    Text("使用键鼠共享插件中已配对的设备。切换控制需要两端明确开启键鼠共享；停止操作始终释放键鼠和麦克风。")
-                        .font(.callout).foregroundStyle(.secondary)
-                case .shareWirelessMicrophone:
-                    Text("启动或停止无线麦连接。发送和接收需要在无线麦面板开启。")
-                        .font(.callout).foregroundStyle(.secondary)
-                case .holdDoubaoDictation:
-                    Text("按住开始听写，松开结束。").font(.callout).foregroundStyle(.secondary)
-                case .toggleDoubaoDictation, .cancelDoubaoDictation:
-                    EmptyView()
                 default:
-                    Text("绑定后可在任意应用中执行此截图操作。首次截屏或录屏时需要允许屏幕录制权限。")
-                        .font(.callout).foregroundStyle(.secondary)
+                    if let help = store.presentation(for: draft.action).bindingHelp {
+                        Text(help).font(.callout).foregroundStyle(.secondary)
+                    }
                 }
 
                 LabeledContent("快捷键") {

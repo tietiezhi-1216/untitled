@@ -3,7 +3,10 @@ import Network
 import Security
 import Testing
 
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginSharing
+@testable import UntitledComposition
 
 @Suite(.serialized) struct WirelessMicrophoneTests {
     @Test @MainActor func audioWaitsForConsumerAndDisableReleasesTheSession() async throws {
@@ -149,7 +152,8 @@ import Testing
                 WirelessMicrophoneController(pluginID: pluginID, defaults: defaults, audio: audio, credentials: secret.backend)
             })
             try store.installManifest(manifest)
-            controller = store.wirelessMicrophone(for: manifest.id)
+            let runtime = try #require(store.runtime.owner(of: .shareWirelessMicrophone) as? WirelessMicrophonePluginRuntime)
+            controller = runtime.controller(for: manifest.id, in: store)
             try controller.savePairingKey(Self.code)
         }
 

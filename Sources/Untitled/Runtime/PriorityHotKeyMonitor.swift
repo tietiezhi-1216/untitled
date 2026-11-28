@@ -1,4 +1,5 @@
 import AppKit
+import UntitledPluginSDK
 import Carbon
 
 /// Separate native subscriptions: binding a side button never starts a keyboard tap.
@@ -13,7 +14,7 @@ enum ShortcutChannel {
     }
 }
 
-@MainActor struct PriorityHotKeyDriver {
+@MainActor package struct PriorityHotKeyDriver {
     let start: (@escaping @MainActor (CGEventType, CGEvent) -> Bool) throws -> (@MainActor @Sendable () -> Void)
     let secureInput: () -> Bool
     let keyIsDown: (UInt32) -> Bool

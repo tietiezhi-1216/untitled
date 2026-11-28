@@ -1,20 +1,21 @@
 import AppKit
+import UntitledPluginSDK
 import SwiftUI
 
-enum PanelLayout {
-    static let windowControlsHeight: CGFloat = 60
-    static let windowControlsLeading: CGFloat = 18
-    static let windowControlsTop: CGFloat = 18
-    static let coordinateSpace = "panel.content"
-    static let sidebarWidth: CGFloat = 224
-    static let contentInset: CGFloat = 28
-    static let contentVerticalInset: CGFloat = 16
-    static let rowInset: CGFloat = 18
-    static let itemSpacing: CGFloat = 16
-    static let iconSize: CGFloat = 40
-    static let actionWidth: CGFloat = 76
-    static let headerActionSize: CGFloat = 32
-    static let headerActionSpacing: CGFloat = 8
+package enum PanelLayout {
+    package static let windowControlsHeight: CGFloat = 60
+    package static let windowControlsLeading: CGFloat = 18
+    package static let windowControlsTop: CGFloat = 18
+    package static let coordinateSpace = "panel.content"
+    package static let sidebarWidth: CGFloat = 224
+    package static let contentInset: CGFloat = 28
+    package static let contentVerticalInset: CGFloat = 16
+    package static let rowInset: CGFloat = 18
+    package static let itemSpacing: CGFloat = 16
+    package static let iconSize: CGFloat = 40
+    package static let actionWidth: CGFloat = 76
+    package static let headerActionSize: CGFloat = 32
+    package static let headerActionSpacing: CGFloat = 8
 }
 
 enum PanelPalette {
@@ -36,19 +37,19 @@ enum PanelPalette {
 }
 
 /// Shared, always-visible scroll indicator for the two main galleries.
-struct PanelGalleryScroll<Content: View>: View {
+package struct PanelGalleryScroll<Content: View>: View {
     private static var indicatorInset: CGFloat { 8 }
     let leadingInset: CGFloat
     let trailingInset: CGFloat
     let content: Content
 
-    init(leadingInset: CGFloat, trailingInset: CGFloat, @ViewBuilder content: () -> Content) {
+    package init(leadingInset: CGFloat, trailingInset: CGFloat, @ViewBuilder content: () -> Content) {
         self.leadingInset = leadingInset
         self.trailingInset = trailingInset
         self.content = content()
     }
 
-    var body: some View {
+    package var body: some View {
         let edge = Self.indicatorInset
         let scrollerWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
         ScrollView {
@@ -131,7 +132,7 @@ final class PanelGalleryScroller: NSScroller {
 }
 
 struct PanelDivider: View {
-    var body: some View {
+    package var body: some View {
         Divider()
             .padding(.horizontal, PanelLayout.contentInset)
     }
@@ -141,7 +142,7 @@ struct PanelIcon: View {
     let symbol: String
     var size: CGFloat = PanelLayout.iconSize
 
-    var body: some View {
+    package var body: some View {
         Image(systemName: symbol)
             .font(.system(size: size * 0.475, weight: .medium))
             .foregroundStyle(.secondary)
@@ -359,7 +360,7 @@ extension View {
     }
 
     @ViewBuilder
-    func panelWindowDragArea() -> some View {
+    package func panelWindowDragArea() -> some View {
         if #available(macOS 15, *) {
             self.gesture(WindowDragGesture())
         } else {
@@ -367,7 +368,7 @@ extension View {
         }
     }
 
-    func panelRegion(_ identifier: String) -> some View {
+    package func panelRegion(_ identifier: String) -> some View {
         #if DEBUG
         self.background {
             GeometryReader { geometry in
@@ -409,7 +410,7 @@ struct PanelSearchField: View {
     @Binding var text: String
     var compact = false
 
-    var body: some View {
+    package var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)

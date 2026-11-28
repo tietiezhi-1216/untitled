@@ -16,7 +16,7 @@ python3 scripts/new-plugin.py my-plugin --id dev.alice.my-plugin --name "My Plug
 
 | 内容 | 要求 |
 | --- | --- |
-| 源码 | 清单放 `Plugins/<slug>/`；原生实现放自己的业务模块，注册 provider，不扩大通用渲染器的业务职责 |
+| 源码 | 清单放 `Plugins/<slug>/`；原生代码放同目录的 `Sources/`，由插件登记界面、动作和生命周期，不向通用宿主写入插件业务 |
 | 清单 | v2、唯一稳定的命名空间 ID、三段版本号、准确最低宿主版本、实际使用的 actions / permissions / ui |
 | README | 用途、步骤、平台要求、权限用途、数据与网络行为、密钥存储、升级与卸载、实际验证及限制 |
 | LICENSE | 共享代码提供允许再分发与修改的明确许可，保留作者与第三方许可；仓库内未单列 LICENSE 的插件沿用根目录 MIT |

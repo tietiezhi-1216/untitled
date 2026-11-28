@@ -1,19 +1,20 @@
 import AppKit
+import UntitledPluginSDK
+import UntitledHost
 import SwiftUI
 
-@main
+/// The Xcode application and SwiftPM executable call this same entry.
+public enum UntitledLauncher {
+    @MainActor public static func launch() { UntitledApp.main() }
+}
+
 struct UntitledApp: App {
-    @NSApplicationDelegateAdaptor(CaptureAppDelegate.self) private var appDelegate
+    @NSApplicationDelegateAdaptor(UntitledAppDelegate.self) private var appDelegate
     @AppStorage("appearance") private var appearance: AppAppearance = .system
     @StateObject private var store: PluginStore
 
     init() {
-        let isolatedDirectory: URL?
-        #if DEBUG
-        isolatedDirectory = SharingAcceptance.pluginDirectoryForLaunch()
-        #else
-        isolatedDirectory = nil
-        #endif
+        let isolatedDirectory = PluginComposition.isolatedDirectoryForLaunch()
         let startupError: String?
         do {
             if isolatedDirectory == nil { try IdentityMigration.prepare() }
@@ -31,26 +32,8 @@ struct UntitledApp: App {
                     appDelegate.showMainWindow = { [weak store] in store?.showMainWindow() }
                     guard !appDelegate.handledLaunchArguments else { return }
                     appDelegate.handledLaunchArguments = true
-                    if store.installed.contains(where: { $0.isEnabled && $0.manifest.hasCaptureCapability }) { store.screenshots.pinManager.activate() }
                     let arguments = ProcessInfo.processInfo.arguments
-                    #if DEBUG
-                    if let index = arguments.firstIndex(of: "--sharing-acceptance"), arguments.indices.contains(index + 1) {
-                        do { try store.startSharingAcceptance(at: URL(fileURLWithPath: arguments[index + 1], isDirectory: true)) }
-                        catch { store.handleExecutionError(error) }
-                    }
-                    #endif
-                    let package = arguments.firstIndex(of: "--install-plugin").flatMap { index in arguments.indices.contains(index + 1) ? URL(fileURLWithPath: arguments[index + 1]) : nil }
-                    let setup = arguments.firstIndex(of: "--sharing-setup").flatMap { index in arguments.indices.contains(index + 1) ? URL(fileURLWithPath: arguments[index + 1]) : nil }
-                    Task {
-                        if let package { await store.importPackage(package) }
-                        if let setup {
-                            do { try store.startSharingSetup(at: setup) }
-                            catch { store.handleExecutionError(error) }
-                        } else if !arguments.contains("--sharing-acceptance") {
-                            do { try store.restorePeripheralSharingSessionIfRequested() }
-                            catch { store.handleExecutionError(error) }
-                        }
-                    }
+                    Task { await store.launch(arguments: arguments) }
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -70,7 +53,7 @@ struct UntitledApp: App {
     }
 }
 
-@MainActor final class CaptureAppDelegate: NSObject, NSApplicationDelegate {
+@MainActor final class UntitledAppDelegate: NSObject, NSApplicationDelegate {
     var prepareForQuit: (() async -> Bool)?
     var showMainWindow: (() -> Void)?
     var handledLaunchArguments = false

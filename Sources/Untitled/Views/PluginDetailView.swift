@@ -1,4 +1,5 @@
 import SwiftUI
+import UntitledPluginSDK
 
 struct PluginDetailView: View {
     @EnvironmentObject private var store: PluginStore
@@ -79,9 +80,9 @@ struct PluginDetailView: View {
             editingCommand = command
         } label: {
             HStack(spacing: 12) {
-                PanelIcon(symbol: command.action.symbol, size: 32)
+                PanelIcon(symbol: store.presentation(for: command.action).symbol, size: 32)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(command.title).font(.callout.weight(.medium)).lineLimit(1)
+                    Text(store.title(for: command)).font(.callout.weight(.medium)).lineLimit(1)
                     if !command.isEnabled {
                         Text("已停用").font(.caption).foregroundStyle(.secondary)
                     }
@@ -102,7 +103,7 @@ struct PluginDetailView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("编辑 \(command.title)")
+        .help("编辑 \(store.title(for: command))")
         .accessibilityHint("编辑此操作的快捷键")
         .panelRegion("command.\(command.id.uuidString)")
         .contextMenu {
@@ -118,12 +119,12 @@ struct PluginDetailView: View {
 
     private func commandRow(_ command: PluginCommand, plugin: InstalledPlugin) -> some View {
         HStack(spacing: PanelLayout.itemSpacing) {
-            PanelIcon(symbol: command.action.symbol)
+            PanelIcon(symbol: store.presentation(for: command.action).symbol)
             VStack(alignment: .leading, spacing: 6) {
-                Text(command.title)
+                Text(store.title(for: command))
                     .font(.system(size: 13, weight: .medium))
                     .lineLimit(1)
-                    .help(command.title)
+                    .help(store.title(for: command))
                 Text(commandDescription(command) + (command.isEnabled ? "" : " · 已停用"))
                     .font(.caption).foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -142,8 +143,8 @@ struct PluginDetailView: View {
                         .font(.system(size: 10))
                         .frame(width: 16)
                 }
-                .help("执行 \(command.title)")
-                .accessibilityLabel("执行 \(command.title)")
+                .help("执行 \(store.title(for: command))")
+                .accessibilityLabel("执行 \(store.title(for: command))")
                 .disabled(!canRun(command, plugin: plugin))
                 Button("编辑") { editingCommand = command }
             }
@@ -169,16 +170,8 @@ struct PluginDetailView: View {
             "运行 macOS 快捷指令"
         case .showMainWindow:
             "将工具箱主窗口带到前台"
-        case .holdDoubaoDictation:
-            "按住说话，松开结束"
-        case .toggleDoubaoDictation, .cancelDoubaoDictation:
-            "语音输入"
-        case .sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing:
-            "已配对 Mac 的键鼠共享操作"
-        case .shareWirelessMicrophone:
-            "启动或停止无线麦连接"
         default:
-            "全局截图操作"
+            store.presentation(for: command.action).detail ?? "插件操作"
         }
     }
 }
@@ -282,7 +275,7 @@ struct PluginAddCommandView: View {
             Menu {
                 if plugin.manifest.templates.isEmpty {
                     ForEach(plugin.manifest.actions, id: \.self) { action in
-                        Button(action.title) { editingCommand = PluginCommand(action: action) }
+                        Button(store.presentation(for: action).title) { editingCommand = PluginCommand(action: action) }
                     }
                 } else {
                     ForEach(plugin.manifest.templates) { template in

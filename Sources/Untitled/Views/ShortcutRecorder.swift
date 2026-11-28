@@ -1,39 +1,44 @@
 import AppKit
+import UntitledPluginSDK
 import Carbon
 import SwiftUI
 
-struct ShortcutRecorder: NSViewRepresentable {
+package struct ShortcutRecorder: NSViewRepresentable {
+    package init(hotKey: Binding<HotKey?>, error: Binding<String?>, allowedInputs: Set<ShortcutInputKind> = ShortcutInputKind.all) {
+        _hotKey = hotKey; _error = error; self.allowedInputs = allowedInputs
+    }
     @Binding var hotKey: HotKey?
     @Binding var error: String?
     var allowedInputs = ShortcutInputKind.all
 
-    func makeNSView(context: Context) -> RecorderButton {
+    package func makeNSView(context: Context) -> RecorderButton {
         let button = RecorderButton()
         button.bezelStyle = .rounded
         button.target = button; button.action = #selector(RecorderButton.startRecording)
         button.setAccessibilityLabel("录制快捷键")
         return button
     }
-    func updateNSView(_ button: RecorderButton, context: Context) {
+    package func updateNSView(_ button: RecorderButton, context: Context) {
         button.hotKey = hotKey; button.allowedInputs = allowedInputs
         button.isEnabled = !allowedInputs.isEmpty && context.environment.isEnabled
         button.onRecord = { error = nil; hotKey = $0 }
         button.onError = { error = $0 }
         button.updateTitle()
     }
-    static func dismantleNSView(_ button: RecorderButton, coordinator: ()) { button.stopRecording() }
+    package static func dismantleNSView(_ button: RecorderButton, coordinator: ()) { button.stopRecording() }
 
-    final class RecorderButton: NSButton {
+    package final class RecorderButton: NSButton {
         var hotKey: HotKey?
         var onRecord: ((HotKey) -> Void)?
         var onError: ((String) -> Void)?
+        var modifierKeyState: (CGKeyCode) -> Bool = { CGEventSource.keyState(.hidSystemState, key: $0) }
         var allowedInputs = ShortcutInputKind.all
         private var isRecording = false
         private var pending: HotKey?
         private var soloModifier: UInt16?
         private var monitor: Any?, resignObserver: NSObjectProtocol?
-        override var acceptsFirstResponder: Bool { true }
-        override func mouseDown(with event: NSEvent) { startRecording() }
+        package override var acceptsFirstResponder: Bool { true }
+        package override func mouseDown(with event: NSEvent) { startRecording() }
 
         @objc func startRecording() {
             guard isEnabled, !isRecording, let window, window.makeFirstResponder(self) else { return }
@@ -57,8 +62,8 @@ struct ShortcutRecorder: NSViewRepresentable {
             }
             updateTitle()
         }
-        override func resignFirstResponder() -> Bool { stopRecording(); return super.resignFirstResponder() }
-        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        package override func resignFirstResponder() -> Bool { stopRecording(); return super.resignFirstResponder() }
+        package override func performKeyEquivalent(with event: NSEvent) -> Bool {
             if isRecording, window?.firstResponder === self, event.type == .keyDown { return consume(event) }
             return super.performKeyEquivalent(with: event)
         }
@@ -76,16 +81,14 @@ struct ShortcutRecorder: NSViewRepresentable {
                 let wasLatched = soloModifier == code
                 let down: Bool
                 if code == UInt16(kVK_RightCommand) {
-                    down = HotKey.rightCommandDown(flags, fallback: { CGEventSource.keyState(.hidSystemState, key: CGKeyCode(kVK_RightCommand)) })
+                    down = HotKey.rightCommandDown(flags, fallback: { modifierKeyState(CGKeyCode(kVK_RightCommand)) })
                 } else {
-                    down = wasLatched
-                        ? CGEventSource.keyState(.hidSystemState, key: CGKeyCode(kVK_RightControl))
-                        : flags.contains(.maskControl)
+                    down = wasLatched ? modifierKeyState(CGKeyCode(kVK_RightControl)) : flags.contains(.maskControl)
                 }
                 if down {
                     let alone = code == UInt16(kVK_RightCommand)
-                        ? HotKey.rightCommandAlone(flags) && !CGEventSource.keyState(.hidSystemState, key: CGKeyCode(kVK_Command))
-                        : HotKey.rightControlAlone(flags, leftControlDown: CGEventSource.keyState(.hidSystemState, key: CGKeyCode(kVK_Control)))
+                        ? HotKey.rightCommandAlone(flags) && !modifierKeyState(CGKeyCode(kVK_Command))
+                        : HotKey.rightControlAlone(flags, leftControlDown: modifierKeyState(CGKeyCode(kVK_Control)))
                     soloModifier = pending == nil && alone ? code : nil
                 } else {
                     let alone = soloModifier == code; soloModifier = nil

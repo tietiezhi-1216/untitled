@@ -1,4 +1,5 @@
 import AppKit
+import UntitledPluginSDK
 import UserNotifications
 
 @MainActor enum HostNativeCapabilities {

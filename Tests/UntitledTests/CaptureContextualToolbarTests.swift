@@ -2,7 +2,12 @@ import AppKit
 import SwiftUI
 import Testing
 @preconcurrency import ScreenCaptureKit
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 @Suite(.serialized) @MainActor
 struct CaptureContextualToolbarTests {

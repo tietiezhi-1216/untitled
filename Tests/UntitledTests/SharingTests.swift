@@ -3,7 +3,12 @@ import AppKit
 import Foundation
 import Network
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 @MainActor final class SharingTestClock {
     var now: TimeInterval

@@ -21,6 +21,8 @@ jobs:
         run: |
           node --test .github/scripts/agent-pr.test.cjs
           python3 -m unittest discover -s Tests/Automation
+      - name: Validate SwiftPM and Xcode module boundaries
+        run: python3 scripts/check-module-boundaries.py
       - name: Build and test
         run: swift test --sdk "$(xcrun --sdk macosx --show-sdk-path)" --no-parallel
       - name: Validate plugin packages
@@ -32,4 +34,7 @@ jobs:
           UNTITLED_SIGNING_IDENTITY: '-'
         run: ./scripts/build-app.sh release
       - name: Build Xcode target
-        run: xcodebuild -project Untitled.xcodeproj -scheme Untitled -configuration Debug CODE_SIGNING_ALLOWED=NO build
+        run: |
+          xcodebuild -project Untitled.xcodeproj -scheme Untitled -configuration Debug -sdk macosx \
+            -derivedDataPath "$RUNNER_TEMP/untitled-xcode" CODE_SIGNING_ALLOWED=NO build
+          /bin/bash scripts/check-app-sdk.sh "$RUNNER_TEMP/untitled-xcode/Build/Products/Debug/Untitled.app"

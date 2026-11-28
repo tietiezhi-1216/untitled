@@ -21,6 +21,7 @@
 | `templates` | 用户添加操作时的模板，包含 `id`、`title`、`action` |
 | `permissions` | 0.5.0+ 插件显式声明所需权限；无需权限时为 `[]` |
 | `ui` | 界面协议：`version: 1`、可选 SF Symbol `icon`、`slots` 和 `panels` |
+| `styles` | 0.13.51+ 可选的版本化样式数据；仅能使用该插件已声明动作对应的注册样式，例如 [`doubao.hud`](doubao-speech-input/README.md#独立更新浮条样式) |
 | `icon` | 0.11.0+ 商店、侧栏和页头共用的图标：`symbol`、`tint` 与可选内嵌 PNG |
 
 支持动作：`openApplication`、`openURL`、`runShortcut`、`showMainWindow`、`captureRegion`、`captureWindow`、`captureScreen`、`captureScrolling`、`captureRecording`、`pinSelection`、`togglePins`、`captureHistory`。安装、注册界面或加载清单不会执行这些动作；显式声明的默认操作会在安装时注册快捷键。
@@ -31,7 +32,7 @@
 
 0.13.51+ 支持原生[无线麦](wireless-microphone/README.md)。`shareWirelessMicrophone` 能力注册 `wirelessMicrophone.dashboard` 组件和 `wirelessMicrophone.toggle` 命令。无线麦使用独立配对，发送端通过插件身份检查麦克风权限，接收端由用户显式安装虚拟音频驱动。
 
-0.9.8+ 支持原生[豆包语音输入](doubao-speech-input/README.md)：`toggleDoubaoDictation`、`holdDoubaoDictation`、`cancelDoubaoDictation`，以及 `doubao.dictation` / `doubao.preferences` 组件、`doubao.toggle` / `doubao.cancel` 命令。清单使用最低宿主 0.9.8；切换与按住两种操作各自使用通用默认模板，按住动作由 Carbon 的按下 / 松开事件驱动，重绑、停用会结束未松开的动作。安装或渲染界面不录音、不联网；实际采集与实时输入通过绑定插件身份的麦克风 / 辅助功能权限客户端检查。禁用、升级、卸载和退出停止本插件的设备、连接、任务与黑白非激活浮条。ZIP 不携带动态原生代码。
+0.9.8+ 支持原生[豆包语音输入](doubao-speech-input/README.md)：`toggleDoubaoDictation`、`holdDoubaoDictation`、`cancelDoubaoDictation`，以及 `doubao.dictation` / `doubao.preferences` 组件、`doubao.toggle` / `doubao.cancel` 命令。清单使用最低宿主 0.9.8；切换与按住两种操作各自使用通用默认模板，普通按键与独立修饰键按各自通道分派按下 / 松开事件，重绑、停用会结束未松开的动作。安装或渲染界面不录音、不联网；实际采集与实时输入通过绑定插件身份的麦克风 / 辅助功能权限客户端检查。禁用、升级、卸载和退出停止本插件的设备、连接、任务与非激活浮条。ZIP 不携带动态原生代码。
 
 0.13.38 / 语音输入 1.2.9 起，无需预先聚焦输入框即可开始。实时草稿只更新非激活气泡；收到定稿后才定位此刻的可编辑输入框并尝试插入一次，没有安全目标或未获写入确认则复制完整定稿。取消或没有定稿不动剪贴板，不安装 / 切换输入法。未改选的设备、命令绑定和历史不迁移；默认在本机保留最近 100 条定稿，可调上限或清空。
 
@@ -151,7 +152,7 @@ struct ExampleProvider: PluginUIProvider {
 
 命令：`host.openPlugin`；`capture.region`、`capture.window`、`capture.screen`、`capture.scrollVertical`、`capture.scrollHorizontal`、`capture.record`、`capture.pinSelection`、`capture.togglePins`、`capture.history`、`capture.importImage`。分别需要相应截图动作；导入需要 `captureRegion`。
 
-当前 ZIP 是声明式扩展包，可自由组合已注册的原生能力与界面。新增全新的原生组件或命令需实现 provider 并随宿主编译；本版不动态加载 Swift 二进制、JavaScript 或 Shell。v1 包只在兼容适配器中生成旧版布局，v2 原样采用清单中的布局。
+当前 ZIP 是声明式扩展包，可自由组合已注册的原生能力与界面。新增原生能力由 `Plugins/<slug>/Sources/` 自己实现，在组合入口登记组件、命令及生命周期；Swift Package 和 Xcode 将信任的内置模块编入应用。本版不动态加载 Swift 二进制、JavaScript 或 Shell。v1 包只在兼容适配器中生成旧版布局，v2 原样采用清单中的布局。见 [宿主与插件边界](../docs/PLUGIN-BOUNDARY.md)。
 
 ## 宿主权限服务（0.5.0+）
 

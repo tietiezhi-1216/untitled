@@ -1,6 +1,6 @@
 # 语音输入
 
-v1.2.16，macOS 14+、Untitled **0.13.50+** 的原生语音听写插件。Swift 自行实现豆包网页游客初始化、VoiceGenie WebSocket 与 protobuf 消息，不运行 Python 桥接器、不注入微信或豆包客户端。
+v1.2.17，macOS 14+、Untitled **0.13.51+** 的原生语音听写插件。Swift 自行实现豆包网页游客初始化、VoiceGenie WebSocket 与 protobuf 消息，不运行 Python 桥接器、不注入微信或豆包客户端。
 
 ## 使用
 
@@ -22,9 +22,15 @@ Untitled **0.13.47** 起，听写连接、录音或等待定稿时可直接按 *
 
 气泡固定在开始听写的屏幕底部正中。Untitled **0.13.50** 起，刚开始是 88 × 38 pt 的彩色波形胶囊；第一份草稿到来时，声柱渐隐、玻璃透出独立漂移的多色光团，留下居中的单行字幕。胶囊增高到 48 pt，随文字从中间向两侧变宽，保留全圆角，最宽 296 pt；同一次听写里的短修订不会让外框来回收缩。短句居中，写满后旧字平滑向左移，最新的字留在右侧，停顿后静止，不换行也不循环播放。新字按阅读顺序逐个从透明变清楚，即使一次收到整句也不整组出现。改写只对新字启动淡入，已经出现的字不重闪；长句只裁剪预览，不截短定稿。macOS 26 及以上使用原生 Liquid Glass，较早系统使用系统浮层材质。开「减弱动态效果」直接显字，开「降低透明度」则使用不透明底色。气泡不抢焦点，鼠标可穿透；用原快捷键结束或取消。连接就绪前松开按住键也会提交已录下的短句；取消则不再启动麦克风。没有语音定稿就不会写入或保存历史。
 
-定稿时背景停止漂移，关闭浮条或取消时结束全部绘制任务。「减弱动态效果」直接展开，使用静态色光；「降低透明度」使用原有不透明底板，不叠加透色光晕。尚未升级宿主时可继续使用 [1.2.15](https://github.com/tietiezhi-1216/untitled/releases/tag/v0.13.49)。[离屏测试与绘制开销](../../docs/DEVELOPMENT.md#构建)。
+定稿时背景停止漂移，关闭浮条或取消时结束全部绘制任务。「减弱动态效果」直接展开，使用静态色光；「降低透明度」使用原有不透明底板，不叠加透色光晕。Untitled 0.13.50 用户可继续使用 [1.2.16](https://github.com/tietiezhi-1216/untitled/releases/tag/v0.13.50)。[离屏测试与绘制开销](../../docs/DEVELOPMENT.md#构建)。
 
 如果曾在 1.2.5 手动安装过「Untitled 实时听写」，本版不会选择或卸载它，也不会更改键盘设置。保留或移除旧输入源不影响气泡预览。
+
+## 独立更新浮条样式
+
+从 Untitled **0.13.51** 起，`manifest.json` 的 `styles["doubao.hud"]`（`version: 1`）声明胶囊尺寸、展开和交叉淡入淡出节奏、五个背景色团及漂移幅度、速度和透明度。改这些字段后只需递增插件版本并重新打包 ZIP，不用重新构建宿主。应用已发布的范围限制见 [清单示例](manifest.json) 与 [JSON Schema](../manifest-schema.json)。
+
+旧清单不提供样式时仍使用 0.13.50 的默认外观。超界或未知字段会拒绝安装并保留生效版本；分发回退样式时用更高的插件版本携带旧配置。样式不改变识别、快捷键、权限、焦点、单行规则或系统辅助功能行为；初始音量波形仍由录音驱动。新渲染能力或原生逻辑改动仍需要构建宿主。
 
 ## 麦克风选择与采集诊断
 
@@ -202,13 +208,13 @@ Apple Silicon / macOS 27.0.1、Swift 6.4，单独以 `-O` 运行实际历史存�
 swift build
 swift test --no-parallel --filter 'Doubao|HostPermissionTests|PluginInterfaceTests|PluginTests'
 ./scripts/build-app.sh debug
-python3 scripts/package-plugins.py --tag v0.13.45 --plugin doubao-speech-input \
+python3 scripts/package-plugins.py --tag v0.13.51 --plugin doubao-speech-input \
   --output dist/plugins/doubao-speech-input
 ```
 
 CLI 的 TestingMacros 兼容命令见 [开发说明](../../docs/DEVELOPMENT.md)。真实网络测试默认跳过；仅在明确要把专门合成的 16 kHz / 单声道 / PCM16 WAV 发给豆包时设置 `UNTITLED_DOUBAO_LIVE_TEST=1` 与 `UNTITLED_DOUBAO_SYNTHETIC_WAV`，运行 `--filter nativeTwoPassLiveWithExplicitSyntheticAudio`。不得把个人录音放入测试夹具或公开日志。
 
-ZIP 只包含 `manifest.json`、`README.md` 和 `LICENSE`；**不能给旧宿主安装原生代码**。本插件随宿主编译，Swift Package 与 Xcode target 均需收录 `Sources/Untitled/SpeechInput/`；本机只有 Command Line Tools，完整 Xcode 构建尚未验证。
+ZIP 只包含 `manifest.json`、`README.md` 和 `LICENSE`；**不能给旧宿主安装原生代码**。本插件随宿主编译，Swift Package 与 Xcode target 均需收录 `Plugins/doubao-speech-input/Sources/`。
 
 ## 协议参考与许可
 
