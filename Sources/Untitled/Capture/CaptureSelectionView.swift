@@ -5,6 +5,12 @@ import ApplicationServices
 @MainActor final class CaptureSelector {
     private var panels: [NSPanel] = []
     private var completion: ((CaptureSelection?) -> Void)?
+    private let pinShortcutMatches: (UInt32, UInt32) -> Bool
+
+    init(pinShortcutMatches: @escaping (UInt32, UInt32) -> Bool = { _, _ in false }) {
+        self.pinShortcutMatches = pinShortcutMatches
+    }
+
     func show(_ screens: [(NSScreen, SCDisplay, SCContentFilter, CGImage)], windows: [SCWindow], allowsShapes: Bool,
               completion: @escaping (CaptureSelection?) -> Void) {
         self.completion=completion
@@ -19,6 +25,7 @@ import ApplicationServices
             panel.isReleasedWhenClosed=false;panel.level = .screenSaver
             panel.collectionBehavior=CaptureWindowPolicy.floatingBehavior;panel.hasShadow=false;panel.acceptsMouseMovedEvents=true
             let view=CaptureSelectionView(image:image,allowsShapes:allowsShapes)
+            view.pinShortcutMatches = pinShortcutMatches
             view.screenOrigin=display.frame.origin
             view.historyRegions=Self.regionHistory.filter { $0.displayID==display.displayID }.map(\.rect)
             view.elementTargets=windows.filter { $0.windowLayer==0 }.compactMap { window in window.owningApplication.map { (window.frame,$0.processID) } }
@@ -69,6 +76,7 @@ import ApplicationServices
         panel.isReleasedWhenClosed=false;panel.level = .screenSaver;panel.collectionBehavior=CaptureWindowPolicy.floatingBehavior
         panel.hasShadow=false;panel.acceptsMouseMovedEvents=true
         let view=CaptureSelectionView(image:image,allowsShapes:true)
+        view.pinShortcutMatches = pinShortcutMatches
         view.screenOrigin=world.origin
         view.historyRegions=Self.regionHistory.compactMap { memory in
             guard let display=screens.first(where:{ $0.1.displayID==memory.displayID })?.1 else { return nil }
@@ -104,6 +112,13 @@ import ApplicationServices
         }
         panel.contentView=view;panels.append(panel);panel.makeKeyAndOrderFront(nil);panel.makeFirstResponder(view)
     }
+    func pinCurrentSelection() {
+        for panel in panels where panel.isVisible {
+            guard let view = panel.contentView as? CaptureSelectionView else { continue }
+            if view.pinCurrentSelection() { return }
+        }
+    }
+
     func finish(_ selection: CaptureSelection?) {
         guard let completion else { return };self.completion=nil
         for panel in panels { (panel.contentView as? CaptureSelectionView)?.cancelRefresh();panel.orderOut(nil);panel.close() }
@@ -139,6 +154,7 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
     var completed:((CGRect?,[CaptureSelectionContour])->Void)?
     var initialTool:CaptureTool?
     var postAction:CaptureSelectionPostAction?
+    var pinShortcutMatches: (UInt32, UInt32) -> Bool = { _, _ in false }
     private var actionButtons:[NSButton]=[]
     var refresh:(() async throws -> CGImage)?
     private var refreshTask:Task<Void,Never>?
@@ -373,6 +389,13 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
         else if confirmed || !points.isEmpty { resetSelection() } else { cancelSelection() }
     }
     override func keyDown(with event:NSEvent) {
+        if canPinCurrentSelection,
+           pinShortcutMatches(UInt32(event.keyCode), CaptureShortcutSettings.modifiers(event.modifierFlags)),
+           let window, window.isKeyWindow, window.attachedSheet == nil,
+           !CaptureKeyboardRouting.isEditingText(in: window) {
+            if !event.isARepeat { pinCurrentSelection() }
+            return
+        }
         modifiers=event.modifierFlags
         switch event.keyCode {
         case 53: if confirmed || !points.isEmpty { resetSelection() } else { cancelSelection() }
@@ -399,6 +422,16 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
         }
         needsDisplay=true
     }
+
+    private var canPinCurrentSelection: Bool { allowsShapes && confirmed && selected != nil && anchor == nil }
+
+    @discardableResult func pinCurrentSelection() -> Bool {
+        guard canPinCurrentSelection else { return false }
+        postAction = .pin
+        finishSelection()
+        return true
+    }
+
     private func setRect(_ rect:CGRect) { if let old=selected { points=CaptureSelectionGeometry.transform(points,from:old,to:rect);contours=contours.map { CaptureSelectionContour(points:CaptureSelectionGeometry.transform($0.points,from:old,to:rect),subtract:$0.subtract) } };selected=rect;updateControls();needsDisplay=true }
     private func finalizeShape() { guard points.count>=3,let rect=CaptureSelectionGeometry.bounds(of:points),rect.width>=8,rect.height>=8 else { return };selected=rect;commitContour();confirmed=true;updateControls();needsDisplay=true }
     private func positionControls() {

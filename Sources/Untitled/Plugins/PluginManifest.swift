@@ -2,7 +2,7 @@ import Foundation
 
 enum HostInfo {
     static let name = "Untitled"
-    static let version = "0.13.0"
+    static let version = "0.13.1"
     static let bundleIdentifier = "com.untitled.app"
     static let repository = URL(string: "https://github.com/tietiezhi-1216/untitled")!
     static let catalog = URL(string: "https://raw.githubusercontent.com/tietiezhi-1216/untitled/main/Plugins/catalog.json")!
@@ -141,7 +141,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
     case sharePeripherals, switchPeripheralControl, stopPeripheralSharing
     case toggleDoubaoDictation, holdDoubaoDictation, cancelDoubaoDictation
     case captureRegion, captureWindow, captureScreen, captureScrolling, captureRecording
-    case pinClipboard, togglePins, captureHistory
+    case pinSelection, pinClipboard, togglePins, captureHistory
     case captureDelayed, captureAndCopy, captureLastRegion
     case restorePin, closePins, hideOtherPins, togglePinClickThrough, cyclePinGroup, pinFiles, toggleCaptureHotKeys
 
@@ -170,6 +170,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
         case .captureScreen: "全屏截图"
         case .captureScrolling: "滚动长截图"
         case .captureRecording: "开始或停止录屏"
+        case .pinSelection: "贴图（当前选区）"
         case .pinClipboard: "剪贴板贴图"
         case .togglePins: "隐藏或显示贴图"
         case .captureHistory: "打开截图历史"
@@ -203,7 +204,7 @@ enum ActionKind: String, Codable, CaseIterable, Sendable {
         case .captureScreen: "display"
         case .captureScrolling: "scroll"
         case .captureRecording: "record.circle"
-        case .pinClipboard: "pin"
+        case .pinSelection, .pinClipboard: "pin"
         case .togglePins: "eye"
         case .captureHistory: "clock"
         case .captureDelayed: "timer"

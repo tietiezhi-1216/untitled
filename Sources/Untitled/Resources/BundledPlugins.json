@@ -62,7 +62,7 @@
   {
     "id": "com.untitled.screenshot",
     "repository": "https://github.com/tietiezhi-1216/untitled",
-    "version": "1.6.1",
+    "version": "1.6.2",
     "name": "截图",
     "summary": "截图、贴图、录屏与文字识别。",
     "icon": {

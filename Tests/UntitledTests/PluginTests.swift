@@ -216,33 +216,41 @@ struct PluginTests {
                                 permissions: permissions, hotKeys: hotKeys)
         let capture = PluginManifest(schemaVersion: 1, id: "dev.example.capture", name: "Capture Test",
                                      version: "1.0.0", summary: "Test", author: "Tests", repository: HostInfo.repository,
-                                     minimumHostVersion: "0.2.0", actions: [.captureRegion, .toggleCaptureHotKeys], templates: [])
+                                     minimumHostVersion: "0.2.0", actions: [.captureRegion, .pinSelection, .toggleCaptureHotKeys], templates: [])
         let panel = manifest()
         let regionKey = HotKey(keyCode: UInt32(kVK_ANSI_1), modifiers: UInt32(controlKey), key: "1")
+        let pinKey = HotKey(keyCode: UInt32(kVK_ANSI_2), modifiers: UInt32(controlKey), key: "2")
         let panelKey = HotKey(keyCode: UInt32(kVK_F19), modifiers: UInt32(cmdKey | optionKey | controlKey | shiftKey), key: "F19")
         let region = PluginCommand(action: .captureRegion, hotKey: regionKey)
+        let pin = PluginCommand(action: .pinSelection, hotKey: pinKey)
         try store.installManifest(capture)
         try store.installManifest(panel)
         try store.saveCommand(region, pluginID: capture.id)
+        try store.saveCommand(pin, pluginID: capture.id)
         try store.saveCommand(PluginCommand(action: .showMainWindow, hotKey: panelKey), pluginID: panel.id)
 
         let expected = [regionKey.identity: false, panelKey.identity: true]
         #expect(hotKeys.exclusivity == expected)
+        #expect(store.matchesSelectionPinShortcut(keyCode: pinKey.keyCode, modifiers: pinKey.modifiers, pluginID: capture.id))
+        #expect(!store.matchesSelectionPinShortcut(keyCode: pinKey.keyCode, modifiers: pinKey.modifiers, pluginID: panel.id))
         #expect(throws: PluginError.self) {
             try store.saveCommand(PluginCommand(action: .showMainWindow, hotKey: regionKey), pluginID: panel.id)
         }
         try await store.performScreenshot(.toggleCaptureHotKeys, pluginID: capture.id)
         #expect(hotKeys.exclusivity == [panelKey.identity: true])
+        #expect(!store.matchesSelectionPinShortcut(keyCode: pinKey.keyCode, modifiers: pinKey.modifiers, pluginID: capture.id))
         try await store.performScreenshot(.toggleCaptureHotKeys, pluginID: capture.id)
         #expect(hotKeys.exclusivity == expected)
 
         let reloadedHotKeys = RecordingHotKeys()
         let reloaded = PluginStore(directory: directory, captureDirectory: directory.appendingPathComponent("Images"),
                                    permissions: permissions, hotKeys: reloadedHotKeys)
-        #expect(reloaded.installed.first { $0.id == capture.id }?.commands == [region])
+        #expect(reloaded.installed.first { $0.id == capture.id }?.commands == [region, pin])
+        #expect(reloaded.matchesSelectionPinShortcut(keyCode: pinKey.keyCode, modifiers: pinKey.modifiers, pluginID: capture.id))
         #expect(reloadedHotKeys.exclusivity == expected)
         reloaded.setEnabled(false, pluginID: capture.id)
         #expect(reloadedHotKeys.exclusivity == [panelKey.identity: true])
+        #expect(!reloaded.matchesSelectionPinShortcut(keyCode: pinKey.keyCode, modifiers: pinKey.modifiers, pluginID: capture.id))
     }
 
     @Test(arguments: [true, false]) @MainActor func nativeHotKeyEventDispatch(exclusive: Bool) throws {

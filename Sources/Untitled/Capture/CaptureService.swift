@@ -85,7 +85,8 @@ struct CaptureRegionMemory: Codable, Equatable {
         return CaptureSelection(display: display, filter: filter, rect: rect, scale: scale, image: image)
     }
 
-    func choose(_ mode: Mode, permissions: PluginPermissionClient, allowComplexSelection: Bool = true) async throws -> CaptureSelection? {
+    func choose(_ mode: Mode, permissions: PluginPermissionClient, allowComplexSelection: Bool = true,
+                pinShortcutMatches: @escaping (UInt32, UInt32) -> Bool = { _, _ in false }) async throws -> CaptureSelection? {
         let currentGeneration = generation
         try permissions.require([.screenRecording])
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -117,7 +118,7 @@ struct CaptureRegionMemory: Codable, Equatable {
         let ranks = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($0.element, $0.offset) })
         let windows = content.windows.sorted { (ranks[$0.windowID] ?? .max) < (ranks[$1.windowID] ?? .max) }
         let selected: CaptureSelection? = await withCheckedContinuation { continuation in
-            let selector = CaptureSelector()
+            let selector = CaptureSelector(pinShortcutMatches: pinShortcutMatches)
             self.selector = selector
             selector.show(screens, windows: windows, allowsShapes: allowComplexSelection) { [weak self] selection in
                 self?.selector = nil
@@ -156,6 +157,8 @@ struct CaptureRegionMemory: Codable, Equatable {
         let visibleContent = content.windows.filter { $0.owningApplication?.processID == pid && contentIDs.contains($0.windowID) }
         return SCContentFilter(display: display, excludingApplications: apps, exceptingWindows: visibleContent)
     }
+
+    func pinCurrentSelection() { selector?.pinCurrentSelection() }
 
     func cancel() { generation += 1; selector?.finish(nil) }
 
