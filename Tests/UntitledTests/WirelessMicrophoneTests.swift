@@ -1,3 +1,4 @@
+import CoreBluetooth
 import Foundation
 import Testing
 
@@ -15,6 +16,28 @@ import UntitledPluginSDK
         for name in [nil, "Mi Box", "Xiaomi Bluetooth Remote", "MI RC (unknown clone)"] {
             #expect(XiaomiVoiceRemote.supportedName(name) == nil)
         }
+    }
+
+    @Test func pairsOnlyAnUnambiguousMatchFromTheCurrentSearch() {
+        let scanned = XiaomiVoiceRemote(id: UUID(), name: "MI RC")
+        let pairing = XiaomiVoiceRemote(id: UUID(), name: "mi rc", needsPairing: true)
+        let other = XiaomiVoiceRemote(id: UUID(), name: "Xiaomi Bluetooth Remote 2 Pro", needsPairing: true)
+        let duplicate = XiaomiVoiceRemote(id: UUID(), name: "MI RC", needsPairing: true)
+
+        #expect(scanned.pairingCandidate(among: [pairing, other], direct: [scanned]) == pairing)
+        #expect(scanned.pairingCandidate(among: [pairing, duplicate], direct: [scanned]) == nil)
+        #expect(scanned.pairingCandidate(among: [pairing], direct: [scanned, duplicate]) == nil)
+        #expect(scanned.pairingCandidate(among: [other], direct: [scanned]) == nil)
+    }
+
+    @Test @MainActor func reportsLinkEncryptionSeparatelyFromVoiceSetup() {
+        for code in [CBError.Code.encryptionTimedOut, .peerRemovedPairingInformation] {
+            let error = NSError(domain: CBError.errorDomain, code: code.rawValue)
+            #expect(XiaomiRemoteBluetooth.connectionMessage(for: error).contains("蓝牙加密"))
+        }
+        #expect(XiaomiRemoteBluetooth.connectionMessage(for: nil).contains("蓝牙握手"))
+        #expect(XiaomiRemoteConnectionProgress.voiceServices.timeout.contains("语音服务"))
+        #expect(XiaomiRemoteConnectionProgress.capabilities.timeout.contains("语音协商"))
     }
 
     @Test func negotiatesBoundedAtvvAndDecodesHighNibbleFirst() {
@@ -147,6 +170,33 @@ import UntitledPluginSDK
         #expect(link.writes.isEmpty)
         try controller.connect(fixture.device.id)
         #expect(link.connectedID == fixture.device.id)
+    }
+
+    @Test @MainActor func prioritizesPairingBeforeVoiceAndIgnoresEarlyCapabilities() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let controller = fixture.controller
+        let link = fixture.link
+        let remote = XiaomiVoiceRemote(id: UUID(), name: "MI RC")
+
+        try controller.discover()
+        link.emit(.devices([remote]))
+        try controller.connect(remote.id)
+        link.emit(.progress(.lookingForPairing))
+        #expect(controller.connectionProgress == .lookingForPairing)
+        link.emit(.control(Fixture.capabilities))
+        #expect(controller.connection == .connecting("MI RC"))
+
+        link.emit(.startingPairing)
+        #expect(controller.connection == .pairing("MI RC"))
+        link.emit(.connectingVoice)
+        link.emit(.progress(.voiceServices))
+        #expect(controller.connectionProgress == .voiceServices)
+        #expect(link.writes.isEmpty)
+        link.emit(.subscribed)
+        #expect(controller.connectionProgress == .capabilities)
+        link.emit(.control(Fixture.capabilities))
+        #expect(controller.connection == .connected("MI RC"))
     }
 
     @Test @MainActor func permissionGateAndPluginDisableCloseTheRemoteStream() throws {

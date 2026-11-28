@@ -42,6 +42,8 @@ enum XiaomiRemotePairingCode: Equatable {
         guard !wantsInquiry, pairing == nil else { return }
         wantsInquiry = true
         devices.removeAll(keepingCapacity: true)
+        onEvent?(.devices([]))
+        guard wantsInquiry else { return }
         guard !startingInquiry else { return }
         startingInquiry = true
 
@@ -111,13 +113,21 @@ enum XiaomiRemotePairingCode: Equatable {
     }
 
     nonisolated func deviceInquiryComplete(_ sender: IOBluetoothDeviceInquiry!, error: IOReturn, aborted: Bool) {
-        updateFoundDevices(from: sender)
+        updateFoundDevices(from: sender, finished: true)
     }
 
-    private nonisolated func updateFoundDevices(from sender: IOBluetoothDeviceInquiry?) {
+    private nonisolated func updateFoundDevices(from sender: IOBluetoothDeviceInquiry?, finished: Bool = false) {
         guard let sender else { return }
         let source = ObjectIdentifier(sender)
-        Task { @MainActor [weak self] in self?.collectDevices(from: source) }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.collectDevices(from: source)
+            if finished, let inquiry = self.inquiry, ObjectIdentifier(inquiry) == source {
+                self.wantsInquiry = false
+                inquiry.delegate = nil
+                self.inquiry = nil
+            }
+        }
     }
 
     private func collectDevices(from source: ObjectIdentifier) {
