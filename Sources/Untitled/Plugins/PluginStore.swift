@@ -14,7 +14,11 @@ final class PluginStore: ObservableObject {
     @Published private(set) var captureHotKeysPaused = false
     @Published var errorMessage: String?
     @Published var requestedPluginID: String?
+    struct AccessSelection: Identifiable { let id: String }
+    @Published var accessSelection: AccessSelection?
     var showMainWindow: () -> Void = {}
+    private var nativeFilePicker: NativeFilePicker?
+    private var nativeCapabilityLeases: [String: UUID] = [:]
     private let captureDirectory: URL?
     private var captureController: ScreenshotController?
     private var sharingControllers: [String: PeripheralSharingController] = [:]
@@ -135,6 +139,8 @@ final class PluginStore: ObservableObject {
     }
     func prepareForQuit() async -> Bool {
         isPreparingForQuit = true
+        nativeCapabilityLeases.removeAll()
+        nativeFilePicker?.cancel()
         #if DEBUG
         sharingAcceptance?.stop(); sharingAcceptance = nil
         #endif
@@ -282,6 +288,7 @@ final class PluginStore: ObservableObject {
             record.manifest = manifest
             let conflicts = record.initializeDefaultCommands(occupiedHotKeys: occupiedHotKeys(excluding: manifest.id))
             try save(record)
+            invalidateNativeCapabilities(for: record.id)
             reportDefaultConflicts(conflicts)
             if resumeSharing { do { try sharingControllers[manifest.id]?.restoreUserSessionIfRequested() } catch { handleExecutionError(error) } }
         } else {
@@ -362,6 +369,7 @@ final class PluginStore: ObservableObject {
         record.isEnabled = enabled
         do { try save(record) } catch { errorMessage = error.localizedDescription }
         if !enabled {
+            invalidateNativeCapabilities(for: pluginID)
             dictationControllers[pluginID]?.cancel(message: "插件已停用。")
             if pluginID == PeripheralSharingController.pluginID { sharingDefaults.set(false, forKey: "sharing.sessionEnabled") }
             sharingControllers[pluginID]?.stopUserSession()
@@ -371,6 +379,25 @@ final class PluginStore: ObservableObject {
             if !enabled { screenshots.deactivate() }
             else { captureController?.pinManager.activate(); captureController?.objectWillChange.send() }
         }
+    }
+
+    func showPluginAccess(_ pluginID: String) {
+        guard installed.contains(where: { $0.id == pluginID }) else { return }
+        requestedPluginID = pluginID
+        accessSelection = .init(id: pluginID)
+        showMainWindow()
+    }
+
+    func setNativeActionAllowed(_ allowed: Bool, action: ActionKind, pluginID: String) {
+        guard action.isNativeUtility, var record = installed.first(where: { $0.id == pluginID }),
+              record.manifest.actions.contains(action), record.allowsAction(action) != allowed else { return }
+        var blocked = record.blockedNativeActions ?? []
+        if allowed { blocked.remove(action) } else { blocked.insert(action) }
+        record.blockedNativeActions = blocked.isEmpty ? nil : blocked
+        do {
+            try save(record)
+            invalidateNativeCapabilities(for: pluginID)
+        } catch { errorMessage = error.localizedDescription }
     }
 
     func saveCommand(_ command: PluginCommand, pluginID: String) throws {
@@ -411,13 +438,15 @@ final class PluginStore: ObservableObject {
             if FileManager.default.fileExists(atPath: preferences.path) { try FileManager.default.removeItem(at: preferences) }
             try FileManager.default.removeItem(at: directory.appendingPathComponent(pluginID + ".json"))
             installed.removeAll { $0.id == pluginID }
+            invalidateNativeCapabilities(for: pluginID)
+            if accessSelection?.id == pluginID { accessSelection = nil }
             reloadHotKeys()
         } catch { errorMessage = "卸载失败：\(error.localizedDescription)" }
     }
 
     func execute(_ command: PluginCommand, pluginID: String) async {
         guard let plugin = installed.first(where: { $0.id == pluginID }), plugin.isEnabled, command.isEnabled,
-              plugin.commands.contains(command), plugin.manifest.actions.contains(command.action) else { return }
+              plugin.commands.contains(command), plugin.allowsAction(command.action) else { return }
         do {
             try await ActionExecutor.execute(command, showMainWindow: showMainWindow, peripheralAction: { [self] action in
                 try performPeripheralAction(action, pluginID: pluginID)
@@ -425,6 +454,8 @@ final class PluginStore: ObservableObject {
                 try performWirelessMicrophoneAction(pluginID: pluginID)
             }, dictationAction: { [self] action in
                 try performDictationAction(action, pluginID: pluginID)
+            }, nativeUtility: { [self] command in
+                try await nativeCapabilities(for: pluginID).execute(command)
             }) { [self] action in
                 try await performScreenshot(action, pluginID: pluginID)
             }
@@ -482,8 +513,31 @@ final class PluginStore: ObservableObject {
         }
     }
 
+    func nativeCapabilities(for pluginID: String) -> PluginNativeCapabilityClient {
+        let lease = nativeCapabilityLeases[pluginID] ?? UUID()
+        if installed.contains(where: { $0.id == pluginID }) { nativeCapabilityLeases[pluginID] = lease }
+        let picker = nativeFilePicker ?? NativeFilePicker()
+        nativeFilePicker = picker
+        return PluginNativeCapabilityClient(
+            pluginID: pluginID, permissions: permissions, filePicker: picker,
+            currentPlugin: { [weak self] action in
+                guard let self, !self.isPreparingForQuit,
+                      let plugin = self.installed.first(where: { $0.id == pluginID }), plugin.isEnabled else {
+                    throw PluginError.invalid("请先启用插件。")
+                }
+                guard self.nativeCapabilityLeases[pluginID] == lease else { throw CancellationError() }
+                guard plugin.allowsAction(action) else { throw PluginError.invalid("此能力尚未声明或已在插件设置中停用。") }
+                return plugin
+            }, presentFilePicker: { [weak self] in self?.showMainWindow() })
+    }
+
+    private func invalidateNativeCapabilities(for pluginID: String) {
+        nativeCapabilityLeases.removeValue(forKey: pluginID)
+        nativeFilePicker?.cancel(for: pluginID)
+    }
+
     func handleExecutionError(_ error: Error) {
-        if error is HostPermissionError { return } // The host has already opened permission management.
+        if error is HostPermissionError || error is CancellationError { return }
         errorMessage = "执行失败：\(error.localizedDescription)"
         showMainWindow()
     }
@@ -511,7 +565,7 @@ final class PluginStore: ObservableObject {
         guard !HotKeyRecordingSession.isRecording else { return }
         var identities = Set<String>()
         for plugin in installed where plugin.isEnabled {
-            for command in plugin.commands where command.isEnabled {
+            for command in plugin.commands where command.isEnabled && plugin.allowsAction(command.action) {
                 if captureHotKeysPaused, plugin.manifest.hasCaptureCapability, command.action != .toggleCaptureHotKeys { continue }
                 guard let hotKey = command.hotKey else { continue }
                 do {

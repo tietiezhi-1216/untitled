@@ -140,7 +140,7 @@ struct ExampleProvider: PluginUIProvider {
 | 内置组件 | 用途 / 所需动作 |
 | --- | --- |
 | `host.icon` / `host.identity` | 插件图标、名称和版本 |
-| `host.enabled` / `host.more` / `host.info` | 启停、源码/卸载、简介浮层 |
+| `host.enabled` / `host.more` / `host.info` | 启停、权限与能力和源码/卸载菜单、插件详情 |
 | `host.commandHeading` / `host.addCommand` / `host.commands` / `host.commandStatus` | 操作标题、添加、列表、状态提示 |
 | `capture.history` / `capture.status` | 截图历史、数量；需要 `captureHistory` |
 | `capture.preferences` | 截图设置；需要 `captureRegion` |
@@ -149,9 +149,25 @@ struct ExampleProvider: PluginUIProvider {
 
 当前 ZIP 是声明式扩展包，可自由组合已注册的原生能力与界面。新增全新的原生组件或命令需实现 provider 并随宿主编译；本版不动态加载 Swift 二进制、JavaScript 或 Shell。v1 包只在兼容适配器中生成旧版布局，v2 原样采用清单中的布局。
 
+## 文件、剪贴板与本地通知（0.13.53+）
+
+清单使用 `minimumHostVersion: "0.13.53"` 或更高版本。声明所需的 `actions` 后，可选择在本插件的槽位放置对应命令或组件。
+
+| 动作 | 插件入口 | 行为 |
+| --- | --- | --- |
+| `revealFile` | `native.revealFile` 命令或自定义操作 | 选择文件或文件夹，在 Finder 定位 |
+| `shareFile` | `native.shareFile` 命令或自定义操作 | 选择文件，打开 macOS 的分享选单 |
+| `readClipboardText` | `native.readClipboardText` 组件或原生调用 | 读取最多 16 KiB 的纯文本并交给插件 |
+| `copyText` | `native.copyText` 组件或自定义操作 | 将指定的纯文本写入剪贴板，最多 16 KiB |
+| `sendNotification` | `native.sendNotification` 组件或自定义操作 | 发送一条本地通知，须声明 `system.notifications` 和用途 |
+
+原生 provider 通过 `context.nativeCapabilities` 取得绑定插件身份的客户端。客户端在调用时检查清单、插件启停和该能力的本地开关。通知发送前还会查询 macOS 授权。文件命令运行时由用户在系统窗口选择。复制和通知操作的内容由用户配置，通知快捷操作使用标题。读取剪贴板的结果由组件或 provider 接收。
+
+用户从插件的「更多 → 权限与能力」或左侧插件条目的右键菜单进入设置。该页展示当前插件的声明、权限用途和授权状态。文件、剪贴板与通知能力各有本地开关，开关随插件配置存储。
+
 ## 宿主权限服务（0.5.0+）
 
-系统权限只授予主应用。插件清单声明用途，主应用统一查询状态、说明权限用途、请求授权和打开系统隐私设置。插件界面不提供独立的系统授权按钮，也不直接调用 TCC / AVFoundation 的授权 API。
+系统权限由 macOS 授予主应用。插件清单声明用途，宿主在插件的「权限与能力」中提供状态、授权和跳转系统设置的入口。原生 provider 通过宿主权限客户端检查权限。
 
 ```json
 "permissions": [
@@ -162,14 +178,14 @@ struct ExampleProvider: PluginUIProvider {
 
 显式声明需要 `minimumHostVersion: "0.5.0"` 或更高；此版本及以上的插件必须包含 `permissions`。最多 32 项，ID 无重复，每项用途 1–240 字。`optional` 表示按功能选项使用，默认 false；所有权限仍然在实际操作时检查，不会因为安装或启用插件就请求授权。旧包通过原生能力的兼容声明继续使用。
 
-当前宿主管理：`system.screenRecording`、`system.accessibility`、`system.inputMonitoring`、`system.camera`、`system.microphone`。全局热键采用 Carbon 注册，不需要输入监控或辅助功能授权。
+当前宿主管理 `system.screenRecording`、`system.accessibility`、`system.inputMonitoring`、`system.camera`、`system.microphone` 和 `system.notifications`。全局热键采用 Carbon 注册，不需要输入监控或辅助功能授权。
 
 插件只调用绑定到自身身份的客户端：
 
 ```swift
 try context.permissions.require([.camera])
 // 主应用验证插件是否启用、是否声明该权限，以及当前系统状态。
-// 获准后才继续功能；缺少时会定位主应用的权限管理并抛出 HostPermissionError。
+// 缺少权限时打开当前插件的权限与能力，并抛出 HostPermissionError。
 ```
 
 缺少权限时不会直接弹出系统授权框。主应用显示请求来源和状态，具体用途可通过信息按钮查看，用户点击「授权」才调用系统请求 API；拒绝或受限制时通过系统设置处理。授权后用户重新执行操作，不自动启动录屏或设备。不要捕获错误后继续读取受保护数据；宿主命令入口会统一处理权限错误。
@@ -184,7 +200,8 @@ try context.permissions.require([.camera])
 
 ```bash
 python3 scripts/package-plugins.py --tag v0.10.0
-# 单个插件，可选独立 Release 仓库
+# 同仓插件使用独立标签，独立仓库也可以使用自己的版本标签
+python3 scripts/package-plugins.py --tag plugin-my-plugin-v1.0.0 --plugin my-plugin
 python3 scripts/package-plugins.py --tag v1.0.0 --plugin my-plugin --repository alice/my-plugin
 ```
 
