@@ -8,7 +8,7 @@ struct CaptureWorkflowTests {
     private func manifest() throws -> PluginManifest {
         try JSONDecoder().decode(PluginManifest.self, from: Data(contentsOf: URL(fileURLWithPath: "Plugins/screenshot/manifest.json")))
     }
-    @Test func onlyThreeGlobalDefaultsAreInstalledAndConflictsAreNotStolen() throws {
+    @Test func onlyThreeDefaultsAreInstalledAndConflictsAreNotStolen() throws {
         let manifest = try manifest()
         try manifest.validate()
         var plugin = InstalledPlugin(manifest: manifest, commands: [])
@@ -18,6 +18,34 @@ struct CaptureWorkflowTests {
         #expect(plugin.commands.count == 3)
         #expect(plugin.commands.first { $0.action == .captureRegion }?.hotKey == nil)
         for (action, identity) in expected { #expect(plugin.commands.first { $0.action == action }?.hotKey?.identity == identity) }
+    }
+    @Test @MainActor func captureUsesSharedGlobalRegistrationAndKeepsKeyboardPinLocal() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("CaptureRouting-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let screenshot = try manifest()
+        let drivers = (screenshot.permissions ?? []).map { permission in
+            HostPermissionDriver(descriptor: .init(id: permission.id, title: "Test", summary: "Test", symbol: "lock"),
+                                 status: { .notGranted }, request: {}, openSettings: {})
+        }
+        var registrations: [String: Bool] = [:]
+        let store = PluginStore(directory: folder, captureDirectory: folder.appendingPathComponent("Capture"),
+                                permissions: HostPermissionCenter(drivers: drivers), ordinaryHotKeyDriver: .init(register: { key, exclusive, _ in
+            registrations[key.identity] = exclusive
+            return { _ = registrations.removeValue(forKey: key.identity) }
+        }))
+        try store.installManifest(screenshot)
+        #expect(registrations == ["18:4096": false, "20:4096": false])
+        #expect(store.matchesSelectionPinShortcut(keyCode: 19, modifiers: UInt32(controlKey), pluginID: screenshot.id))
+
+        var pin = try #require(store.installed.first?.commands.first { $0.action == .pinSelection })
+        pin.hotKey = HotKey(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(controlKey | optionKey), key: "P")
+        try store.saveCommand(pin, pluginID: screenshot.id)
+        #expect(!store.matchesSelectionPinShortcut(keyCode: 19, modifiers: UInt32(controlKey), pluginID: screenshot.id))
+        #expect(store.matchesSelectionPinShortcut(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(controlKey | optionKey), pluginID: screenshot.id))
+        #expect(registrations == ["18:4096": false, "20:4096": false])
+        store.setHotKeysPaused(true)
+        #expect(registrations.isEmpty)
+        #expect(!store.matchesSelectionPinShortcut(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(controlKey | optionKey), pluginID: screenshot.id))
     }
     @Test func upgradingPreservesCustomClearedDisabledAndDeletedDefaults() throws {
         var legacy = PluginCommand(action: .captureRegion, hotKey: HotKey(keyCode: 15, modifiers: UInt32(cmdKey), key: "R"), isEnabled: false)

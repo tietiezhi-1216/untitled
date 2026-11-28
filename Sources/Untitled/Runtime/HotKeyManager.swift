@@ -16,7 +16,17 @@ final class HotKeyManager {
     /// Native Carbon remains the default. Tests can own registrations without
     /// reserving real system chords, including deterministic conflict failures.
     struct Driver {
-        let register: (HotKey, @escaping @MainActor (Bool) -> Void) throws -> (@MainActor @Sendable () -> Void)
+        typealias Stop = @MainActor @Sendable () -> Void
+        typealias Handler = @MainActor (Bool) -> Void
+        let register: (HotKey, Bool, @escaping Handler) throws -> Stop
+
+        init(register: @escaping (HotKey, Bool, @escaping Handler) throws -> Stop) {
+            self.register = register
+        }
+
+        init(register: @escaping (HotKey, @escaping Handler) throws -> Stop) {
+            self.register = { key, _, handler in try register(key, handler) }
+        }
     }
     private let driver: Driver?
     private let resources = CarbonResources()
@@ -68,15 +78,16 @@ final class HotKeyManager {
         releases.forEach { $0() }
     }
 
-    func register(_ hotKey: HotKey, onRelease: (() -> Void)? = nil, action: @escaping () -> Void) throws {
-        _ = try registerBinding(hotKey, onRelease: onRelease, skipsSecureInput: !hotKey.supportsLegacyHosts, action: action)
+    func register(_ hotKey: HotKey, exclusive: Bool = true, onRelease: (() -> Void)? = nil, action: @escaping () -> Void) throws {
+        _ = try registerBinding(hotKey, exclusive: exclusive, onRelease: onRelease,
+                                skipsSecureInput: !hotKey.supportsLegacyHosts, action: action)
     }
 
     /// A single chord owned by an active workflow, not a saved command. Removing it
     /// must not release another shortcut (e.g. the key still held for dictation).
     func registerScoped(_ hotKey: HotKey, action: @escaping () -> Void) throws -> () -> Void {
         guard !secureInput() else { throw PluginError.invalid("安全输入期间无法注册临时快捷键。") }
-        let identifier = try registerBinding(hotKey, onRelease: nil, skipsSecureInput: true, action: action)
+        let identifier = try registerBinding(hotKey, exclusive: true, onRelease: nil, skipsSecureInput: true, action: action)
         return { [weak self] in
             guard let self, self.callbacks.removeValue(forKey: identifier) != nil else { return }
             _ = self.presses.transition(identifier, pressed: false)
@@ -85,7 +96,7 @@ final class HotKeyManager {
         }
     }
 
-    private func registerBinding(_ hotKey: HotKey, onRelease: (() -> Void)?, skipsSecureInput: Bool,
+    private func registerBinding(_ hotKey: HotKey, exclusive: Bool, onRelease: (() -> Void)?, skipsSecureInput: Bool,
                                  action: @escaping () -> Void) throws -> UInt32 {
         try hotKey.validate()
         guard !hotKey.isStandaloneModifier else { throw PluginError.invalid("独立修饰键需使用专用通道。") }
@@ -96,7 +107,7 @@ final class HotKeyManager {
         let identifier = nextIdentifier
         let callback = Callbacks(press: action, release: onRelease, skipsSecureInput: skipsSecureInput)
         if let driver {
-            let stop = try driver.register(hotKey) { [weak self] pressed in self?.dispatch(identifier, pressed: pressed) }
+            let stop = try driver.register(hotKey, exclusive) { [weak self] pressed in self?.dispatch(identifier, pressed: pressed) }
             resources.driverStops[identifier] = stop
             callbacks[identifier] = callback
             return identifier
@@ -104,7 +115,7 @@ final class HotKeyManager {
         var reference: EventHotKeyRef?
         let status = RegisterEventHotKey(code, hotKey.modifiers,
                                         EventHotKeyID(signature: 0x554E544C, id: identifier),
-                                        GetApplicationEventTarget(), OptionBits(kEventHotKeyExclusive), &reference)
+                                        GetApplicationEventTarget(), exclusive ? OptionBits(kEventHotKeyExclusive) : 0, &reference)
         guard status == noErr, let reference else {
             throw PluginError.invalid("\(hotKey.display) 无法注册，可能已被系统或其他应用占用（\(status)）。")
         }

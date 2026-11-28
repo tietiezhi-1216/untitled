@@ -120,7 +120,8 @@ struct CaptureRegionMemory: Codable, Equatable {
 
     func choose(_ mode: Mode, permissions: PluginPermissionClient, allowComplexSelection: Bool = true,
                 automaticallyCopiesSelection: Bool = false, liveActions: Set<CaptureSelectionLiveAction> = [],
-                outputHandler: CaptureSelectionOutputHandler? = nil) async throws -> CaptureSelection? {
+                outputHandler: CaptureSelectionOutputHandler? = nil,
+                pinShortcutMatches: @escaping (UInt32, UInt32) -> Bool = { _, _ in false }) async throws -> CaptureSelection? {
         guard let request=beginRequest() else { return nil };defer { endRequest(request) }
         pendingPresentation?.dismiss()
         let currentGeneration = generation
@@ -162,7 +163,7 @@ struct CaptureRegionMemory: Codable, Equatable {
         let windows = content.windows.sorted { (ranks[$0.windowID] ?? .max) < (ranks[$1.windowID] ?? .max) }
         let elementDetectionAllowed = CaptureElementHitTesting.isAllowed(using: permissions)
         let selected: CaptureSelection? = await withCheckedContinuation { continuation in
-            let selector = CaptureSelector()
+            let selector = CaptureSelector(pinShortcutMatches: pinShortcutMatches)
             self.selector = selector
             selector.show(screens, windows: windows, allowsShapes: allowComplexSelection, elementDetectionAllowed: elementDetectionAllowed,
                           automaticallyCopiesSelection: automaticallyCopiesSelection, liveActions: liveActions,

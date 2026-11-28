@@ -520,6 +520,39 @@ import Testing
         view.session.submit(.copy);try await finish(view.session)
         #expect(attempts == 2 && completions == 1 && view.outputWasHandled)
     }
+    @Test func configuredPinKeySubmitsOnceFromTheFocusedSelection() async throws {
+        _ = NSApplication.shared
+        let panel = SelectionKeyPanel(contentRect: CGRect(x: 0, y: 0, width: 400, height: 300),
+                                      styleMask: [.borderless], backing: .buffered, defer: false)
+        let fixture = try Fixture(panel: panel)
+        defer { fixture.close() }
+        let view = fixture.view
+        let pin = try key(19, flags: .control, in: panel)
+        let otherKey = try key(19, flags: .option, in: panel)
+        var outputs: [CaptureSelectionPostAction] = []
+        view.pinShortcutMatches = { $0 == 19 && $1 == CaptureShortcutSettings.modifiers(.control) }
+        view.outputHandler = { _, action, _, _ in
+            outputs.append(action)
+            return true
+        }
+
+        #expect(!view.handlePinShortcut(pin))
+        try drag(view, from: CGPoint(x: 20, y: 20), to: CGPoint(x: 160, y: 120))
+        #expect(!view.handlePinShortcut(otherKey))
+        panel.hasKeyboardFocus = false
+        #expect(!view.handlePinShortcut(pin))
+        panel.hasKeyboardFocus = true
+
+        let monitor = CaptureShortcutMonitor.MonitorView()
+        monitor.scope = .selection
+        view.addSubview(monitor)
+        defer { monitor.removeFromSuperview() }
+        #expect(monitor.process(pin) == nil)
+        #expect(!view.handlePinShortcut(pin))
+        try await finish(view.session)
+        #expect(outputs == [.pin])
+    }
+
     @Test func cancellingSaveDoesNotCallTheOutputHandlerOrCloseTheSession() async throws {
         let fixture=try Fixture();defer { fixture.close() }
         let view=fixture.view
@@ -736,20 +769,24 @@ import Testing
         try #require(NSEvent.keyEvent(with:type,location:.zero,modifierFlags:flags,timestamp:ProcessInfo.processInfo.systemUptime,windowNumber:window.windowNumber,context:nil,characters:"",charactersIgnoringModifiers:"",isARepeat:false,keyCode:code))
     }
     private func descendants(_ view:NSView)->[NSView] { [view]+view.subviews.flatMap(descendants) }
+    @MainActor private final class SelectionKeyPanel: NSPanel {
+        var hasKeyboardFocus = true
+        override var isKeyWindow: Bool { hasKeyboardFocus }
+    }
     @MainActor private final class ToolbarBounds { var frames:[String:CGRect]=[:] }
     @MainActor private final class Fixture {
         let view:CaptureSelectionView
         let panel:NSPanel
         let domain="CaptureSession-"+UUID().uuidString
         let defaults:UserDefaults
-        init(scale:Int=1) throws {
+        init(scale:Int=1, panel:NSPanel?=nil) throws {
             defaults=try #require(UserDefaults(suiteName:domain))
             let context=try CaptureImage.context(width:400*scale,height:300*scale)
             context.setFillColor(NSColor.red.cgColor);context.fill(CGRect(x:0,y:0,width:400*scale,height:300*scale))
             context.setFillColor(NSColor.blue.cgColor);context.fill(CGRect(x:200*scale,y:0,width:200*scale,height:300*scale))
             view=CaptureSelectionView(image:try #require(context.makeImage()),allowsShapes:true,sessionDefaults:defaults)
-            panel=NSPanel(contentRect:CGRect(x:0,y:0,width:400,height:300),styleMask:[.borderless],backing:.buffered,defer:false)
-            panel.isReleasedWhenClosed=false;panel.contentView=view
+            self.panel=panel ?? NSPanel(contentRect:CGRect(x:0,y:0,width:400,height:300),styleMask:[.borderless],backing:.buffered,defer:false)
+            self.panel.isReleasedWhenClosed=false;self.panel.contentView=view
         }
         func close() { view.cancelRefresh();panel.close();panel.contentView=nil;defaults.removePersistentDomain(forName:domain) }
     }

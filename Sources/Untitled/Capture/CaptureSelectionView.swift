@@ -153,6 +153,12 @@ import QuartzCore
 @MainActor final class CaptureSelector {
     private var panels: [NSPanel] = []
     private var completion: ((CaptureSelection?) -> Void)?
+    private let pinShortcutMatches: (UInt32, UInt32) -> Bool
+
+    init(pinShortcutMatches: @escaping (UInt32, UInt32) -> Bool = { _, _ in false }) {
+        self.pinShortcutMatches = pinShortcutMatches
+    }
+
     func show(_ screens: [(NSScreen, SCDisplay, SCContentFilter, CGImage)], windows: [SCWindow], allowsShapes: Bool, elementDetectionAllowed: Bool = false,
               automaticallyCopiesSelection: Bool = false, liveActions: Set<CaptureSelectionLiveAction> = [],
               outputHandler: CaptureSelectionOutputHandler? = nil, completion: @escaping (CaptureSelection?) -> Void) {
@@ -169,6 +175,7 @@ import QuartzCore
             panel.isReleasedWhenClosed=false;panel.level = .screenSaver
             panel.collectionBehavior=CaptureWindowPolicy.floatingBehavior;panel.hasShadow=false;panel.acceptsMouseMovedEvents=true
             let view=CaptureSelectionView(image:image,allowsShapes:allowsShapes,elementDetectionAllowed:elementDetectionAllowed)
+            view.pinShortcutMatches = pinShortcutMatches
             view.session.liveActions = allowsShapes ? liveActions : []
             view.automaticallyCopiesSelection=automaticallyCopiesSelection;view.outputHandler=outputHandler
             view.screenOrigin=display.frame.origin
@@ -233,6 +240,7 @@ import QuartzCore
         panel.isReleasedWhenClosed=false;panel.level = .screenSaver;panel.collectionBehavior=CaptureWindowPolicy.floatingBehavior
         panel.hasShadow=false;panel.acceptsMouseMovedEvents=true
         let view=CaptureSelectionView(image:image,allowsShapes:true,elementDetectionAllowed:elementDetectionAllowed)
+        view.pinShortcutMatches = pinShortcutMatches
         view.session.liveActions = liveActions
         view.automaticallyCopiesSelection=automaticallyCopiesSelection;view.outputHandler=outputHandler
         view.screenOrigin=world.origin
@@ -337,6 +345,7 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
     var image: CGImage
     let session: CaptureSelectionSession
     var outputHandler: CaptureSelectionOutputHandler?
+    var pinShortcutMatches: (UInt32, UInt32) -> Bool = { _, _ in false }
     var automaticallyCopiesSelection = false
     private(set) var outputWasHandled = false
     private(set) var preparedExport: CaptureSelectionExport?
@@ -676,14 +685,28 @@ private final class CaptureSelectionPanel: NSPanel { override var canBecomeKey: 
         if shape == .polygon,!confirmed,points.count>=3 { finalizeShape() }
         else if confirmed || !points.isEmpty { resetSelection() } else { cancelSelection() }
     }
+    private var canPinCurrentSelection: Bool {
+        confirmed && anchor == nil && allowsShapes && !handingOff && !automaticallyCopiesSelection &&
+            !session.exporting && !session.preparingRecording && outputHandler != nil
+    }
+
     func pinCurrentSelection() {
-        guard !handingOff, confirmed, allowsShapes, !automaticallyCopiesSelection,
-              outputHandler != nil else { return }
+        guard canPinCurrentSelection else { return }
         session.submit(.pin)
+    }
+
+    func handlePinShortcut(_ event: NSEvent) -> Bool {
+        guard canPinCurrentSelection,
+              pinShortcutMatches(UInt32(event.keyCode), CaptureShortcutSettings.modifiers(event.modifierFlags)),
+              let window, window.isKeyWindow, window.attachedSheet == nil,
+              !CaptureKeyboardRouting.isEditingText(in: window) else { return false }
+        if !event.isARepeat { pinCurrentSelection() }
+        return true
     }
 
     override func keyDown(with event:NSEvent) {
         guard !handingOff,!session.exporting else { return }
+        if handlePinShortcut(event) { return }
         modifiers=event.modifierFlags
         if session.preparingRecording {
             switch event.keyCode {

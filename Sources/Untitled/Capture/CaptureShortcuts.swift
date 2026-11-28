@@ -202,6 +202,9 @@ struct CaptureShortcutMonitor: NSViewRepresentable {
         func process(_ event: NSEvent) -> NSEvent? {
             guard let window, event.window === window, window.isKeyWindow,
                   window.attachedSheet == nil, !CaptureKeyboardRouting.isEditingText(in: window) else { return event }
+            if scope == .selection, let selector = window.contentView as? CaptureSelectionView, selector.handlePinShortcut(event) {
+                return nil
+            }
             guard let action = settings.action(keyCode: UInt32(event.keyCode),
                 modifiers: CaptureShortcutSettings.modifiers(event.modifierFlags), scope: scope) else { return event }
             handle?(action)
@@ -277,7 +280,7 @@ struct CaptureGlobalShortcutSettingsView: View {
                     .disabled(!plugin.isEnabled)
                 }
             } footer: {
-                Text("先框选，再按贴图快捷键。没有选区时不会贴图。恢复贴图按关闭时间从近到远逐张恢复。")
+                Text("框选后可在截图窗口按贴图快捷键。恢复贴图按关闭时间从近到远逐张恢复。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

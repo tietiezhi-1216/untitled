@@ -352,6 +352,7 @@ struct CaptureRecord: Codable, Identifiable {
     }
     func perform(_ action: ActionKind, permissions: PluginPermissionClient,
                  liveActions: Set<CaptureSelectionLiveAction> = [],
+                 pinShortcutMatches: @escaping (UInt32, UInt32) -> Bool = { _, _ in false },
                  allowsLiveAction: @escaping @MainActor (ActionKind) -> Bool = { _ in false }) async throws {
         guard !shouldIgnoreCaptureRequest(action) else { return }
         if action == .captureRecording, isRecording { try await stopRecording(); return }
@@ -425,7 +426,7 @@ struct CaptureRecord: Codable, Identifiable {
             chosen = try await service.choose(mode, permissions: permissions,
                 allowComplexSelection: action != .captureScrolling && action != .captureRecording,
                 automaticallyCopiesSelection: action == .captureAndCopy,
-                liveActions: canSwitch ? liveActions : [], outputHandler: outputHandler)
+                liveActions: canSwitch ? liveActions : [], outputHandler: outputHandler, pinShortcutMatches: pinShortcutMatches)
         }
         guard let selection = chosen else { return }
         // Keep the frozen selection visible through history persistence and editor

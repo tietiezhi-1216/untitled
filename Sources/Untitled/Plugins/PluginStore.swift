@@ -11,6 +11,7 @@ final class PluginStore: ObservableObject {
     @Published private(set) var isInstalling = false
     @Published private(set) var catalogError: String?
     @Published private(set) var hotKeyErrors: [UUID: String] = [:]
+    private var selectionPinShortcuts: [String: [HotKey]] = [:]
     @Published private(set) var captureHotKeysPaused = false
     @Published private(set) var hotKeysPaused = false
     @Published private(set) var priorityHotKeysEnabled = false
@@ -657,10 +658,17 @@ final class PluginStore: ObservableObject {
             self?.showMainWindow()
         }
         let liveActions = Set(CaptureSelectionLiveAction.allCases.filter { plugin.manifest.actions.contains($0.action) })
-        try await screenshots.perform(action, permissions: client, liveActions: liveActions) { [weak self] action in
+        try await screenshots.perform(action, permissions: client, liveActions: liveActions, pinShortcutMatches: { [weak self] keyCode, modifiers in
+            self?.matchesSelectionPinShortcut(keyCode: keyCode, modifiers: modifiers, pluginID: pluginID) == true
+        }) { [weak self] action in
             guard let self, !self.isPreparingForQuit else { return false }
             return self.installed.contains { $0.id == pluginID && $0.isEnabled && $0.manifest.actions.contains(action) }
         }
+    }
+
+    func matchesSelectionPinShortcut(keyCode: UInt32, modifiers: UInt32, pluginID: String) -> Bool {
+        guard !isPreparingForQuit else { return false }
+        return selectionPinShortcuts[pluginID]?.contains { $0.keyCode == keyCode && $0.modifiers == modifiers } == true
     }
 
     func permissionClient(for pluginID: String) -> PluginPermissionClient {
@@ -707,6 +715,7 @@ final class PluginStore: ObservableObject {
         } else { captureController?.globalMouse.stop() }
         hotKeys.clear(); priorityHotKeys.clear(); sideButtons.clear(); modifierKeys.clear()
         hotKeyErrors = [:]
+        selectionPinShortcuts.removeAll()
         priorityHotKeyStatus = hotKeysPaused ? "所有快捷键已暂停" : (HotKeyRecordingSession.isRecording ? "正在录制快捷键，已暂停全局触发" : nil)
         guard !hotKeysPaused, !isPreparingForQuit, !HotKeyRecordingSession.isRecording else { return }
         var identities = Set<String>()
@@ -720,6 +729,10 @@ final class PluginStore: ObservableObject {
                     try uiRegistry.validateBinding(command, in: plugin)
                     guard identities.insert(key.identity).inserted else {
                         throw PluginError.invalid("这个快捷键已绑定到其他操作。")
+                    }
+                    if command.action == .pinSelection, key.mouseButton == nil, !key.isStandaloneModifier {
+                        selectionPinShortcuts[plugin.id, default: []].append(key)
+                        continue
                     }
                     bindings.append((plugin.id, command, key))
                 } catch { hotKeyErrors[command.id] = error.localizedDescription }
@@ -774,7 +787,8 @@ final class PluginStore: ObservableObject {
         }
         for binding in bindings {
             do {
-                try hotKeys.register(binding.key, onRelease: hotKeyRelease(binding.command, pluginID: binding.pluginID)) { [weak self] in
+                try hotKeys.register(binding.key, exclusive: !binding.command.action.isScreenshotAction,
+                                     onRelease: hotKeyRelease(binding.command, pluginID: binding.pluginID)) { [weak self] in
                     self?.hotKeyPressed(binding.command, pluginID: binding.pluginID)
                 }
             } catch { hotKeyErrors[binding.command.id] = error.localizedDescription }
