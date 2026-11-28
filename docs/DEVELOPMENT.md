@@ -96,7 +96,8 @@ Sources/Untitled/
 ├── Capture/     # 截图、编辑、贴图、滚动拼接、录制、OCR、文档导出与本地模型
 ├── Models/      # 应用外观设置
 ├── Plugins/     # 插件规范、目录、ZIP 安装和配置存储
-├── Sharing/     # 双 Mac TLS 配对、键鼠接力与按需虚拟麦克风同步
+├── Sharing/     # 双 Mac TLS 配对、键鼠接力与共享音频基础实现
+├── WirelessMicrophone/ # 无线麦配对、设备面板与按需音频会话
 ├── SpeechInput/ # 豆包游客双通道 ASR、麦克风、范围校验与非激活听写浮条
 ├── Runtime/     # 通用动作执行与 Carbon 全局热键
 └── Views/       # 原生商店、插件配置、录制器与设置
