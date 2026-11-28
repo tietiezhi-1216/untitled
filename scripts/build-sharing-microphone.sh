@@ -28,7 +28,7 @@ stage="$(mktemp -d "$output/.build.XXXXXX")"
 trap 'rm -rf "$stage"; rm -f "${temporary:-}"' EXIT
 bundle="$stage/UntitledMicrophone.driver"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources/Licenses"
-cp "$root/Tools/SharingMicrophone/Info.plist" "$bundle/Contents/Info.plist"
+cp "$root/Plugins/peripheral-sharing/Tools/SharingMicrophone/Info.plist" "$bundle/Contents/Info.plist"
 cp "$root/LICENSE" "$bundle/Contents/Resources/Licenses/Untitled.txt"
 cp "$source/LICENSE" "$source/LICENSE.apple2012" "$source/LICENSE.apple2020" "$bundle/Contents/Resources/Licenses/"
 # No CMake, Homebrew, generated-code execution, or global dependency installation is needed.
@@ -37,10 +37,10 @@ for arch in $architectures; do
     case "$arch" in arm64|x86_64) ;; *) echo "Unsupported architecture: $arch" >&2; exit 1 ;; esac
     xcrun clang++ -std=c++17 -O2 -fPIC -fvisibility=hidden -Wno-reorder-init-list -mmacosx-version-min=14.0 -arch "$arch" \
         -bundle -framework CoreFoundation -framework CoreAudio -I "$source/include" \
-        "$source"/src/*.cpp "$root/Tools/SharingMicrophone/Driver.cpp" -o "$stage/driver-$arch"
+        "$source"/src/*.cpp "$root/Plugins/peripheral-sharing/Tools/SharingMicrophone/Driver.cpp" -o "$stage/driver-$arch"
 done
 xcrun lipo -create "$stage"/driver-* -output "$bundle/Contents/MacOS/UntitledMicrophone"
-xcrun clang++ -std=c++17 -O2 -pthread "$root/Tools/SharingMicrophone/LoopbackTests.cpp" -o "$stage/loopback-tests"
+xcrun clang++ -std=c++17 -O2 -pthread "$root/Plugins/peripheral-sharing/Tools/SharingMicrophone/LoopbackTests.cpp" -o "$stage/loopback-tests"
 "$stage/loopback-tests"
 identity="${UNTITLED_SIGNING_IDENTITY:-}"
 if [[ -z "$identity" && -f "$root/.signing-identity" ]]; then identity="$(tr -d '\r\n' < "$root/.signing-identity")"; fi
@@ -52,13 +52,13 @@ else
 fi
 codesign --verify --strict "$bundle"
 xcrun clang++ -std=c++17 -O2 -framework CoreFoundation -framework CoreAudio \
-    "$root/Tools/SharingMicrophone/DriverTests.cpp" -o "$stage/driver-tests"
+    "$root/Plugins/peripheral-sharing/Tools/SharingMicrophone/DriverTests.cpp" -o "$stage/driver-tests"
 "$stage/driver-tests" "$bundle/Contents/MacOS/UntitledMicrophone"
 if [[ -e "$output/UntitledMicrophone.driver" ]]; then mv "$output/UntitledMicrophone.driver" "$stage/previous.driver"; fi
 if ! mv "$bundle" "$output/UntitledMicrophone.driver"; then
     if [[ -e "$stage/previous.driver" ]]; then mv "$stage/previous.driver" "$output/UntitledMicrophone.driver"; fi
     exit 1
 fi
-cp "$root/Tools/SharingMicrophone/install.sh" "$output/install.sh"
-cp "$root/Tools/SharingMicrophone/README.md" "$output/README.md"
+cp "$root/Plugins/peripheral-sharing/Tools/SharingMicrophone/install.sh" "$output/install.sh"
+cp "$root/Plugins/peripheral-sharing/Tools/SharingMicrophone/README.md" "$output/README.md"
 echo "Built: $output/UntitledMicrophone.driver (not installed)"

@@ -1,10 +1,9 @@
 import AppKit
+import UntitledPluginSDK
 import UserNotifications
 
 @MainActor enum HostNativeCapabilities {
-    nonisolated static let clipboardByteLimit = 16 * 1024
-    nonisolated static let notificationTitleByteLimit = 240
-    nonisolated static let notificationBodyByteLimit = 1024
+    nonisolated static let clipboardByteLimit = NativeCapabilityInput.clipboardByteLimit
 
     static func revealInFinder(_ url: URL) throws {
         guard url.isFileURL else { throw PluginError.invalid("请选择本机文件或文件夹。") }
@@ -20,12 +19,12 @@ import UserNotifications
         guard let text = pasteboard.string(forType: .string), !text.isEmpty else {
             throw PluginError.invalid("剪贴板中没有可读取的纯文本。")
         }
-        try validateClipboardText(text)
+        try NativeCapabilityInput.validateClipboardText(text)
         return text
     }
 
     static func copyText(_ text: String, to pasteboard: NSPasteboard = .general) throws {
-        try validateClipboardText(text)
+        try NativeCapabilityInput.validateClipboardText(text)
         let item = NSPasteboardItem()
         guard item.setString(text, forType: .string) else {
             throw PluginError.invalid("无法准备剪贴板文本，请重试。")
@@ -34,21 +33,6 @@ import UserNotifications
         guard pasteboard.writeObjects([item]) else {
             throw PluginError.invalid("无法写入系统剪贴板，请重试。")
         }
-    }
-
-    nonisolated static func validateClipboardText(_ text: String) throws {
-        guard !text.isEmpty, text.utf8.count <= clipboardByteLimit else {
-            throw PluginError.invalid("剪贴板文本须为 1 字节至 16 KiB。")
-        }
-    }
-
-    nonisolated static func notificationTitle(_ title: String, body: String) throws -> String {
-        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, title.utf8.count <= notificationTitleByteLimit,
-              body.utf8.count <= notificationBodyByteLimit else {
-            throw PluginError.invalid("请输入标题，标题最多 240 字节，正文最多 1 KiB。")
-        }
-        return title
     }
 
     static var notificationDriver: HostPermissionDriver {
@@ -95,46 +79,50 @@ import UserNotifications
     }
 }
 
-@MainActor struct PluginNativeCapabilityClient {
+@MainActor package struct PluginNativeCapabilityClient {
     let pluginID: String
     let permissions: HostPermissionCenter
     let filePicker: NativeFilePicker
     let currentPlugin: (ActionKind) throws -> InstalledPlugin
     let presentFilePicker: () -> Void
 
-    func readClipboardText(from pasteboard: NSPasteboard = .general) throws -> String {
+    package func readClipboardText(from pasteboard: NSPasteboard = .general) throws -> String {
         _ = try currentPlugin(.readClipboardText)
         return try HostNativeCapabilities.readClipboard(from: pasteboard)
     }
 
-    func copyText(_ text: String, to pasteboard: NSPasteboard = .general) throws {
+    package func copyText(_ text: String, to pasteboard: NSPasteboard = .general) throws {
         _ = try currentPlugin(.copyText)
         try HostNativeCapabilities.copyText(text, to: pasteboard)
     }
 
-    func revealFile(_ url: URL) throws {
+    package func revealFile(_ url: URL) throws {
         _ = try currentPlugin(.revealFile)
         try HostNativeCapabilities.revealInFinder(url)
     }
 
-    func shareFile(_ url: URL) throws {
+    package func shareFile(_ url: URL) throws {
         _ = try currentPlugin(.shareFile)
         try filePicker.presentSharePicker(for: url, pluginID: pluginID)
     }
 
-    func chooseAndRevealFile() async throws {
+    package func chooseAndRevealFile() async throws {
         if let url = try await chooseFile(for: .revealFile) { try revealFile(url) }
     }
 
-    func chooseAndShareFile() async throws {
+    package func chooseAndShareFile() async throws {
         if let url = try await chooseFile(for: .shareFile) { try shareFile(url) }
+    }
+
+    package func postNotification(title: String, body: String = "") async throws {
+        try await postNotification(title: title, body: body, deliver: HostNativeCapabilities.deliverNotification)
     }
 
     func postNotification(
         title: String, body: String = "",
-        deliver: @MainActor (String, String) async throws -> Void = HostNativeCapabilities.deliverNotification
+        deliver: @MainActor (String, String) async throws -> Void
     ) async throws {
-        let title = try HostNativeCapabilities.notificationTitle(title, body: body)
+        let title = try NativeCapabilityInput.notificationTitle(title, body: body)
         try await permissions.requireAsynchronously(.notifications) { try currentPlugin(.sendNotification) }
         try Task.checkCancellation()
         try await deliver(title, body)

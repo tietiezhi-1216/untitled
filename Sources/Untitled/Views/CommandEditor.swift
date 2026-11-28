@@ -1,4 +1,5 @@
 import AppKit
+import UntitledPluginSDK
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -18,16 +19,16 @@ struct CommandEditor: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Text(draft.title)
+            Text(store.title(for: draft))
                 .font(.headline)
                 .lineLimit(2)
-                .help(draft.title)
+                .help(store.title(for: draft))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, PanelLayout.contentInset)
                 .padding(.top, PanelLayout.contentInset)
             Form {
                 Picker("操作", selection: $draft.action) {
-                    ForEach(actions, id: \.self) { action in Text(action.title).tag(action) }
+                    ForEach(actions, id: \.self) { action in Text(store.presentation(for: action).title).tag(action) }
                 }
                 .onChange(of: draft.action) { _, _ in
                     draft.target = ""
@@ -61,20 +62,15 @@ struct CommandEditor: View {
                     TextField("要复制的文本", text: $draft.target, axis: .vertical).lineLimit(2...4)
                 case .sendNotification:
                     TextField("通知标题", text: $draft.target)
-                case .sharePeripherals, .switchPeripheralControl, .stopPeripheralSharing:
-                    Text("使用外设共享插件中已配对的设备。切换控制需要两端明确开启键鼠共享；停止操作始终释放键鼠和麦克风。")
-                        .font(.callout).foregroundStyle(.secondary)
-                case .shareWirelessMicrophone:
-                    Text("在无线麦中查找小米蓝牙遥控器，或断开现有连接。")
-                        .font(.callout).foregroundStyle(.secondary)
                 default:
-                    Text("绑定后可在任意应用中执行此截图操作。首次截屏或录屏时需要允许屏幕录制权限。")
-                        .font(.callout).foregroundStyle(.secondary)
+                    if let help = store.presentation(for: draft.action).bindingHelp {
+                        Text(help).font(.callout).foregroundStyle(.secondary)
+                    }
                 }
 
                 LabeledContent("快捷键") {
                     HStack {
-                        ShortcutRecorder(hotKey: $draft.hotKey, error: $error)
+                        ShortcutRecorder(hotKey: $draft.hotKey, error: $error, allowedInputs: store.installed.first { $0.id == pluginID }?.manifest.allowedShortcutInputs ?? [])
                             .frame(width: 190, height: 28)
                         Button("清除") { draft.hotKey = nil }.disabled(draft.hotKey == nil)
                     }
@@ -84,7 +80,8 @@ struct CommandEditor: View {
             }
             .formStyle(.grouped)
             HStack(spacing: 12) {
-                Text("至少包含 ⌘、⌥ 或 ⌃。留空则仅手动执行。")
+                Text(draft.hotKey?.inputKind == .singleKey ? "全局单键会占用这个键，其他应用可能收不到。" :
+                        draft.hotKey?.inputKind == .mouseButton ? "绑定后，侧键触发此操作，不再执行原来的前进或后退。" : "留空则仅手动执行。")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)

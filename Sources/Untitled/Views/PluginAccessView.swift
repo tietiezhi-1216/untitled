@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UntitledPluginSDK
 
 struct PluginAccessView: View {
     @EnvironmentObject private var store: PluginStore

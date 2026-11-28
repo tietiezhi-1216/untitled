@@ -1,7 +1,12 @@
 import Foundation
 import CoreGraphics
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 struct CaptureGlobalMouseTests {
     private func defaults(_ work:(UserDefaults) throws -> Void) rethrows {

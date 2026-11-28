@@ -1,4 +1,5 @@
 import SwiftUI
+import UntitledPluginSDK
 
 struct HostSoftwareUpdateView: View {
     @ObservedObject var update: HostSoftwareUpdate

@@ -1,6 +1,11 @@
 import Foundation
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 struct DoubaoASRTests {
     @Test func observedProtobufAndUnknownFields() throws {
@@ -46,6 +51,68 @@ struct DoubaoASRTests {
         #expect(throws: (any Error).self) { try DoubaoASRProtocol.decode(text: "[]") }
     }
 
+    @Test func twoPassRevisionsReplaceTheSessionSummaryInsteadOfAppendingDetailFinals() throws {
+        // Shape observed with synthetic audio: first the streaming decoder, then a
+        // nonstream spelling correction, then punctuation. Different messages, same audio.
+        var transcript = DoubaoTranscript()
+        try transcript.consume(#"{"results":[{"text":"还有两只笔","is_interim":true},{"text":"还有两只笔","is_interim":false,"index":0,"start_time":0,"end_time":3.71325}]}"#)
+        #expect(transcript.text == "还有两只笔" && transcript.finalCount == 0)
+        try transcript.consume(#"{"results":[{"text":"还有两支笔","is_interim":true},{"text":"还有两支笔","is_interim":false,"start_time":0,"end_time":3.713}]}"#)
+        #expect(transcript.text == "还有两支笔" && transcript.finalCount == 0)
+        let final = #"{"results":[{"text":"还有两支笔。","is_interim":false},{"text":"还有两支笔。","is_interim":false,"start_time":0,"end_time":3.713}]}"#
+        for _ in 0..<2 { try transcript.consume(final) } // Replay even with a fresh message ID.
+        #expect(transcript.text == "还有两支笔。" && transcript.confirmed == transcript.text)
+        #expect(transcript.finalCount == 1)
+        // If a whole-session correction follows without the optional details, it still replaces.
+        try transcript.consume(#"{"results":[{"text":"还有 2 支笔。","is_interim":false}]}"#)
+        #expect(transcript.confirmed == "还有 2 支笔。")
+    }
+
+    @Test func twoRealRepetitionsSurviveInBothSummaryAndSegmentFormats() throws {
+        var snapshot = DoubaoTranscript()
+        try snapshot.consume(#"{"results":[{"text":"再来","is_interim":true},{"text":"再来","is_interim":false,"start_time":0}]}"#)
+        try snapshot.consume(#"{"results":[{"text":"再来再来","is_interim":true},{"text":"再来","is_interim":true,"start_time":20.4,"index":0}]}"#)
+        try snapshot.consume(#"{"results":[{"text":"某个分段的迟到修订","is_interim":false,"start_time":0}]}"#)
+        #expect(snapshot.text == "再来再来" && snapshot.finalCount == 0)
+        try snapshot.consume(#"{"results":[{"text":"再来，再来。","is_interim":false},{"text":"再来。","is_interim":false,"start_time":20.4}]}"#)
+        #expect(snapshot.confirmed == "再来，再来。")
+        var segments = DoubaoTranscript()
+        let segment = #"{"results":[{"text":"再来。","is_interim":false}]}"#
+        try segments.consume(segment); try segments.consume(segment)
+        #expect(segments.confirmed == "再来。再来。")
+    }
+
+    @Test func twoPassDetailsDoNotSpendTheSessionTextBudgetTwice() throws {
+        var transcript = DoubaoTranscript()
+        let atLimit = String(repeating: "a", count: DoubaoASRLimits.textLength)
+        let rows: [[String: Any]] = [["text": atLimit, "is_interim": false],
+                                      ["text": atLimit, "is_interim": false, "start_time": 0]]
+        let data = try JSONSerialization.data(withJSONObject: ["results": rows])
+        try transcript.consume(String(decoding: data, as: UTF8.self))
+        #expect(transcript.confirmed == atLimit)
+    }
+
+    @Test func cleanupDoesNotGateOrInventAnASRFinal() throws {
+        var transcript = DoubaoTranscript(), ending = DoubaoASREnding()
+        try transcript.consume(#"{"results":[{"text":"明天下午三点","is_interim":true},{"text":"明天下午三点","is_interim":false,"index":0}]}"#)
+        #expect(ending.endASR() && !ending.endASR())
+        ending.cleanupSubmitted = true // Even a cleanup ACK before the final is not text.
+        #expect(ending.result(transcript) == nil && ending.result(transcript, skipCleanup: true) == nil)
+        try transcript.consume(#"{"results":[{"text":"明天下午 3 点。","is_interim":false}]}"#)
+        #expect(ending.result(transcript) == "明天下午 3 点。")
+        var other = DoubaoASREnding()
+        #expect(other.result(transcript, skipCleanup: true) == nil) // No ASREnded barrier.
+        _ = other.endASR()
+        #expect(other.result(transcript) == nil && other.result(transcript, skipCleanup: true) == transcript.confirmed)
+        var segments = DoubaoTranscript()
+        try segments.consume(#"{"results":[{"text":"第一句。","is_interim":false},{"text":"下一句的草稿","is_interim":true}]}"#)
+        #expect(ending.result(segments) == nil)
+        try segments.consume(#"{"results":[{"text":"下一句。","is_interim":false}]}"#)
+        #expect(ending.result(segments, skipCleanup: true) == nil)
+        ending.sessionFinished = true
+        #expect(ending.result(segments) == "第一句。下一句。")
+    }
+
     @Test func audioDiagnosticsDistinguishNoCallbacksSilenceAndSignal() throws {
         let mailbox = DictationAudioMailbox()
         #expect(mailbox.diagnostics().emptyResultReason.contains("没有收到"))
@@ -59,6 +126,42 @@ struct DoubaoASRTests {
         #expect(mailbox.diagnostics().capturedBytes == 1920 && mailbox.diagnostics().callbacks == 3)
         #expect(abs((mailbox.diagnostics().peakDBFS ?? 0) + 6.02) < 0.05)
         #expect(try mailbox.drain().level == 0)
+    }
+
+    @Test func stalledMeterConsumersKeepOnlyTheNewestReadingAndNeverConsumePCM() async throws {
+        // No consumer for the entire recording. The single display slot may coalesce;
+        // the audio path keeps every byte. Also exercise finish/disposal across ten sessions.
+        for _ in 0..<10 {
+            let box = DictationAudioMailbox(), quiet = Data(repeating: 0, count: 640)
+            let signal = Data((0..<320).flatMap { _ in [UInt8(0), UInt8(0x10)] })
+            var expected = Data()
+            for i in 0..<40 {
+                let frame = i == 38 ? signal : quiet
+                box.append(frame); expected.append(frame)
+            }
+            var stream = box.meterReadings.makeAsyncIterator()
+            box.beginStopping()
+            #expect(await stream.next()?.rms == 0.125) // peak of last pair, not the last (silent) callback
+            #expect(await stream.next() == nil)
+            #expect(try box.drain().pcm == expected && box.bufferedBytes == 0)
+        }
+    }
+
+    @Test func equalVolumeDifferentPitchFeedsTheSameBarHeightAndSilenceReturnsToZero() async throws {
+        func pair(_ hz: Double) async throws -> (DictationMeterReading, DictationMeterReading) {
+            let box = DictationAudioMailbox()
+            let samples = (0..<320).map { i in Int16((1500 * sin(Double(i)*2 * .pi*hz/16000)).rounded()).littleEndian }
+            let frame = samples.withUnsafeBytes { Data($0) }
+            var it = box.meterReadings.makeAsyncIterator()
+            box.append(frame); box.append(frame)
+            let measured = try #require(await it.next())
+            let zero = Data(repeating: 0, count: 640)
+            box.append(zero); box.append(zero); box.beginStopping()
+            return (measured, try #require(await it.next()))
+        }
+        let (slow,quiet) = try await pair(150), (fast,_) = try await pair(300)
+        #expect(abs(slow.rms-fast.rms) < 0.0001 && slow.rms > 0.03)
+        #expect(quiet == .quiet)
     }
 
     @Test func selectedInputNeverSilentlyFallsBackToAnotherMicrophone() throws {

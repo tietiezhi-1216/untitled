@@ -1,7 +1,12 @@
 import AppKit
 import SwiftUI
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 @Suite(.serialized) struct SharingLayoutTests {
     @Test func freePositionsDoNotSnapToFourCardinalSlots() {
@@ -115,10 +120,11 @@ import Testing
         let ui = try #require(manifest.ui)
         #expect(ui.items(in: .toolbarLeading).isEmpty && ui.items(in: .toolbarTrailing).isEmpty)
         #expect(ui.items(in: .menuBar).contains { $0.command == "sharing.stop" })
-        let source = try String(contentsOfFile: "Sources/Untitled/Sharing/SharingPluginView.swift", encoding: .utf8)
+        let source = try String(contentsOfFile: "Plugins/peripheral-sharing/Sources/SharingPluginView.swift", encoding: .utf8)
         #expect(!source.contains("边缘穿越") && !source.contains("edgeSwitching"))
         #expect(!source.contains("键盘与鼠标") && !source.contains("返回本机") && !source.contains("麦克风"))
         #expect(source.components(separatedBy: "Toggle(").count - 1 == 1)
+        #expect(source.contains("Toggle(\"共享\"") && !source.contains("setClipboardSharing"))
     }
     @Test func publicAndRuntimeIdentitiesUseUntitled() throws {
         let plist = try #require(PropertyListSerialization.propertyList(from: Data(contentsOf: URL(fileURLWithPath: "Resources/Info.plist")), format: nil) as? [String: Any])

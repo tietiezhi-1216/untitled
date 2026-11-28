@@ -2,7 +2,8 @@ import AppKit
 import Foundation
 import SwiftUI
 import Testing
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
 
 @Suite(.serialized) @MainActor
 struct HostSoftwareUpdateTests {

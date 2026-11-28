@@ -1,28 +1,29 @@
 import AVFoundation
+import UntitledPluginSDK
 import AppKit
 @preconcurrency import CoreBluetooth
 @preconcurrency import ApplicationServices
 
-@MainActor enum SystemPermissionProvider {
-    static func drivers() -> [HostPermissionDriver] {
+@MainActor package enum SystemPermissionProvider {
+    package static func drivers() -> [HostPermissionDriver] {
         [
             make(
-                .screenRecording, "屏幕与系统音频录制", "用于截图、录屏与录制系统音频。", "display", "ScreenCapture",
+                .screenRecording, "屏幕与系统音频录制", "允许已声明并获得授权的操作采集屏幕与系统音频。", "display", "ScreenCapture",
                 status: { CGPreflightScreenCaptureAccess() ? .authorized : .notGranted },
                 request: { _ = CGRequestScreenCaptureAccess() }),
             make(
-                .accessibility, "辅助功能", "用于自动滚动及经你允许的跨 Mac 键鼠控制。", "accessibility", "Accessibility",
+                .accessibility, "辅助功能", "允许已授权的操作访问辅助功能，以及你主动开启的宿主快捷键优先拦截。", "accessibility", "Accessibility",
                 status: { AXIsProcessTrusted() ? .authorized : .notGranted },
                 request: {
                     _ = AXIsProcessTrustedWithOptions(
                         [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
                 }),
             make(
-                .inputMonitoring, "输入监控", "用于按键显示，以及开启键鼠共享时的输入监听。", "keyboard", "ListenEvent",
+                .inputMonitoring, "输入监控", "允许已声明并获得授权的操作监听输入事件。", "keyboard", "ListenEvent",
                 status: { CGPreflightListenEventAccess() ? .authorized : .notGranted },
                 request: { _ = CGRequestListenEventAccess() }),
             make(
-                .camera, "摄像头", "用于录屏画中画等摄像头功能。", "camera", "Camera",
+                .camera, "摄像头", "允许已声明并获得授权的操作访问摄像头。", "camera", "Camera",
                 status: { mediaStatus(.video) },
                 request: {
                     if AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined {
@@ -30,7 +31,7 @@ import AppKit
                     }
                 }),
             make(
-                .microphone, "麦克风", "用于录屏旁白，以及经你允许、对端应用使用时的实体麦克风同步。", "mic", "Microphone",
+                .microphone, "麦克风", "允许已声明并获得授权的操作采集麦克风输入。", "mic", "Microphone",
                 status: { mediaStatus(.audio) },
                 request: {
                     if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {

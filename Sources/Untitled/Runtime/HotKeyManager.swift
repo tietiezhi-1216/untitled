@@ -1,4 +1,5 @@
 import Carbon
+import UntitledPluginSDK
 import Foundation
 
 /// Suppress repeat-downs; clearing bindings releases only keys that actually started a gesture.
@@ -12,22 +13,37 @@ struct HotKeyPressState {
 }
 
 @MainActor
-protocol HotKeyRegistering {
-    func clear()
-    func register(_ hotKey: HotKey, exclusive: Bool, onRelease: (() -> Void)?, action: @escaping () -> Void) throws
-}
+package final class HotKeyManager {
+    /// Native Carbon remains the default. Tests can own registrations without
+    /// reserving real system chords, including deterministic conflict failures.
+    package struct Driver {
+        package typealias Stop = @MainActor @Sendable () -> Void
+        package typealias Handler = @MainActor (Bool) -> Void
+        let register: (HotKey, Bool, @escaping Handler) throws -> Stop
 
-@MainActor
-final class HotKeyManager: HotKeyRegistering {
+        package init(register: @escaping (HotKey, Bool, @escaping Handler) throws -> Stop) {
+            self.register = register
+        }
+
+        package init(register: @escaping (HotKey, @escaping Handler) throws -> Stop) {
+            self.register = { key, _, handler in try register(key, handler) }
+        }
+    }
+    private let driver: Driver?
     private let resources = CarbonResources()
-    private struct Callbacks { let press: () -> Void; let release: (() -> Void)? }
+    private struct Callbacks { let press: () -> Void; let release: (() -> Void)?; let skipsSecureInput: Bool }
+    private let secureInput: () -> Bool
+    private var skippedSecurePresses = Set<UInt32>()
     private var callbacks: [UInt32: Callbacks] = [:]
     private var presses = HotKeyPressState()
     private var nextIdentifier: UInt32 = 0
     private var setupStatus: OSStatus = noErr
 
-    init() {
+    init(driver: Driver? = nil, secureInput: (() -> Bool)? = nil) {
+        self.driver=driver
+        self.secureInput = secureInput ?? (driver == nil ? { IsSecureEventInputEnabled() } : { false })
         resources.owner = self
+        guard driver == nil else { return }
         var eventTypes = [
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)),
@@ -47,33 +63,66 @@ final class HotKeyManager: HotKeyRegistering {
 
     private func dispatch(_ identifier: UInt32, pressed: Bool) {
         guard let callback = callbacks[identifier], presses.transition(identifier, pressed: pressed) else { return }
-        if pressed { callback.press() } else { callback.release?() }
+        if pressed {
+            // Carbon reports a registered shortcut, not text. Respect Secure Input
+            // for unmodified typing keys and temporary workflow shortcuts.
+            if callback.skipsSecureInput && secureInput() { skippedSecurePresses.insert(identifier); return }
+            callback.press()
+        } else if skippedSecurePresses.remove(identifier) == nil { callback.release?() }
     }
 
     func clear() {
-        let releases = presses.clear().compactMap { callbacks[$0]?.release }
-        resources.references.forEach { UnregisterEventHotKey($0) }
-        resources.references.removeAll()
+        let releases = presses.clear().subtracting(skippedSecurePresses).compactMap { callbacks[$0]?.release }
+        skippedSecurePresses.removeAll()
+        resources.clearRegistrations()
         callbacks.removeAll()
         releases.forEach { $0() }
     }
 
     func register(_ hotKey: HotKey, exclusive: Bool = true, onRelease: (() -> Void)? = nil, action: @escaping () -> Void) throws {
+        _ = try registerBinding(hotKey, exclusive: exclusive, onRelease: onRelease,
+                                skipsSecureInput: !hotKey.supportsLegacyHosts, action: action)
+    }
+
+    /// A single chord owned by an active workflow, not a saved command. Removing it
+    /// must not release another shortcut (e.g. the key still held for dictation).
+    func registerScoped(_ hotKey: HotKey, action: @escaping () -> Void) throws -> () -> Void {
+        guard !secureInput() else { throw PluginError.invalid("安全输入期间无法注册临时快捷键。") }
+        let identifier = try registerBinding(hotKey, exclusive: true, onRelease: nil, skipsSecureInput: true, action: action)
+        return { [weak self] in
+            guard let self, self.callbacks.removeValue(forKey: identifier) != nil else { return }
+            _ = self.presses.transition(identifier, pressed: false)
+            self.skippedSecurePresses.remove(identifier)
+            self.resources.unregister(identifier)
+        }
+    }
+
+    private func registerBinding(_ hotKey: HotKey, exclusive: Bool, onRelease: (() -> Void)?, skipsSecureInput: Bool,
+                                 action: @escaping () -> Void) throws -> UInt32 {
         try hotKey.validate()
+        guard !hotKey.isStandaloneModifier else { throw PluginError.invalid("独立修饰键需使用专用通道。") }
+        guard let code = hotKey.keyCode else { throw PluginError.invalid("鼠标侧键不能注册为键盘按键。") }
         guard setupStatus == noErr else { throw PluginError.invalid("无法监听快捷键（\(setupStatus)）。") }
         nextIdentifier &+= 1
         if nextIdentifier == 0 { nextIdentifier = 1 }
         let identifier = nextIdentifier
-        let options: OptionBits = exclusive ? OptionBits(kEventHotKeyExclusive) : 0
+        let callback = Callbacks(press: action, release: onRelease, skipsSecureInput: skipsSecureInput)
+        if let driver {
+            let stop = try driver.register(hotKey, exclusive) { [weak self] pressed in self?.dispatch(identifier, pressed: pressed) }
+            resources.driverStops[identifier] = stop
+            callbacks[identifier] = callback
+            return identifier
+        }
         var reference: EventHotKeyRef?
-        let status = RegisterEventHotKey(hotKey.keyCode, hotKey.modifiers,
+        let status = RegisterEventHotKey(code, hotKey.modifiers,
                                         EventHotKeyID(signature: 0x554E544C, id: identifier),
-                                        GetApplicationEventTarget(), options, &reference)
+                                        GetApplicationEventTarget(), exclusive ? OptionBits(kEventHotKeyExclusive) : 0, &reference)
         guard status == noErr, let reference else {
             throw PluginError.invalid("\(hotKey.display) 无法注册，可能已被系统或其他应用占用（\(status)）。")
         }
-        resources.references.append(reference)
-        callbacks[identifier] = Callbacks(press: action, release: onRelease)
+        resources.references[identifier] = reference
+        callbacks[identifier] = callback
+        return identifier
     }
 
     deinit {
@@ -88,13 +137,22 @@ final class HotKeyManager: HotKeyRegistering {
     // Carbon 句柄仅在主线程使用；Sendable 包装用于将析构清理移交回主线程。
     private final class CarbonResources: @unchecked Sendable {
         var eventHandler: EventHandlerRef?
-        var references: [EventHotKeyRef] = []
+        var references: [UInt32: EventHotKeyRef] = [:]
+        var driverStops: [UInt32: @MainActor @Sendable () -> Void] = [:]
         @MainActor weak var owner: HotKeyManager?
 
+        @MainActor func unregister(_ identifier: UInt32) {
+            if let reference = references.removeValue(forKey: identifier) { UnregisterEventHotKey(reference) }
+            driverStops.removeValue(forKey: identifier)?()
+        }
+
+        @MainActor func clearRegistrations() {
+            references.values.forEach { UnregisterEventHotKey($0) }; references.removeAll()
+            let stops = driverStops; driverStops.removeAll(); stops.values.forEach { $0() }
+        }
         @MainActor func invalidate() {
             owner = nil
-            references.forEach { UnregisterEventHotKey($0) }
-            references.removeAll()
+            clearRegistrations()
             if let eventHandler { RemoveEventHandler(eventHandler) }
             eventHandler = nil
         }

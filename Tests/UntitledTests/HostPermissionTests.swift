@@ -1,7 +1,13 @@
 import Foundation
+@preconcurrency import ScreenCaptureKit
 import Testing
 
-@testable import Untitled
+import UntitledPluginSDK
+@testable import UntitledHost
+@testable import UntitledPluginCapture
+@testable import UntitledPluginSharing
+@testable import UntitledPluginSpeech
+@testable import UntitledComposition
 
 @Suite(.serialized) struct HostPermissionTests {
     @Test @MainActor func statusChecksAndPluginRequestsNeverPromptTheOS() throws {
@@ -34,6 +40,24 @@ import Testing
         #expect(throws: PluginError.self) { try center.require([unknown], for: plugin) }
         #expect(center.pendingRequest == nil)
         #expect(system.requests.isEmpty)
+    }
+
+    @Test @MainActor func optionalInsertionAccessIsLiveScopedAndNeverPresentsSettings() throws {
+        let system = FakeSystem(), center = system.center()
+        var plugin = try screenshot(), presentations = 0
+        center.presentManagement = { presentations += 1 }
+        plugin.manifest.permissions = [.init(id: .accessibility, reason: "测试", optional: true)]
+        #expect(!center.isAuthorized(.accessibility, for: plugin))
+        system.states[.accessibility] = .authorized
+        #expect(center.isAuthorized(.accessibility, for: plugin))
+        plugin.isEnabled = false
+        #expect(!center.isAuthorized(.accessibility, for: plugin))
+        plugin.isEnabled = true; plugin.manifest.permissions = []
+        #expect(!center.isAuthorized(.accessibility, for: plugin))
+        plugin.manifest.permissions = [.init(id: .accessibility, reason: "测试", optional: true)]
+        system.states[.accessibility] = .denied
+        #expect(!center.isAuthorized(.accessibility, for: plugin))
+        #expect(center.pendingRequest == nil && presentations == 0 && system.requests.isEmpty && system.settingsOpened.isEmpty)
     }
 
     @Test @MainActor func grantsAndRevocationsAreAlwaysReadFromTheSystem() async throws {
@@ -92,8 +116,7 @@ import Testing
         let plugin = try screenshot()
         try store.installManifest(plugin.manifest)
         #expect(system.requests.isEmpty)
-        let command = PluginCommand(action: .captureRegion)
-        try store.saveCommand(command, pluginID: plugin.id)
+        let command = try #require(store.installed.first(where: { $0.id == plugin.id })?.commands.first { $0.action == .captureRegion })
         await store.execute(command, pluginID: plugin.id)
         #expect(presentations == 1)
         #expect(store.errorMessage == nil)
@@ -104,6 +127,29 @@ import Testing
         #expect(throws: PluginError.self) { try store.permissionClient(for: plugin.id).require([.screenRecording]) }
     }
 
+    @Test @MainActor func repeatedCaptureIsIgnoredBeforeHostPermissionManagement() async throws {
+        let directory=FileManager.default.temporaryDirectory.appendingPathComponent("CaptureHostAdmission-"+UUID().uuidString)
+        let system=FakeSystem(),center=system.center()
+        var continuation:CheckedContinuation<SCShareableContent,any Error>?
+        let controller=ScreenshotController(directory:directory.appendingPathComponent("Images"),service:CaptureService {
+            try await withCheckedThrowingContinuation { continuation=$0 }
+        })
+        let store=PluginStore(directory:directory.appendingPathComponent("Plugins"),permissions:center,captureFactory:{ _ in controller })
+        defer { continuation?.resume(throwing:CancellationError());controller.deactivate();try? FileManager.default.removeItem(at:directory) }
+        let plugin=try screenshot();try store.installManifest(plugin.manifest)
+        _=store.screenshots
+        let first=Task { try await controller.perform(.captureRegion,permissions:PluginPermissionClient { _ in }) }
+        for _ in 0..<100 { if continuation != nil { break };try await Task.sleep(for:.milliseconds(5)) }
+        #expect(controller.busy && continuation != nil)
+        try await store.performScreenshot(.captureRegion,pluginID:plugin.id)
+        try await store.performScreenshot(.captureRecording,pluginID:plugin.id)
+        #expect(center.pendingRequest == nil && system.requests.isEmpty && store.errorMessage == nil)
+        let pending=continuation;continuation=nil;pending?.resume(throwing:CancellationError())
+        _=await first.result
+        do { try await store.performScreenshot(.captureRegion,pluginID:plugin.id);Issue.record("A new nonbusy capture must still check authorization") }
+        catch is HostPermissionError {}
+        #expect(center.pendingRequest?.permissions == [.screenRecording] && system.requests.isEmpty)
+    }
     @Test @MainActor func onlyEnabledRecordingOptionsRequireOptionalPermissions() {
         let name = "com.untitled.tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
@@ -123,7 +169,7 @@ import Testing
                 .screenRecording
             ])
         #expect(CapturePermissionRequirements.permissions(for: .captureHistory, recordingOptions: defaults).isEmpty)
-        #expect(CapturePermissionRequirements.permissions(for: .pinClipboard, recordingOptions: defaults).isEmpty)
+        #expect(CapturePermissionRequirements.permissions(for: .pinSelection, recordingOptions: defaults).isEmpty)
     }
 
     @Test @MainActor func oldPluginDeclarationsAreAdaptedAndExplicitEmptyListsAreRespected() throws {
