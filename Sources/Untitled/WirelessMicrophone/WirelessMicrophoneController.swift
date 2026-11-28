@@ -6,11 +6,12 @@ import Foundation
     static let pluginID = "com.untitled.wireless-microphone"
 
     enum Connection: Equatable {
-        case idle, discovering, choosing, connecting(String), connected(String)
+        case idle, discovering, choosing, pairing(String), connecting(String), connected(String)
     }
 
     @Published private(set) var connection: Connection = .idle
     @Published private(set) var devices: [XiaomiVoiceRemote] = []
+    @Published private(set) var pairingCode: XiaomiRemotePairingCode?
     @Published private(set) var issue: String?
     @Published private(set) var outputIssue: String?
     @Published private(set) var inputName: String?
@@ -49,7 +50,7 @@ import Foundation
         issue = nil
         connection = .discovering
         if lifecycle.isEmpty { observeSessionEnd() }
-        scheduleConnectionDeadline(after: .seconds(12)) { controller in
+        scheduleConnectionDeadline(after: .seconds(20)) { controller in
             controller.link.stopDiscovery()
             controller.connection = .choosing
         }
@@ -61,12 +62,32 @@ import Foundation
               let device = devices.first(where: { $0.id == id }) else { return }
         try requireBluetooth()
         issue = nil
-        connection = .connecting(device.name)
-        scheduleConnectionDeadline(after: .seconds(12)) { controller in
-            controller.stop(reason: "连接或语音协商超时。请唤醒遥控器，确认系统蓝牙已配对后重试。")
+        if device.needsPairing {
+            connection = .pairing(device.name)
+            scheduleConnectionDeadline(after: .seconds(35)) { controller in
+                controller.stop(reason: "配对超时。请让遥控器重新进入配对模式再重试。")
+            }
+        } else {
+            connectVoice(named: device.name)
         }
         do { try link.connect(id) }
         catch { stop(); throw error }
+    }
+
+    func confirmPairingCode(_ confirmed: Bool) throws {
+        guard isAllowed(), case .pairing = connection, case .compare = pairingCode else { return }
+        try requireBluetooth()
+        link.confirmPairingCode(confirmed)
+        pairingCode = nil
+        if !confirmed { stop() }
+    }
+
+    private func connectVoice(named name: String) {
+        pairingCode = nil
+        connection = .connecting(name)
+        scheduleConnectionDeadline(after: .seconds(20)) { controller in
+            controller.stop(reason: "连接或语音协商超时。请唤醒遥控器后重新查找。")
+        }
     }
 
     func stop(reason: String? = nil) {
@@ -78,6 +99,7 @@ import Foundation
         lifecycle.removeAll()
         frameBytes = nil
         devices = []
+        pairingCode = nil
         connection = .idle
         issue = reason
         outputIssue = nil
@@ -95,6 +117,18 @@ import Foundation
         switch event {
         case .devices(let devices):
             if connection == .discovering { self.devices = devices }
+        case .pairingCode(let code):
+            if case .pairing = connection { pairingCode = code }
+        case .connectingVoice:
+            if case .pairing(let name) = connection { connectVoice(named: name) }
+        case .choosePairedRemote(let devices, let message):
+            guard case .pairing = connection else { return }
+            connectionDeadline?.cancel()
+            connectionDeadline = nil
+            pairingCode = nil
+            self.devices = devices
+            issue = message
+            connection = .choosing
         case .subscribed:
             guard case .connecting = connection else { return }
             do { try link.send(XiaomiRemoteVoice.getCapabilities) }

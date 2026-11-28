@@ -89,6 +89,63 @@ import Testing
         #expect(fixture.link.stops == 1)
     }
 
+    @Test @MainActor func firstPairingWaitsForTheUserAndThenNegotiatesVoice() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let controller = fixture.controller
+        let link = fixture.link
+        let remote = XiaomiVoiceRemote(id: UUID(), name: "MI RC", needsPairing: true)
+
+        try controller.discover()
+        link.emit(.devices([remote]))
+        try controller.connect(remote.id)
+        #expect(controller.connection == .pairing("MI RC"))
+        #expect(link.connectedID == remote.id)
+
+        link.emit(.pairingCode(.compare(27)))
+        #expect(controller.pairingCode?.digits == "000027")
+        #expect(link.confirmations.isEmpty)
+        link.emit(.subscribed)
+        #expect(link.writes.isEmpty)
+        try controller.confirmPairingCode(true)
+        #expect(link.confirmations == [true])
+        #expect(controller.pairingCode == nil)
+        link.emit(.connectingVoice)
+        #expect(controller.connection == .connecting("MI RC"))
+        link.emit(.subscribed)
+        link.emit(.control(Fixture.capabilities))
+        #expect(controller.connection == .connected("MI RC"))
+        #expect(link.writes == [XiaomiRemoteVoice.getCapabilities])
+    }
+
+    @Test @MainActor func cancelPairingClearsTheCodeAndAmbiguousPairingLetsTheUserChoose() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let controller = fixture.controller
+        let link = fixture.link
+        let remote = XiaomiVoiceRemote(id: UUID(), name: "MI RC", needsPairing: true)
+
+        try controller.discover()
+        link.emit(.devices([remote]))
+        try controller.connect(remote.id)
+        link.emit(.pairingCode(.compare(123456)))
+        try controller.confirmPairingCode(false)
+        #expect(link.confirmations == [false])
+        #expect(controller.connection == .idle && controller.pairingCode == nil)
+        link.emit(.pairingCode(.compare(888888)))
+        #expect(controller.pairingCode == nil)
+
+        try controller.discover()
+        link.emit(.devices([remote]))
+        try controller.connect(remote.id)
+        link.emit(.choosePairedRemote([fixture.device], "Choose a remote"))
+        #expect(controller.devices == [fixture.device])
+        #expect(controller.connection == .choosing)
+        #expect(link.writes.isEmpty)
+        try controller.connect(fixture.device.id)
+        #expect(link.connectedID == fixture.device.id)
+    }
+
     @Test @MainActor func permissionGateAndPluginDisableCloseTheRemoteStream() throws {
         let fixture = try Fixture()
         defer { fixture.cleanup() }
@@ -129,7 +186,7 @@ import Testing
         try fixture.store.installManifest(fixture.manifest)
         let upgraded = try #require(fixture.store.installed.first)
         #expect(upgraded.manifest.id == "com.untitled.wireless-microphone")
-        #expect(upgraded.manifest.version == "2.0.0")
+        #expect(upgraded.manifest.version == "2.0.1")
         #expect(upgraded.commands == [command])
         #expect(upgraded.manifest.permissions?.map(\.id) == [.bluetooth])
         #expect(fixture.link.discoveries == 0)
@@ -211,10 +268,12 @@ import Testing
         var discoveries = 0
         var stops = 0
         var connectedID: UUID?
+        var confirmations: [Bool] = []
         var writes: [Data] = []
         func discover() { discoveries += 1 }
         func stopDiscovery() {}
         func connect(_ id: UUID) throws { connectedID = id }
+        func confirmPairingCode(_ confirmed: Bool) { confirmations.append(confirmed) }
         func send(_ data: Data) throws { writes.append(data) }
         func stop() { stops += 1 }
         func emit(_ event: XiaomiRemoteLinkEvent) { onEvent?(event) }

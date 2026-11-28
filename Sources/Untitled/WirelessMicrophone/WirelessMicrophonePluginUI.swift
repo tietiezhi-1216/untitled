@@ -62,8 +62,11 @@ private struct WirelessMicrophoneView: View {
                     connectionControls
                 }
                 if !connected {
-                    Text("支持小米蓝牙遥控器 2 和 2 Pro。同时长按主页键和菜单键，在系统蓝牙中配对，然后在这里查找。")
+                    Text("支持小米蓝牙遥控器 2 和 2 Pro。首次连接时，同时长按遥控器的主页键和菜单键，然后在下方选择遥控器。")
                         .font(.callout).foregroundStyle(.secondary)
+                }
+                if let code = controller.pairingCode {
+                    pairingPrompt(code)
                 }
                 if let issue = controller.issue {
                     Text(issue).font(.callout).foregroundStyle(.orange)
@@ -72,6 +75,9 @@ private struct WirelessMicrophoneView: View {
                     ForEach(controller.devices) { device in
                         HStack {
                             Label(device.name, systemImage: "av.remote").lineLimit(1)
+                            if device.needsPairing {
+                                Text("首次配对").font(.caption).foregroundStyle(.secondary)
+                            }
                             Spacer()
                             Button("连接") { attempt { try controller.connect(device.id) } }
                                 .accessibilityLabel("连接 \(device.name)")
@@ -91,10 +97,25 @@ private struct WirelessMicrophoneView: View {
             if controller.isRunning { Button("关闭") { controller.stop() } }
         case .discovering:
             Button("停止查找") { controller.stop() }
-        case .connecting:
+        case .pairing, .connecting:
             Button("取消连接") { controller.stop() }
         case .connected:
             Button("断开") { controller.stop() }
+        }
+    }
+
+    @ViewBuilder private func pairingPrompt(_ code: XiaomiRemotePairingCode) -> some View {
+        switch code {
+        case .compare:
+            VStack(alignment: .leading, spacing: 8) {
+                Text("请核对配对码 \(code.digits)。")
+                HStack {
+                    Button("配对码一致") { attempt { try controller.confirmPairingCode(true) } }
+                    Button("取消配对") { attempt { try controller.confirmPairingCode(false) } }
+                }
+            }
+        case .enterOnRemote:
+            Text("请在遥控器上输入配对码 \(code.digits)。")
         }
     }
 
@@ -139,7 +160,8 @@ private struct WirelessMicrophoneView: View {
         switch controller.connection {
         case .idle: "未连接"
         case .discovering: "正在查找遥控器"
-        case .choosing: controller.devices.isEmpty ? "未找到已配对的遥控器" : "请选择遥控器"
+        case .choosing: controller.devices.isEmpty ? "未找到附近的小米遥控器" : "请选择遥控器"
+        case .pairing(let name): "正在配对 \(name)"
         case .connecting(let name): "正在连接 \(name)"
         case .connected(let name): "已连接 \(name)"
         }
