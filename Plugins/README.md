@@ -29,6 +29,8 @@
 
 0.9.0+ 另支持 `sharePeripherals`、`switchPeripheralControl`、`stopPeripheralSharing`，由独立 `SharingPluginUIProvider` 注册 `sharing.dashboard` / `sharing.status` 组件和 `sharing.toggle` / `sharing.switch` / `sharing.stop` 命令。参阅[外设共享清单](peripheral-sharing/manifest.json)与[双机使用说明](peripheral-sharing/README.md)。原生服务按插件身份惰性创建、通过自身的宿主权限客户端检查权限；安装或启用不启动共享，禁用、卸载或退出立即释放。虚拟音频驱动独立于声明式 ZIP，安装只能由本机用户明确执行。
 
+0.13.51+ 支持原生[无线麦](wireless-microphone/README.md)。`shareWirelessMicrophone` 能力注册 `wirelessMicrophone.dashboard` 组件和 `wirelessMicrophone.toggle` 命令。无线麦使用独立配对，发送端通过插件身份检查麦克风权限，接收端由用户显式安装虚拟音频驱动。
+
 0.9.8+ 支持原生[豆包语音输入](doubao-speech-input/README.md)：`toggleDoubaoDictation`、`holdDoubaoDictation`、`cancelDoubaoDictation`，以及 `doubao.dictation` / `doubao.preferences` 组件、`doubao.toggle` / `doubao.cancel` 命令。清单使用最低宿主 0.9.8；切换与按住两种操作各自使用通用默认模板，按住动作由 Carbon 的按下 / 松开事件驱动，重绑、停用会结束未松开的动作。安装或渲染界面不录音、不联网；实际采集与实时输入通过绑定插件身份的麦克风 / 辅助功能权限客户端检查。禁用、升级、卸载和退出停止本插件的设备、连接、任务与黑白非激活浮条。ZIP 不携带动态原生代码。
 
 0.10.0 部署构建对语音实时上屏设置生产默认关闭的 readiness gate。0.10.1 的豆信 1.1.1 自测版保留 `realtimeInputVerified: false`，另提供用户明确 opt-in 的私有 `experimentalRealtimeInput` 偏好，旧 JSON 默认 false；安装 / 升级不自动开启。未 opt-in 的实时热键仍在权限 / 录音 / 联网前拒绝，显式试音仅预览仍可用。开启自测只是允许用户尝试，不代表端到端已验收，不改原绑定或增加权限；不能把 fake 输入测试或其他插件测试当作实时上屏验收。
@@ -37,7 +39,7 @@
 
 商店采用 App Store 风格：左侧提供搜索、插件商店和「我的插件」快捷入口，右侧为两列图文卡片，不另设已安装页。每张卡片上方显示图标、名称、作者和「获取 / 打开 / 更新」按钮，下方展示宣传图。点击图标、名称或宣传图打开 README 与信息详情；没有评分与下载量来源时不显示虚构数值。筛选菜单提供排序、仅未安装、刷新与 ZIP 导入，安装和打开不自动采集或申请系统权限。
 
-名称直接表达用途，完整能力、权限、兼容限制和使用步骤写入 README。内置名称为「快捷键」「语音输入」「截图」「外设共享」；插件 ID、操作 ID 与用户配置保持稳定。
+名称直接表达用途，完整能力、权限、兼容限制和使用步骤写入 README。内置名称为「快捷键」「语音输入」「截图」「外设共享」「无线麦」；插件 ID、操作 ID 与用户配置保持稳定。
 
 ```json
 "icon": {"symbol": "waveform", "tint": "#D77A36", "png": "<base64 PNG>"},
