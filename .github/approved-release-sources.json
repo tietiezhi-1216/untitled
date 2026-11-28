@@ -5,5 +5,11 @@
       "v0.13.55",
       "plugin-wireless-microphone-v2.0.1"
     ]
+  },
+  "445243519fef30e677d44e9241404edae9ffa217": {
+    "baseline": "v0.13.56",
+    "tags": [
+      "v0.13.57"
+    ]
   }
 }
