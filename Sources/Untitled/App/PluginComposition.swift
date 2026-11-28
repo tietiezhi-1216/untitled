@@ -13,7 +13,7 @@ import UntitledPluginSpeech
     static func makeUIRegistry(runtime: PluginRuntimeRegistry? = nil) -> PluginUIRegistry {
         let active = runtime ?? PluginRuntimeRegistry([
             SharingPluginRuntime(defaults: nil, isolated: true),
-            WirelessMicrophonePluginRuntime(defaults: nil, isolated: true),
+            WirelessMicrophonePluginRuntime(),
             DoubaoSpeechPluginRuntime(),
             CapturePluginRuntime(directory: nil, usesLiveHistory: false),
         ])
@@ -40,10 +40,9 @@ extension PluginStore {
                      presentations: PluginPresentationIndex = .bundled, initialCatalog: [CatalogEntry] = [],
                      dictationFactory: ((URL) -> DoubaoDictationController)? = nil,
                      captureFactory: ((URL?) -> ScreenshotController)? = nil,
-                     wirelessMicrophoneFactory: ((String, UserDefaults) -> WirelessMicrophoneController)? = nil) {
+                     wirelessMicrophoneFactory: (() -> WirelessMicrophoneController)? = nil) {
         let sharing = SharingPluginRuntime(defaults: sharingDefaults, isolated: directory != nil)
-        let wireless = WirelessMicrophonePluginRuntime(defaults: sharingDefaults, isolated: directory != nil,
-                                                        factory: wirelessMicrophoneFactory)
+        let wireless = WirelessMicrophonePluginRuntime(factory: wirelessMicrophoneFactory)
         let dictation = DoubaoSpeechPluginRuntime(factory: dictationFactory)
         let capture = CapturePluginRuntime(directory: captureDirectory,
             usesLiveHistory: directory == nil && captureDirectory == nil, usesLiveMouseRouting: directory == nil,

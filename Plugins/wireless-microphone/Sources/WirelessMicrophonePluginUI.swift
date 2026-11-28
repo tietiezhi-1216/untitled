@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 import UntitledHost
+import UntitledPluginSDK
 
 struct WirelessMicrophonePluginUIProvider: PluginUIProvider {
     let runtime: WirelessMicrophonePluginRuntime
@@ -9,125 +10,132 @@ struct WirelessMicrophonePluginUIProvider: PluginUIProvider {
     @MainActor func register(in registry: PluginUIRegistry) {
         registry.component("wirelessMicrophone.dashboard", requiredActions: [.shareWirelessMicrophone]) { context in
             AnyView(WirelessMicrophoneView(controller: runtime.controller(for: context.pluginID, in: context.store),
-                                           isEnabled: context.plugin?.isEnabled == true) { context.store.handleExecutionError($0) })
+                                          isEnabled: context.plugin?.isEnabled == true,
+                                          needsUpgrade: !Self.declaresBluetooth(context)) {
+                context.store.handleExecutionError($0)
+            })
         }
         registry.command("wirelessMicrophone.toggle", requiredActions: [.shareWirelessMicrophone], presentation: { context in
-            let running = runtime.controller(for: context.pluginID, in: context.store).isRunning
-            return .init(title: running ? "停止无线麦" : "启动无线麦", symbol: running ? "stop.circle" : "mic")
+            let active = runtime.controller(for: context.pluginID, in: context.store).isRunning
+            return .init(title: active ? "停止无线麦" : "查找小米遥控器", symbol: active ? "stop.circle" : "mic",
+                         isEnabled: Self.declaresBluetooth(context))
         }, updates: {
             runtime.controller(for: $0.pluginID, in: $0.store).objectWillChange.eraseToAnyPublisher()
         }) { context in
             try runtime.toggle(pluginID: context.pluginID, in: context.store)
         }
     }
+
+    @MainActor private static func declaresBluetooth(_ context: PluginUIContext) -> Bool {
+        context.plugin?.manifest.permissions?.contains(where: { $0.id == .bluetooth }) == true
+    }
 }
 
 private struct WirelessMicrophoneView: View {
     @ObservedObject var controller: WirelessMicrophoneController
     let isEnabled: Bool
+    let needsUpgrade: Bool
     let reportError: (Error) -> Void
-    @State private var showingPairing = false
-    @State private var manualHost = ""
     @State private var copiedInstallCommand = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                connectionSettings
-                sendSettings
-                receiveSettings
+                if needsUpgrade {
+                    Label("通过「插件商店 → 从 ZIP 安装」更新无线麦，启用小米遥控器连接。", systemImage: "arrow.down.circle")
+                        .font(.callout)
+                } else {
+                    connection
+                    voice
+                }
             }
             .padding(.bottom, 12)
             .disabled(!isEnabled)
         }
-        .sheet(isPresented: $showingPairing) {
-            WirelessMicrophonePairingView(controller: controller)
-        }
-        .onAppear { controller.refreshDevices() }
+        .onAppear { if !needsUpgrade { controller.refreshAudioDevice() } }
         .panelRegion("wirelessMicrophone.dashboard")
     }
 
-    private var connectionSettings: some View {
-        GroupBox("连接") {
+    private var connection: some View {
+        GroupBox("小米遥控器") {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Label(connectionDescription, systemImage: controller.isPaired ? "link.circle.fill" : "link")
-                        .foregroundStyle(controller.isPaired ? Color.green : .secondary)
+                    Label(connectionStatus, systemImage: connected ? "link.circle.fill" : "dot.radiowaves.left.and.right")
                         .lineLimit(1)
                     Spacer()
-                    Button("配对设备…") { showingPairing = true }
-                        .disabled(controller.isRunning)
-                    Button(controller.isRunning ? "停止" : "启动无线麦") {
-                        if controller.isRunning { controller.stop() }
-                        else { attempt { try controller.start() } }
-                    }
-                    .buttonStyle(.borderedProminent)
+                    connectionControls
                 }
-                if let issue = controller.connectionIssue {
+                if !connected {
+                    Text("支持小米蓝牙遥控器 2 和 2 Pro。首次连接时，同时长按遥控器的主页键和菜单键，然后在下方选择遥控器。")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                if let code = controller.pairingCode {
+                    pairingPrompt(code)
+                }
+                if let issue = controller.issue {
                     Text(issue).font(.callout).foregroundStyle(.orange)
                 }
-                if controller.connection == .listening {
-                    ForEach(controller.peers) { peer in
+                if controller.connection == .discovering || controller.connection == .choosing {
+                    ForEach(controller.devices) { device in
                         HStack {
-                            Label(peer.name, systemImage: "desktopcomputer").lineLimit(1)
+                            Label(device.name, systemImage: "av.remote").lineLimit(1)
+                            if device.needsPairing {
+                                Text("首次配对").font(.caption).foregroundStyle(.secondary)
+                            }
                             Spacer()
-                            Button("连接") { attempt { try controller.connect(peer.endpoint) } }
+                            Button("连接") { attempt { try controller.connect(device.id) } }
+                                .accessibilityLabel("连接 \(device.name)")
                         }
                     }
-                    HStack {
-                        TextField("另一台 Mac 的 IP 地址或主机名", text: $manualHost)
-                            .textFieldStyle(.roundedBorder)
-                        Button("连接") { attempt { try controller.connect(host: manualHost) } }
-                            .disabled(manualHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
-                } else if controller.isPaired || controller.connection == .connecting {
-                    Button(controller.isPaired ? "断开" : "取消连接") { controller.disconnect() }
                 }
             }
             .padding(.top, 4)
         }
     }
 
-    private var sendSettings: some View {
-        GroupBox("发送") {
-            VStack(alignment: .leading, spacing: 10) {
-                Toggle("允许发送本机麦克风", isOn: Binding(get: { controller.sendEnabled }, set: { controller.setSending($0) }))
-                    .toggleStyle(.switch).disabled(!controller.isPaired)
+    @ViewBuilder private var connectionControls: some View {
+        switch controller.connection {
+        case .idle, .choosing:
+            Button("查找遥控器") { attempt { try controller.discover() } }
+                .buttonStyle(.borderedProminent)
+            if controller.isRunning { Button("关闭") { controller.stop() } }
+        case .discovering:
+            Button("停止查找") { controller.stop() }
+        case .pairing, .connecting:
+            Button("取消连接") { controller.stop() }
+        case .connected:
+            Button("断开") { controller.stop() }
+        }
+    }
+
+    @ViewBuilder private func pairingPrompt(_ code: XiaomiRemotePairingCode) -> some View {
+        switch code {
+        case .compare:
+            VStack(alignment: .leading, spacing: 8) {
+                Text("请核对配对码 \(code.digits)。")
                 HStack {
-                    Picker("输入", selection: Binding(get: { controller.inputUID }, set: { controller.selectInput($0) })) {
-                        Text("默认实体麦克风").tag("")
-                        if !controller.inputUID.isEmpty, !controller.inputs.contains(where: { $0.id == controller.inputUID }) {
-                            Text("已保存的设备不可用").tag(controller.inputUID)
-                        }
-                        ForEach(controller.inputs) { device in Text(device.name).tag(device.id) }
-                    }
-                    Button("刷新设备") { controller.refreshDevices() }.fixedSize()
-                }
-                if let issue = controller.sendIssue {
-                    Text(issue).font(.callout).foregroundStyle(.orange)
-                } else if controller.sendEnabled {
-                    Text(controller.isSending ? "正在发送本机声音" : "等待对端应用使用虚拟麦克风")
-                        .font(.callout).foregroundStyle(.secondary)
+                    Button("配对码一致") { attempt { try controller.confirmPairingCode(true) } }
+                    Button("取消配对") { attempt { try controller.confirmPairingCode(false) } }
                 }
             }
-            .padding(.top, 4)
+        case .enterOnRemote:
+            Text("请在遥控器上输入配对码 \(code.digits)。")
         }
     }
 
-    private var receiveSettings: some View {
-        GroupBox("接收") {
+    private var voice: some View {
+        GroupBox("按住说话") {
             VStack(alignment: .leading, spacing: 10) {
-                Toggle("在这台 Mac 使用对端麦克风", isOn: Binding(get: { controller.receiveEnabled }, set: { controller.setReceiving($0) }))
-                    .toggleStyle(.switch).disabled(!controller.isPaired || controller.virtualInputName == nil)
-                if let name = controller.virtualInputName {
-                    Text("在会议或录音软件的输入设备中选择 \(name)。")
+                Label(controller.isTalking ? "正在接收遥控器语音" : "按住遥控器的语音键说话，松开结束。",
+                      systemImage: controller.isTalking ? "mic.fill" : "mic")
+                    .foregroundStyle(controller.isTalking ? Color.accentColor : .secondary)
+                ProgressView(value: controller.level)
+                    .accessibilityLabel("遥控器输入电平")
+                if let name = controller.inputName {
+                    Text("在录音、会议或听写软件中选择 \(name) 作为麦克风。")
                         .font(.callout).foregroundStyle(.secondary)
-                    if controller.receiveEnabled && controller.demandSent {
-                        Text(controller.isReceiving ? "正在接收对端声音" : "等待对端发送麦克风")
-                            .font(.callout).foregroundStyle(.secondary)
-                    }
                 } else {
-                    Text("要在本机接收声音，请先安装虚拟麦克风。")
+                    Text("上方电平可以直接试音。要给其他应用输入声音，请安装 Untitled 虚拟麦克风。")
                         .font(.callout).foregroundStyle(.secondary)
                     if let installer = Bundle.main.url(forResource: "install", withExtension: "sh", subdirectory: "PeripheralAudio") {
                         Button(copiedInstallCommand ? "已复制安装命令" : "复制安装命令") {
@@ -136,93 +144,34 @@ private struct WirelessMicrophoneView: View {
                             NSPasteboard.general.setString("sudo '\(path)' install", forType: .string)
                             copiedInstallCommand = true
                         }
-                        Text("在终端运行该命令，随后重启 Mac。").font(.caption).foregroundStyle(.secondary)
+                        Text("在终端执行后重启 Mac。").font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                if let issue = controller.receiveIssue {
-                    Text(issue).font(.callout).foregroundStyle(.orange)
+                if let outputIssue = controller.outputIssue {
+                    Text(outputIssue).font(.callout).foregroundStyle(.orange)
                 }
             }
             .padding(.top, 4)
         }
     }
 
-    private var connectionDescription: String {
+    private var connected: Bool {
+        if case .connected = controller.connection { return true }
+        return false
+    }
+
+    private var connectionStatus: String {
         switch controller.connection {
-        case .stopped: "未启动"
-        case .opening: "正在启动局域网发现"
-        case .listening: "尚未连接"
-        case .connecting: "正在认证对端"
-        case .paired(let name): "已连接 \(name)"
+        case .idle: "未连接"
+        case .discovering: "正在查找遥控器"
+        case .choosing: controller.devices.isEmpty ? "未找到附近的小米遥控器" : "请选择遥控器"
+        case .pairing(let name): "正在配对 \(name)"
+        case .connecting(let name): "正在连接 \(name)"
+        case .connected(let name): "已连接 \(name)"
         }
     }
 
-    private func attempt(_ operation: () throws -> Void) {
-        do { try operation() } catch { reportError(error) }
-    }
-}
-
-private struct WirelessMicrophonePairingView: View {
-    @ObservedObject var controller: WirelessMicrophoneController
-    @Environment(\.dismiss) private var dismiss
-    @State private var hasPairing = false
-    @State private var draft = ""
-    @State private var notice: String?
-    @State private var showingForgetConfirmation = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("配对设备").font(.title2.weight(.semibold))
-                Spacer()
-                Button("完成") { dismiss() }.keyboardShortcut(.defaultAction)
-            }
-            Text("在一台 Mac 生成配对码，复制后在另一台 Mac 粘贴并保存。")
-                .foregroundStyle(.secondary)
-            HStack {
-                SecureField("粘贴配对码", text: $draft).textFieldStyle(.roundedBorder)
-                Button("保存") { update { try controller.savePairingKey(draft) } }
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            HStack {
-                if hasPairing {
-                    Button("复制配对码") { copyKey() }
-                    Spacer()
-                    Button("解除配对…", role: .destructive) { showingForgetConfirmation = true }
-                } else {
-                    Button("生成配对码") { update { try controller.savePairingKey(SharingPairingKey.generate()) } }
-                }
-            }
-            if let notice { Text(notice).font(.callout).foregroundStyle(.secondary) }
-        }
-        .padding(24)
-        .frame(width: 450)
-        .onAppear { update { } }
-        .confirmationDialog("解除这台 Mac 的配对？", isPresented: $showingForgetConfirmation) {
-            Button("解除配对", role: .destructive) { update { try controller.forgetPairing() } }
-        }
-    }
-
-    private func update(_ operation: () throws -> Void) {
-        do {
-            try operation()
-            hasPairing = try controller.pairingKey() != nil
-            draft = ""
-            notice = hasPairing ? "配对码已保存在钥匙串。" : nil
-        } catch { notice = error.localizedDescription }
-    }
-
-    private func copyKey() {
-        do {
-            guard let code = try controller.pairingKey() else { return }
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            pasteboard.setString(code, forType: .string)
-            let changeCount = pasteboard.changeCount
-            notice = "已复制配对码。"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
-                if NSPasteboard.general.changeCount == changeCount { NSPasteboard.general.clearContents() }
-            }
-        } catch { notice = error.localizedDescription }
+    private func attempt(_ action: () throws -> Void) {
+        do { try action() } catch { reportError(error) }
     }
 }

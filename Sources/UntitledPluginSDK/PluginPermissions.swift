@@ -12,6 +12,7 @@ package struct HostPermissionID: RawRepresentable, Hashable, Codable, Sendable {
     package static let accessibility = Self(rawValue: "system.accessibility")
     package static let inputMonitoring = Self(rawValue: "system.inputMonitoring")
     package static let camera = Self(rawValue: "system.camera")
+    package static let bluetooth = Self(rawValue: "system.bluetooth")
     package static let microphone = Self(rawValue: "system.microphone")
     package static let notifications = Self(rawValue: "system.notifications")
 }

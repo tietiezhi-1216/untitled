@@ -2,7 +2,7 @@ import Foundation
 
 package enum HostInfo {
     package static let name = "Untitled"
-    package static let version = "0.13.54"
+    package static let version = "0.13.56"
     package static let nativeCapabilityVersion = "0.13.53"
     package static let bundleIdentifier = "com.untitled.app"
     package static let repository = URL(string: "https://github.com/tietiezhi-1216/untitled")!

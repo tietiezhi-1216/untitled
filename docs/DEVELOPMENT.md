@@ -117,7 +117,7 @@ Plugins/
 ├── global-shortcuts/    # 声明式快捷键
 ├── screenshot/          # 截图、贴图、录屏、OCR 与资源、WebP 工具
 ├── peripheral-sharing/  # 键鼠接力、音频、剪贴板、HAL 驱动
-├── wireless-microphone/ # 无线麦配对与按需音频会话
+├── wireless-microphone/ # 小米蓝牙遥控器、ATVV 和按住说话
 └── doubao-speech-input/ # 听写、浮条、定稿和历史，另有隔离的 IME 验证目标
 Tests/           # 宿主接口及内置模块回归
 Resources/       # 宿主 Info.plist、权限声明和应用图标

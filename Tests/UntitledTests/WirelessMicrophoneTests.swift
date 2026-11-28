@@ -1,6 +1,4 @@
 import Foundation
-import Network
-import Security
 import Testing
 
 import UntitledPluginSDK
@@ -9,152 +7,249 @@ import UntitledPluginSDK
 @testable import UntitledComposition
 
 @Suite(.serialized) struct WirelessMicrophoneTests {
-    @Test @MainActor func audioWaitsForConsumerAndDisableReleasesTheSession() async throws {
-        let senderAudio = TestAudio()
-        let receiverAudio = TestAudio(hasDriver: true)
-        let sender = try Fixture(audio: senderAudio)
-        let receiver = try Fixture(audio: receiverAudio)
-        defer { sender.cleanup(); receiver.cleanup() }
-
-        #expect(sender.controller.connection == .stopped)
-        #expect(sender.controller.listeningPort == nil)
-        let initialPermissionChecks = sender.permissionChecks
-        #expect(senderAudio.captureStarts == 0)
-        try await connect(sender.controller, receiver.controller)
-
-        sender.controller.setSending(true)
-        receiver.controller.setReceiving(true)
-        #expect(!receiver.controller.demandSent)
-        #expect(sender.permissionChecks == initialPermissionChecks)
-        #expect(senderAudio.captureStarts == 0)
-
-        for round in 1...10 {
-            receiverAudio.inputInUse = true
-            receiver.controller.refreshDevices()
-            try await wait { receiverAudio.outputStarts == round && receiver.controller.isReceiving }
-            #expect(receiverAudio.lastPacket == TestAudio.packet)
-            #expect(receiverAudio.receivedPackets >= round)
-            #expect(senderAudio.captureStarts == round)
-            if round < 10 {
-                receiverAudio.inputInUse = false
-                receiver.controller.refreshDevices()
-                try await wait { !sender.controller.isSending }
-                #expect(!receiver.controller.isReceiving)
-                #expect(!senderAudio.captureRunning && !receiverAudio.outputRunning)
-            }
+    @Test func recognizesSupportedRemoteNames() {
+        for name in ["MI RC", "Xiaomi Bluetooth Remote 2", "Xiaomi Bluetooth Remote 2 Pro",
+                     "Xiaomi Bluetooth Remote Control 2", " 小米蓝牙语音遥控器 "] {
+            #expect(XiaomiVoiceRemote.supportedName(name) != nil)
         }
-        sender.store.setEnabled(false, pluginID: WirelessMicrophoneController.pluginID)
-        #expect(sender.controller.connection == .stopped)
-        #expect(sender.controller.listeningPort == nil)
-        #expect(!senderAudio.captureRunning)
-        try await wait { receiver.controller.connection == .listening }
-        #expect(!receiver.controller.receiveEnabled && !receiverAudio.outputRunning)
-        #expect(senderAudio.captureStarts == senderAudio.captureStops)
-        #expect(receiverAudio.outputStarts == receiverAudio.outputStops)
-
-        sender.store.setEnabled(true, pluginID: WirelessMicrophoneController.pluginID)
-        #expect(!sender.controller.isRunning && !sender.controller.sendEnabled)
-        #expect(sender.systemPrompts == 0)
-        #expect(receiver.systemPrompts == 0)
-    }
-
-    @Test @MainActor func permissionDenialAndRevocationRequireAnotherExplicitSend() async throws {
-        let senderAudio = TestAudio()
-        let sender = try Fixture(audio: senderAudio)
-        let receiver = try Fixture(audio: TestAudio(hasDriver: true, inputInUse: true))
-        defer { sender.cleanup(); receiver.cleanup() }
-        sender.authorization = .denied
-        try await connect(sender.controller, receiver.controller)
-        receiver.controller.setReceiving(true)
-        sender.controller.setSending(true)
-
-        try await wait { sender.controller.sendIssue != nil }
-        #expect(sender.store.permissions.pendingRequest?.pluginID == WirelessMicrophoneController.pluginID)
-        #expect(sender.store.permissions.pendingRequest?.permissions == [.microphone])
-        #expect(!sender.controller.sendEnabled && senderAudio.captureStarts == 0)
-
-        sender.authorization = .authorized
-        sender.controller.setSending(true)
-        try await wait { receiver.controller.isReceiving }
-        #expect(senderAudio.captureRunning)
-        senderAudio.captureIsAvailable = false
-        try await wait { !sender.controller.isSending && !receiver.controller.isReceiving }
-        #expect(!sender.controller.sendEnabled && !senderAudio.captureRunning)
-        #expect(senderAudio.captureStarts == 1 && sender.systemPrompts == 0)
-
-        sender.controller.refreshDevices()
-        sender.controller.selectInput("fixture-input")
-        let pairing = try sender.controller.pairingKey()
-        try sender.store.installManifest(sender.manifest)
-        #expect(!sender.controller.isRunning && !sender.controller.sendEnabled)
-        #expect(sender.controller.inputUID == "fixture-input")
-        #expect(try sender.controller.pairingKey() == pairing)
-        sender.store.uninstall(WirelessMicrophoneController.pluginID)
-        #expect(sender.store.installed.isEmpty && !sender.controller.isRunning)
-    }
-
-    @Test @MainActor func audioServiceRejectsPeripheralMessagesAfterAuthentication() async throws {
-        let microphone = try Fixture(audio: TestAudio())
-        let peer = SharingTransport()
-        defer { peer.stop(); microphone.cleanup() }
-        let key = try WirelessMicrophoneController.transportKey(for: Fixture.code)
-        #expect(try key != SharingPairingKey.decode(Fixture.code))
-        try microphone.controller.start(localOnly: true)
-        try peer.start(key: key, name: "fixture-peer", localOnly: true)
-        try await wait { microphone.controller.listeningPort != nil && peer.port != nil }
-        let port = try #require(microphone.controller.listeningPort)
-        peer.connected = {
-            peer.send(.init(kind: .hello, version: 1, deviceID: UUID().uuidString, name: "Fixture Mac"))
+        for name in [nil, "Mi Box", "Xiaomi Bluetooth Remote", "MI RC (unknown clone)"] {
+            #expect(XiaomiVoiceRemote.supportedName(name) == nil)
         }
-        defer { peer.connected = {} }
-        try peer.connect(SharingManualEndpoint.parse(host: "127.0.0.1", port: String(port)))
-        try await wait { microphone.controller.isPaired }
-        peer.send(.init(kind: .layout, edge: .right))
-        try await wait { microphone.controller.connection == .listening }
-        #expect(!microphone.controller.sendEnabled && !microphone.controller.receiveEnabled)
     }
 
-    @MainActor private func connect(_ sender: WirelessMicrophoneController, _ receiver: WirelessMicrophoneController) async throws {
-        try sender.start(localOnly: true)
-        try receiver.start(localOnly: true)
-        try await wait { sender.connection == .listening && receiver.connection == .listening }
-        try sender.connect(host: "127.0.0.1", port: #require(receiver.listeningPort))
-        try await wait { sender.isPaired && receiver.isPaired }
+    @Test func negotiatesBoundedAtvvAndDecodesHighNibbleFirst() {
+        #expect(XiaomiRemoteVoice.getCapabilities == Data([0x0A, 1, 0, 0, 3, 3]))
+        #expect(XiaomiRemoteVoice.control(Fixture.capabilities) == .capabilities(frameBytes: 120))
+        #expect(XiaomiRemoteVoice.control(Data([0x0B, 1, 0, 0, 2, 0, 120, 0, 0])) == .capabilities(frameBytes: 120))
+        #expect(XiaomiRemoteVoice.control(Data([0x0B, 1, 0, 1, 3, 0, 120])) == .incompatibleCapabilities)
+        #expect(XiaomiRemoteVoice.control(Data([0x0B, 1, 0, 2, 3, 0xFF, 0xFF])) == .incompatibleCapabilities)
+        #expect(XiaomiRemoteVoice.control(Data([0x04, 3])) == nil)
+        #expect(XiaomiRemoteVoice.control(Data([0x0A, 2, 0, 0, 0, 0, 89])) == nil)
+
+        var decoder = XiaomiVoiceDecoder(frameBytes: 2)
+        #expect(decoder.append(Data([0x7F])).isEmpty)
+        let samples = decoder.append(Data([0]))
+        #expect(Array(samples.prefix(2)) == [11, -19])
+        #expect(samples.count == 4)
+        #expect(decoder.append(Data(repeating: 0, count: 513)).isEmpty)
+        _ = decoder.append(Data([0x77]))
+        decoder.synchronize(predictor: -300, step: 0)
+        #expect(decoder.append(Data([0])).isEmpty)
+        #expect(decoder.append(Data([0])) == [-300, -300, -300, -300])
+    }
+
+    @Test @MainActor func onlyThePhysicalHoldAcceptsAudioAndReleaseKeepsTheTail() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        try fixture.connect()
+        let link = fixture.link
+        let controller = fixture.controller
+        let output = fixture.output
+
+        #expect(controller.connection == .connected("Xiaomi Bluetooth Remote 2 Pro"))
+        #expect(link.writes == [XiaomiRemoteVoice.getCapabilities])
+        link.emit(.audio(Fixture.frame))
+        #expect(output.starts == 0)
+
+        link.emit(.control(Data([0x0A, 2, 0, 0, 0xFC, 0x18, 0])))
+        link.emit(.control(Fixture.hold))
+        #expect(controller.isTalking)
+        #expect(output.starts == 0)
+        link.emit(.audio(Data(Fixture.frame.prefix(40))))
+        #expect(output.samples.isEmpty)
+        link.emit(.audio(Data(Fixture.frame.dropFirst(40))))
+        #expect(output.samples == Array(repeating: -1000, count: 240))
+        #expect(controller.level > 0)
+
+        link.emit(.control(Data([0, 2])))
+        #expect(!controller.isTalking && controller.level == 0)
+        #expect(output.isRunning)
+        #expect(output.hasQueuedAudio)
+        let spoken = output.samples
+        link.emit(.audio(Fixture.frame))
+        #expect(output.samples == spoken)
+        try await wait { !output.isRunning }
+        #expect(output.starts == 1 && output.stops == 1)
+        #expect(link.writes == [XiaomiRemoteVoice.getCapabilities])
+    }
+
+    @Test @MainActor func rejectsUnnegotiatedAudioAndWorksAsAMeterWithoutTheDriver() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        fixture.output.inputName = nil
+        try fixture.connect()
+        fixture.link.emit(.control(Data([4, 1, 2, 2])))
+        fixture.link.emit(.audio(Fixture.frame))
+        #expect(!fixture.controller.isTalking && fixture.output.samples.isEmpty)
+        #expect(fixture.link.writes.last == XiaomiRemoteVoice.close(stream: 2))
+
+        fixture.link.emit(.control(Fixture.hold))
+        fixture.link.emit(.audio(Data(repeating: 0x77, count: 120)))
+        #expect(fixture.controller.isTalking && fixture.controller.level > 0)
+        #expect(fixture.controller.inputName == nil && fixture.output.starts == 0)
+        fixture.link.emit(.failed("Transport disconnected"))
+        #expect(fixture.controller.connection == .idle && !fixture.controller.isTalking)
+        #expect(fixture.link.stops == 1)
+    }
+
+    @Test @MainActor func firstPairingWaitsForTheUserAndThenNegotiatesVoice() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let controller = fixture.controller
+        let link = fixture.link
+        let remote = XiaomiVoiceRemote(id: UUID(), name: "MI RC", needsPairing: true)
+
+        try controller.discover()
+        link.emit(.devices([remote]))
+        try controller.connect(remote.id)
+        #expect(controller.connection == .pairing("MI RC"))
+        #expect(link.connectedID == remote.id)
+
+        link.emit(.pairingCode(.compare(27)))
+        #expect(controller.pairingCode?.digits == "000027")
+        #expect(link.confirmations.isEmpty)
+        link.emit(.subscribed)
+        #expect(link.writes.isEmpty)
+        try controller.confirmPairingCode(true)
+        #expect(link.confirmations == [true])
+        #expect(controller.pairingCode == nil)
+        link.emit(.connectingVoice)
+        #expect(controller.connection == .connecting("MI RC"))
+        link.emit(.subscribed)
+        link.emit(.control(Fixture.capabilities))
+        #expect(controller.connection == .connected("MI RC"))
+        #expect(link.writes == [XiaomiRemoteVoice.getCapabilities])
+    }
+
+    @Test @MainActor func cancelPairingClearsTheCodeAndAmbiguousPairingLetsTheUserChoose() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        let controller = fixture.controller
+        let link = fixture.link
+        let remote = XiaomiVoiceRemote(id: UUID(), name: "MI RC", needsPairing: true)
+
+        try controller.discover()
+        link.emit(.devices([remote]))
+        try controller.connect(remote.id)
+        link.emit(.pairingCode(.compare(123456)))
+        try controller.confirmPairingCode(false)
+        #expect(link.confirmations == [false])
+        #expect(controller.connection == .idle && controller.pairingCode == nil)
+        link.emit(.pairingCode(.compare(888888)))
+        #expect(controller.pairingCode == nil)
+
+        try controller.discover()
+        link.emit(.devices([remote]))
+        try controller.connect(remote.id)
+        link.emit(.choosePairedRemote([fixture.device], "Choose a remote"))
+        #expect(controller.devices == [fixture.device])
+        #expect(controller.connection == .choosing)
+        #expect(link.writes.isEmpty)
+        try controller.connect(fixture.device.id)
+        #expect(link.connectedID == fixture.device.id)
+    }
+
+    @Test @MainActor func permissionGateAndPluginDisableCloseTheRemoteStream() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanup() }
+        fixture.driver.state = .denied
+        #expect(throws: HostPermissionError.self) {
+            try fixture.toggle()
+        }
+        #expect(fixture.link.discoveries == 0)
+        #expect(fixture.store.permissions.pendingRequest?.permissions == [.bluetooth])
+        #expect(fixture.store.permissions.pendingRequest?.pluginID == fixture.manifest.id)
+        fixture.driver.state = .authorized
+        try fixture.connect()
+        fixture.link.emit(.control(Fixture.hold))
+        fixture.link.emit(.audio(Fixture.frame))
+        #expect(fixture.output.isRunning)
+
+        fixture.store.setEnabled(false, pluginID: fixture.manifest.id)
+        #expect(fixture.controller.connection == .idle)
+        #expect(!fixture.output.isRunning)
+        #expect(fixture.link.writes.last == XiaomiRemoteVoice.close(stream: 1))
+        fixture.link.emit(.control(Fixture.hold))
+        fixture.link.emit(.audio(Fixture.frame))
+        #expect(fixture.output.starts == 1)
+        #expect(fixture.link.stops == 1)
+        fixture.store.setEnabled(true, pluginID: fixture.manifest.id)
+        #expect(fixture.link.discoveries == 1)
+    }
+
+    @Test @MainActor func upgradeKeepsTheIdentityAndRequiresNewBluetoothDeclaration() throws {
+        let fixture = try Fixture(installLegacy: true)
+        defer { fixture.cleanup() }
+        #expect(fixture.store.installed.first?.manifest.version == "1.0.0")
+        #expect(throws: PluginError.self) { try fixture.controller.discover() }
+        #expect(fixture.link.discoveries == 0)
+        let command = PluginCommand(action: .shareWirelessMicrophone)
+        try fixture.store.saveCommand(command, pluginID: fixture.manifest.id)
+
+        try fixture.store.installManifest(fixture.manifest)
+        let upgraded = try #require(fixture.store.installed.first)
+        #expect(upgraded.manifest.id == "com.untitled.wireless-microphone")
+        #expect(upgraded.manifest.version == "2.0.1")
+        #expect(upgraded.commands == [command])
+        #expect(upgraded.manifest.permissions?.map(\.id) == [.bluetooth])
+        #expect(fixture.link.discoveries == 0)
+        try fixture.connect()
+        fixture.store.uninstall(fixture.manifest.id)
+        #expect(fixture.store.installed.isEmpty && fixture.controller.connection == .idle)
     }
 
     @MainActor private func wait(_ condition: () -> Bool, sourceLocation: SourceLocation = #_sourceLocation) async throws {
-        let end = ContinuousClock.now + .seconds(4)
-        while !condition() && ContinuousClock.now < end {
-            try await Task.sleep(for: .milliseconds(15))
+        let deadline = ContinuousClock.now + .seconds(1)
+        while !condition(), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
         }
-        try #require(condition(), "Wireless microphone state did not settle", sourceLocation: sourceLocation)
+        try #require(condition(), sourceLocation: sourceLocation)
     }
 
     @MainActor private final class Fixture {
-        static let code = String(repeating: "36", count: 32)
+        nonisolated static let capabilities = Data([0x0B, 1, 0, 2, 3, 0, 120, 0, 0])
+        nonisolated static let hold = Data([4, 3, 2, 1])
+        nonisolated static let frame = Data(repeating: 0, count: 120)
+
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let device = XiaomiVoiceRemote(id: UUID(), name: "Xiaomi Bluetooth Remote 2 Pro")
         let manifest: PluginManifest
+        let link = TestLink()
+        let output = TestAudio()
+        let driver = TestPermissions()
         let store: PluginStore
         let controller: WirelessMicrophoneController
-        let permissions = TestPermissions()
-        var authorization: HostPermissionStatus {
-            get { permissions.authorization }
-            set { permissions.authorization = newValue }
-        }
-        var permissionChecks: Int { permissions.checks }
-        var systemPrompts: Int { permissions.prompts }
+        let runtime: WirelessMicrophonePluginRuntime
 
-        init(audio: TestAudio) throws {
-            manifest = try JSONDecoder().decode(PluginManifest.self, from: Data(contentsOf:
-                URL(fileURLWithPath: "Plugins/wireless-microphone/manifest.json")))
-            let secret = TestSecret()
-            store = PluginStore(directory: directory, permissions: permissions.center(), wirelessMicrophoneFactory: { pluginID, defaults in
-                WirelessMicrophoneController(pluginID: pluginID, defaults: defaults, audio: audio, credentials: secret.backend)
+        init(installLegacy: Bool = false) throws {
+            let data = try Data(contentsOf: URL(fileURLWithPath: "Plugins/wireless-microphone/manifest.json"))
+            manifest = try JSONDecoder().decode(PluginManifest.self, from: data)
+            let link = self.link, output = self.output
+            store = PluginStore(directory: directory, permissions: driver.center(), wirelessMicrophoneFactory: {
+                WirelessMicrophoneController(link: link, output: output)
             })
-            try store.installManifest(manifest)
-            let runtime = try #require(store.runtime.owner(of: .shareWirelessMicrophone) as? WirelessMicrophonePluginRuntime)
+            if installLegacy {
+                var old = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                old["version"] = "1.0.0"
+                old["minimumHostVersion"] = "0.13.51"
+                old["permissions"] = [["id": "system.microphone", "reason": "Legacy microphone"]]
+                try store.installManifest(JSONDecoder().decode(PluginManifest.self, from: JSONSerialization.data(withJSONObject: old)))
+            } else {
+                try store.installManifest(manifest)
+            }
+            runtime = try #require(store.runtime.owner(of: .shareWirelessMicrophone) as? WirelessMicrophonePluginRuntime)
             controller = runtime.controller(for: manifest.id, in: store)
-            try controller.savePairingKey(Self.code)
+        }
+
+        func toggle() throws { try runtime.toggle(pluginID: manifest.id, in: store) }
+
+        func connect() throws {
+            try toggle()
+            link.emit(.devices([device]))
+            try controller.connect(device.id)
+            #expect(link.connectedID == device.id)
+            link.emit(.subscribed)
+            link.emit(.control(Self.capabilities))
         }
 
         func cleanup() {
@@ -164,59 +259,46 @@ import UntitledPluginSDK
     }
 
     @MainActor private final class TestPermissions {
-        var authorization: HostPermissionStatus = .authorized
-        var checks = 0
-        var prompts = 0
-
+        var state: HostPermissionStatus = .authorized
         func center() -> HostPermissionCenter {
             HostPermissionCenter(drivers: [
-                .init(descriptor: .init(id: .microphone, title: "Fixture microphone", summary: "", symbol: "mic"),
-                      status: { [self] in checks += 1; return authorization },
-                      request: { [self] in prompts += 1 }, openSettings: {})
+                .init(descriptor: .init(id: .bluetooth, title: "Bluetooth", summary: "", symbol: "link"),
+                      status: { [self] in state }, request: {}, openSettings: {}),
+                .init(descriptor: .init(id: .microphone, title: "Microphone", summary: "", symbol: "mic"),
+                      status: { .authorized }, request: {}, openSettings: {}),
             ])
         }
     }
 
-    private final class TestSecret {
-        var value: Data?
-        var backend: CredentialBackend {
-            .init(read: { [self] _, _ in (value == nil ? errSecItemNotFound : errSecSuccess, value) },
-                  update: { [self] _, _, data in value = data; return errSecSuccess },
-                  add: { _, _, _ in errSecDuplicateItem },
-                  delete: { [self] _, _ in value = nil; return errSecSuccess })
-        }
+    @MainActor private final class TestLink: XiaomiRemoteLink {
+        var onEvent: ((XiaomiRemoteLinkEvent) -> Void)?
+        var discoveries = 0
+        var stops = 0
+        var connectedID: UUID?
+        var confirmations: [Bool] = []
+        var writes: [Data] = []
+        func discover() { discoveries += 1 }
+        func stopDiscovery() {}
+        func connect(_ id: UUID) throws { connectedID = id }
+        func confirmPairingCode(_ confirmed: Bool) { confirmations.append(confirmed) }
+        func send(_ data: Data) throws { writes.append(data) }
+        func stop() { stops += 1 }
+        func emit(_ event: XiaomiRemoteLinkEvent) { onEvent?(event) }
     }
 
     @MainActor private final class TestAudio: WirelessMicrophoneAudio {
-        static let packet = [Float](repeating: 0.125, count: 960).withUnsafeBytes { Data($0) }
-        let hasDriver: Bool
-        var inputInUse: Bool
-        var captureIsAvailable = true
-        var captureRunning = false
-        var outputRunning = false
-        var captureStarts = 0
-        var captureStops = 0
-        var outputStarts = 0
-        var outputStops = 0
-        var receivedPackets = 0
-        var lastPacket: Data?
-
-        init(hasDriver: Bool = false, inputInUse: Bool = false) {
-            self.hasDriver = hasDriver
-            self.inputInUse = inputInUse
+        var inputName: String? = "Fixture Virtual Microphone"
+        var isRunning = false
+        var hasQueuedAudio = false
+        var starts = 0
+        var stops = 0
+        var samples: [Int16] = []
+        func start() throws { starts += 1; isRunning = true }
+        func append(_ samples: [Int16]) throws { self.samples += samples; hasQueuedAudio = true }
+        func stop() {
+            if isRunning { stops += 1 }
+            isRunning = false
+            hasQueuedAudio = false
         }
-
-        func listInputs() -> [SharingAudioDevice] { [.init(id: "fixture-input", name: "Fixture Input", objectID: 1)] }
-        func virtualInput() -> WirelessMicrophoneVirtualInput? {
-            hasDriver ? .init(name: "Fixture Virtual Input", isInUse: inputInUse) : nil
-        }
-        var captureIsHealthy: Bool { captureRunning && captureIsAvailable }
-        func startCapture(uid: String) throws { captureStarts += 1; captureRunning = true }
-        func drainCapture() -> [Data] { captureRunning ? [Self.packet] : [] }
-        func stopCapture() { captureStops += 1; captureRunning = false }
-        var outputIsHealthy: Bool { outputRunning }
-        func startOutput() throws { outputStarts += 1; outputRunning = true }
-        func appendOutput(_ data: Data) { receivedPackets += 1; lastPacket = data }
-        func stopOutput() { outputStops += 1; outputRunning = false }
     }
 }

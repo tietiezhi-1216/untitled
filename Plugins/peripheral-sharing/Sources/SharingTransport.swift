@@ -24,8 +24,6 @@ import Security
     var diagnostics: (String) -> Void = { _ in }
     var tlsHandshakeFailed: (OSStatus) -> Void = { _ in }
     var failed: (String) -> Void = { _ in }
-    private let bonjourServiceType: String
-    private let servicePort: UInt16
     private var listener: NWListener?
     private var browser: NWBrowser?
     private var candidates: [UUID: NWConnection] = [:]
@@ -92,11 +90,6 @@ import Security
     func offerClipboardImage(_ png: Data, revision: UInt64) { clipboardImages?.offer(png, revision: revision) }
     func discardPendingClipboardImage() { clipboardImages?.discardPending() }
 
-    init(serviceType: String = SharingTransport.serviceType, servicePort: UInt16 = SharingTransport.defaultPort) {
-        bonjourServiceType = serviceType
-        self.servicePort = servicePort
-    }
-
     static func parameters(key: Data) -> NWParameters {
         let tls = NWProtocolTLS.Options()
         // Network.framework's external PSK suite is TLS 1.2 (Apple's peer-to-peer pattern).
@@ -128,8 +121,8 @@ import Security
         self.pairingKey = key; self.localOnly = localOnly
         let generation = self.generation
         guard listenPort == nil || (localOnly && listenPort != 0) else { throw PluginError.invalid("自定义监听端口仅供本机回环验证。") }
-        let listener = try NWListener(using: parameters, on: localOnly ? (listenPort.flatMap(NWEndpoint.Port.init(rawValue:)) ?? .any) : NWEndpoint.Port(rawValue: servicePort)!)
-        if !localOnly { listener.service = NWListener.Service(name: name, type: bonjourServiceType) }
+        let listener = try NWListener(using: parameters, on: localOnly ? (listenPort.flatMap(NWEndpoint.Port.init(rawValue:)) ?? .any) : NWEndpoint.Port(rawValue: Self.defaultPort)!)
+        if !localOnly { listener.service = NWListener.Service(name: name, type: Self.serviceType) }
         listener.newConnectionHandler = { [weak self] connection in
             MainActor.assumeIsolated {
                 guard let self, self.generation == generation else { connection.cancel(); return }
@@ -158,7 +151,7 @@ import Security
         self.listener = listener
         listener.start(queue: .main)
         if localOnly { return } // Loopback transport tests never browse the user's network.
-        let browser = NWBrowser(for: .bonjour(type: bonjourServiceType, domain: nil), using: parameters)
+        let browser = NWBrowser(for: .bonjour(type: Self.serviceType, domain: nil), using: parameters)
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             MainActor.assumeIsolated {
                 guard let self, self.generation == generation else { return }

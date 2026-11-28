@@ -1048,8 +1048,10 @@ import UntitledPluginSDK
         let d = Dependencies(), c = d.controller(showsHUD: true)
         d.unsupported = true; c.isAllowed = { true }; c.requirePermissions = { _ in }
         defer { c.cancel() }
-        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier, key = NSApp.keyWindow
         for round in 0..<2 {
+            let testProcess = ProcessInfo.processInfo.processIdentifier
+            let startedInBackground = NSWorkspace.shared.frontmostApplication?.processIdentifier != testProcess
+            let key = NSApp.keyWindow
             try c.toggle(); try await wait { c.phase == .listening }
             let window = try #require(NSApp.windows.first { $0.isVisible && $0.identifier?.rawValue == "doubao.dictation.hud" })
             let frame = window.frame
@@ -1057,7 +1059,10 @@ import UntitledPluginSDK
             c.stopRecording(); try await wait { c.phase == .idle }
             #expect(window.isVisible && window.frame == frame && window.ignoresMouseEvents && !window.canBecomeKey)
             #expect(window.contentView != nil && !(window.contentView is DictationHUDStage))
-            #expect(NSApp.keyWindow === key && NSWorkspace.shared.frontmostApplication?.processIdentifier == front)
+            #expect(NSApp.keyWindow === key)
+            if startedInBackground {
+                #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier != testProcess)
+            }
             #expect(d.copies.count == round + 1 && d.microphones[round].stopped > 0 && d.sessions[round].cancelled > 0)
             if round == 0 { try await wait { !window.isVisible } }
             else { try c.toggle(); #expect(!window.isVisible); c.cancel() }

@@ -9,32 +9,16 @@ extension ActionKind {
 @MainActor package final class WirelessMicrophonePluginRuntime: NativePluginRuntime {
     package let actions: Set<ActionKind> = [.shareWirelessMicrophone]
     package var actionPresentation: [ActionKind: PluginActionPresentation] {
-        [.shareWirelessMicrophone: .init(title: "启动或停止无线麦", symbol: "mic",
-          detail: "启动或停止无线麦连接", bindingHelp: "发送和接收需要在无线麦面板开启。", minimumHostVersion: "0.13.51")]
+        [.shareWirelessMicrophone: .init(title: "查找或断开小米遥控器", symbol: "mic",
+          detail: "查找或断开小米遥控器", bindingHelp: "在无线麦中查找小米蓝牙遥控器，或断开现有连接。",
+          minimumHostVersion: "0.13.51")]
     }
 
-    private let defaults: UserDefaults
-    private let ownedDomain: String?
-    private let factory: (String, UserDefaults) -> WirelessMicrophoneController
+    private let factory: () -> WirelessMicrophoneController
     private var controllers: [String: WirelessMicrophoneController] = [:]
 
-    package init(defaults: UserDefaults?, isolated: Bool, factory: ((String, UserDefaults) -> WirelessMicrophoneController)? = nil) {
-        if let defaults {
-            self.defaults = defaults
-            ownedDomain = nil
-        } else if isolated {
-            let domain = HostInfo.bundleIdentifier + ".wireless-microphone.isolated." + UUID().uuidString
-            self.defaults = UserDefaults(suiteName: domain)!
-            ownedDomain = domain
-        } else {
-            self.defaults = .standard
-            ownedDomain = nil
-        }
-        self.factory = factory ?? { WirelessMicrophoneController(pluginID: $0, defaults: $1) }
-    }
-
-    deinit {
-        if let ownedDomain { UserDefaults.standard.removePersistentDomain(forName: ownedDomain) }
+    package init(factory: (() -> WirelessMicrophoneController)? = nil) {
+        self.factory = factory ?? { WirelessMicrophoneController() }
     }
 
     package func registerUI(in registry: PluginUIRegistry) {
@@ -43,11 +27,11 @@ extension ActionKind {
 
     func controller(for pluginID: String, in host: PluginStore) -> WirelessMicrophoneController {
         if let controller = controllers[pluginID] { return controller }
-        let controller = factory(pluginID, defaults)
+        let controller = factory()
         controller.isAllowed = { [weak host] in host?.enabledPlugin(pluginID, allowing: .shareWirelessMicrophone) != nil }
-        controller.requireMicrophone = { [weak host] in
+        controller.requireBluetooth = { [weak host] in
             guard let host else { throw PluginError.invalid("宿主已关闭。") }
-            try host.permissionClient(for: pluginID).require([.microphone])
+            try host.permissionClient(for: pluginID).require([.bluetooth])
         }
         controllers[pluginID] = controller
         return controller
@@ -59,7 +43,7 @@ extension ActionKind {
         }
         let controller = controller(for: pluginID, in: host)
         if controller.isRunning { controller.stop() }
-        else { try controller.start() }
+        else { try controller.discover() }
     }
 
     package func perform(_ command: PluginCommand, for pluginID: String, in host: PluginStore) async throws {
