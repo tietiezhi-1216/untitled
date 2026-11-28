@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import Combine
 import Foundation
 import Testing
 import UntitledPluginSDK
@@ -466,11 +467,18 @@ import UntitledPluginSDK
         try await wait { c.phase == .listening }
         let s = d.sessions[0]; s.onTranscript?("草稿"); s.finishUpdates = ["收尾草稿"]
         #expect(d.targetCaptures == 0 && d.copies.isEmpty && d.microphones[0].started == 1)
+        var observedClosingDraft = false
+        let observation = c.$captionSlice.sink { caption in
+            if caption.summary == "收尾草稿" {
+                observedClosingDraft = true
+                #expect(d.targetCaptures == 0 && d.copies.isEmpty)
+            }
+        }
+        defer { observation.cancel() }
         if hold { c.holdReleased(key) } else { try c.toggle() }
-        try await wait { c.bubblePreview == "收尾草稿" }
-        #expect(d.targetCaptures == 0 && d.copies.isEmpty)
         c.stopRecording()
         try await wait { c.phase == .idle && c.history.entries.count == 1 }
+        #expect(observedClosingDraft)
         #expect(s.finished == 1 && d.targetCaptures == 1 && d.target.finalCalls == 0 && d.copies == [s.finalText])
     }
 
